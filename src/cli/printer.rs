@@ -76,8 +76,11 @@ impl CliEventPrinter {
             AgentEvent::PlanGenerated { plan, .. } => {
                 self.finish();
                 println!("[Plan Generated] id={}", plan.id);
-                for (i, step) in plan.steps.iter().enumerate() {
-                    println!("  {}. {}", i + 1, step.description);
+                for phase in &plan.phases {
+                    println!("  Phase: {}", phase.title);
+                    for (i, step) in phase.steps.iter().enumerate() {
+                        println!("    {}. {}", i + 1, step.description);
+                    }
                 }
             }
             AgentEvent::PlanStepStarted {

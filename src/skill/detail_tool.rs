@@ -3,7 +3,6 @@ use std::sync::Arc;
 use agent_base::{AgentEvent, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing;
 
 use super::Skill;
 

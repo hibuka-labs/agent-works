@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_base::{AgentResult, ToolRegistry, AgentError};
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{info, warn, error};
 
 use super::client::{McpClient, McpToolAdapter};
-use super::types::{McpServerConfig, McpToolInfo, McpTransport};
+use super::types::{McpServerConfig, McpToolInfo};
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -27,6 +29,7 @@ struct ServerEntry {
     state: RwLock<ConnectionState>,
     last_health_check: RwLock<Option<Instant>>,
     reconnect_attempts: RwLock<u32>,
+    round_robin_idx: AtomicUsize,
 }
 
 impl ServerEntry {
@@ -34,11 +37,12 @@ impl ServerEntry {
         Self {
             config,
             clients: RwLock::new(Vec::new()),
-            max_connections: 5, // 默认最大连接数
+            max_connections: 5,
             tools: RwLock::new(Vec::new()),
             state: RwLock::new(ConnectionState::Disconnected),
             last_health_check: RwLock::new(None),
             reconnect_attempts: RwLock::new(0),
+            round_robin_idx: AtomicUsize::new(0),
         }
     }
 
@@ -52,9 +56,9 @@ impl ServerEntry {
         if clients.is_empty() {
             return None;
         }
-
-        // 返回第一个可用客户端，实际实现中可以使用更复杂的负载均衡策略
-        clients.first().cloned()
+        // Round-robin selection across pooled connections
+        let idx = self.round_robin_idx.fetch_add(1, Ordering::Relaxed) % clients.len();
+        clients.get(idx).cloned()
     }
 
     async fn add_client(&self) -> AgentResult<()> {
@@ -71,13 +75,6 @@ impl ServerEntry {
         *state = ConnectionState::Connected;
 
         Ok(())
-    }
-
-    async fn remove_client(&self, index: usize) {
-        let mut clients = self.clients.write().await;
-        if index < clients.len() {
-            clients.remove(index);
-        }
     }
 
     async fn reconnect(&self) -> AgentResult<()> {
@@ -141,13 +138,17 @@ impl ServerEntry {
 pub struct EnhancedMcpHub {
     servers: HashMap<String, Arc<ServerEntry>>,
     health_check_interval: Duration,
+    shutdown: Arc<AtomicBool>,
+    health_task: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl EnhancedMcpHub {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
-            health_check_interval: Duration::from_secs(30), // 默认30秒检查一次
+            health_check_interval: Duration::from_secs(30),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            health_task: RwLock::new(None),
         }
     }
 
@@ -161,22 +162,43 @@ impl EnhancedMcpHub {
         self.servers.insert(entry.config.name.clone(), entry);
     }
 
+    /// Connect to all configured servers. Continues connecting remaining servers
+    /// even if one fails. Returns an error only if *all* servers fail to connect.
     pub async fn connect_all(&self) -> AgentResult<()> {
-        for (name, entry) in &self.servers {
-            if let Err(e) = entry.add_client().await {
-                let mut state = entry.state.write().await;
-                *state = ConnectionState::Failed(e.to_string());
-                error!(server_name = %name, error = %e, "Failed to connect to MCP server");
-                return Err(e);
-            }
+        let mut errors: Vec<(String, AgentError)> = Vec::new();
 
-            info!(server_name = %name, "Connected to MCP server");
+        for (name, entry) in &self.servers {
+            match entry.add_client().await {
+                Ok(_) => {
+                    info!(server_name = %name, "Connected to MCP server");
+                }
+                Err(e) => {
+                    let mut state = entry.state.write().await;
+                    *state = ConnectionState::Failed(e.to_string());
+                    error!(server_name = %name, error = %e, "Failed to connect to MCP server");
+                    errors.push((name.clone(), e));
+                }
+            }
         }
 
-        // 启动后台健康检查任务
+        // Start background health check
         self.start_health_check_task().await;
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else if errors.len() == self.servers.len() {
+            // All servers failed
+            let msg = errors.iter()
+                .map(|(name, e)| format!("{name}: {e}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(AgentError::internal(format!("All MCP servers failed to connect: {msg}")))
+        } else {
+            // Some succeeded, some failed — log but don't error
+            let failed: Vec<&str> = errors.iter().map(|(n, _)| n.as_str()).collect();
+            warn!("Some MCP servers failed to connect: {}", failed.join(", "));
+            Ok(())
+        }
     }
 
     pub async fn discover_all(&self) -> AgentResult<Vec<(String, Vec<McpToolInfo>)>> {
@@ -209,24 +231,30 @@ impl EnhancedMcpHub {
         Ok(results)
     }
 
-    pub fn register_all(&self, registry: &mut ToolRegistry) {
+    /// Register all discovered tools into the given registry.
+    /// This is an async method because it reads from `RwLock`-protected state.
+    pub async fn register_all(&self, registry: &mut ToolRegistry) {
         for (name, entry) in &self.servers {
-            if let Ok(tools) = futures_core::executor::block_on(async {
-                entry.tools.read().await.clone()
-            }) {
-                for tool_info in &tools {
-                    let Some(client) = futures_core::executor::block_on(entry.get_available_client()) else {
-                        continue;
-                    };
+            let tools = entry.tools.read().await.clone();
+            for tool_info in &tools {
+                if let Some(client) = entry.get_available_client().await {
                     let adapter = McpToolAdapter::new(tool_info.clone(), client);
                     registry.register(adapter);
                 }
             }
-            info!(server_name = %name, tool_count = entry.tools.try_read().unwrap_or(&vec![]).len(), "Registered tools from MCP server");
+            info!(server_name = %name, tool_count = tools.len(), "Registered tools from MCP server");
         }
     }
 
     pub async fn disconnect_all(&self) {
+        // Signal health check loop to stop
+        self.shutdown.store(true, Ordering::SeqCst);
+
+        // Abort the health check task if it exists
+        if let Some(handle) = self.health_task.write().await.take() {
+            handle.abort();
+        }
+
         for (name, entry) in &self.servers {
             entry.clients.write().await.clear();
             let mut state = entry.state.write().await;
@@ -238,16 +266,24 @@ impl EnhancedMcpHub {
     async fn start_health_check_task(&self) {
         let servers = self.servers.clone();
         let interval = self.health_check_interval;
+        let shutdown = self.shutdown.clone();
 
-        tokio::spawn(async move {
+        // Reset shutdown flag in case connect_all is called again after disconnect_all
+        shutdown.store(false, Ordering::SeqCst);
+
+        let handle = tokio::spawn(async move {
             loop {
                 sleep(interval).await;
+
+                if shutdown.load(Ordering::SeqCst) {
+                    info!("Health check task shutting down");
+                    break;
+                }
 
                 for (name, entry) in &servers {
                     let is_healthy = entry.health_check().await;
 
                     if !is_healthy && matches!(*entry.state.read().await, ConnectionState::Connected) {
-                        // 如果之前是连接状态但现在不健康，尝试重新连接
                         if entry.config.auto_reconnect {
                             if let Err(e) = entry.reconnect().await {
                                 error!("Failed to reconnect to {}: {e}", name);
@@ -257,6 +293,8 @@ impl EnhancedMcpHub {
                 }
             }
         });
+
+        *self.health_task.write().await = Some(handle);
     }
 
     pub async fn get_connection_state(&self, server_name: &str) -> Option<ConnectionState> {
@@ -273,5 +311,12 @@ impl EnhancedMcpHub {
             states.insert(name.clone(), entry.state.read().await.clone());
         }
         states
+    }
+}
+
+impl Drop for EnhancedMcpHub {
+    fn drop(&mut self) {
+        // Signal the health check loop to stop when the hub is dropped
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 }

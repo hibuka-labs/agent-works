@@ -456,7 +456,7 @@ mod skill_tests {
     fn test_lazy_skill_prompter() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
         let prompter = LazySkillPrompter::new();
-        let prompt = prompter.build_prompt(&skills);
+        let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.contains("math"), "Prompt should contain skill name");
         assert!(prompt.contains("get_skill_detail"), "Prompt should contain instruction");
     }
@@ -466,9 +466,9 @@ mod skill_tests {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
         let prompter = LazySkillPrompter::new()
             .title("## My Skills")
-            .instruction("> Use my_get_detail to see details")
+            .instruction("> Use {tool} to see details")
             .item_prefix("+ ");
-        let prompt = prompter.build_prompt(&skills);
+        let prompt = prompter.build_prompt(&skills, "my_get_detail");
         assert!(prompt.contains("## My Skills"));
         assert!(prompt.contains("my_get_detail"));
         assert!(prompt.contains("+ "));
@@ -478,7 +478,7 @@ mod skill_tests {
     fn test_full_detail_prompter() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
         let prompter = agent_works::skill::FullDetailPrompter;
-        let prompt = prompter.build_prompt(&skills);
+        let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.contains("math"), "Should contain skill name");
         assert!(prompt.contains("Math Skill"), "Should contain detailed description");
     }
@@ -629,3 +629,267 @@ async fn test_skill_detail_tool_standalone() {
     let func = def.get("function").unwrap();
     assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_skill_detail");
 }
+
+// ---------------------------------------------------------------------------
+// Path traversal protection tests (builtin-tools)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "builtin-tools")]
+mod path_traversal_tests {
+    use agent_works::builtin::*;
+    use agent_works::{Tool, ToolContext, Language, SessionId, AgentEvent};
+    use serde_json::json;
+
+    fn make_ctx() -> ToolContext {
+        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(16);
+        ToolContext {
+            session_id: SessionId::new(1),
+            event_bus: tx,
+            event_sender: None,
+            llm_client: None,
+            session_store: None,
+            language: Language::En,
+        }
+    }
+
+    /// Set up a real temp workspace with a test file in it.
+    fn setup_workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "top secret").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.txt"), "nested content").unwrap();
+        dir
+    }
+
+    // -- read_file traversal --
+
+    #[tokio::test]
+    async fn test_read_file_blocks_traversal() {
+        let ws = setup_workspace();
+        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "../../etc/passwd"}), &ctx).await;
+        assert!(result.is_err(), "read_file should reject traversal path");
+        // The error may say "outside workspace" or "failed to resolve parent directory"
+        // depending on whether the target path exists. Either way, the traversal is blocked.
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("outside workspace") || err.contains("failed to resolve"),
+            "error should block traversal: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_file_blocks_null_byte() {
+        let ws = setup_workspace();
+        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "hello\0world"}), &ctx).await;
+        assert!(result.is_err(), "read_file should reject null byte");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_allows_valid_path() {
+        let ws = setup_workspace();
+        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "secret.txt"}), &ctx).await;
+        assert!(result.is_ok(), "read_file should allow valid path: {:?}", result.err());
+        assert!(result.unwrap().summary.contains("top secret"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_allows_subdir_path() {
+        let ws = setup_workspace();
+        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "sub/nested.txt"}), &ctx).await;
+        assert!(result.is_ok(), "read_file should allow subdir path: {:?}", result.err());
+        assert!(result.unwrap().summary.contains("nested content"));
+    }
+
+    // -- write_file traversal --
+
+    #[tokio::test]
+    async fn test_write_file_blocks_traversal() {
+        let ws = setup_workspace();
+        let tool = WriteFileTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(
+            &json!({"path": "../escape.txt", "content": "escaped"}),
+            &ctx,
+        ).await;
+        assert!(result.is_err(), "write_file should reject traversal path");
+    }
+
+    // -- list_directory traversal --
+
+    #[tokio::test]
+    async fn test_list_directory_blocks_traversal() {
+        let ws = setup_workspace();
+        let tool = ListDirectoryTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "../.."}), &ctx).await;
+        assert!(result.is_err(), "list_directory should reject traversal path");
+    }
+
+    // -- file_exists traversal --
+
+    #[tokio::test]
+    async fn test_file_exists_blocks_traversal() {
+        let ws = setup_workspace();
+        let tool = FileExistsTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(&json!({"path": "../../etc/passwd"}), &ctx).await;
+        assert!(result.is_err(), "file_exists should reject traversal path");
+    }
+
+    // -- search_replace traversal --
+
+    #[tokio::test]
+    async fn test_search_replace_blocks_traversal() {
+        let ws = setup_workspace();
+        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(
+            &json!({"path": "../../etc/passwd", "old_str": "root", "new_str": "hacked"}),
+            &ctx,
+        ).await;
+        assert!(result.is_err(), "search_replace should reject traversal path");
+    }
+
+    // -- search_replace old == new --
+
+    #[tokio::test]
+    async fn test_search_replace_same_old_new() {
+        let ws = setup_workspace();
+        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(
+            &json!({"path": "secret.txt", "old_str": "same", "new_str": "same"}),
+            &ctx,
+        ).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.summary.contains("No changes needed"),
+            "should short-circuit when old==new: {}",
+            output.summary
+        );
+    }
+
+    // -- search_replace text not found --
+
+    #[tokio::test]
+    async fn test_search_replace_not_found() {
+        let ws = setup_workspace();
+        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(
+            &json!({"path": "secret.txt", "old_str": "DOES_NOT_EXIST", "new_str": "replacement"}),
+            &ctx,
+        ).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().summary.contains("not found"));
+    }
+
+    // -- search_replace successful replacement --
+
+    #[tokio::test]
+    async fn test_search_replace_success() {
+        let ws = setup_workspace();
+        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let ctx = make_ctx();
+
+        let result = tool.call(
+            &json!({"path": "secret.txt", "old_str": "top secret", "new_str": "declassified"}),
+            &ctx,
+        ).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().summary.contains("Successfully"));
+
+        // Verify the replacement
+        let read_tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let content = read_tool.call(&json!({"path": "secret.txt"}), &ctx).await.unwrap();
+        assert!(content.summary.contains("declassified"));
+        assert!(!content.summary.contains("top secret"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LazySkillPrompter dynamic tool name tests
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "skill")]
+mod prompter_tests {
+    use agent_works::skill::{LazySkillPrompter, FullDetailPrompter, SkillPrompter, Skill};
+    use agent_works::Tool;
+    use std::sync::Arc;
+
+    struct TestSkill;
+    impl Skill for TestSkill {
+        fn name(&self) -> &'static str { "test_skill" }
+        fn brief_description(&self) -> String { "A test skill".to_string() }
+        fn detailed_description(&self) -> String { "Detailed test instructions".to_string() }
+        fn tools(&self) -> Vec<Arc<dyn Tool>> { vec![] }
+    }
+
+    #[test]
+    fn test_lazy_prompter_default_tool_name() {
+        let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
+        let prompter = LazySkillPrompter::new();
+        let prompt = prompter.build_prompt(&skills, "get_skill_detail");
+        assert!(prompt.contains("get_skill_detail"), "default prompt should mention the tool name");
+        assert!(prompt.contains("test_skill"));
+    }
+
+    #[test]
+    fn test_lazy_prompter_custom_tool_name() {
+        let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
+        let prompter = LazySkillPrompter::new();
+        let prompt = prompter.build_prompt(&skills, "my_custom_detail");
+        assert!(prompt.contains("my_custom_detail"), "should use custom tool name");
+        assert!(!prompt.contains("get_skill_detail"), "should NOT contain default name");
+    }
+
+    #[test]
+    fn test_lazy_prompter_custom_instruction_with_placeholder() {
+        let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
+        let prompter = LazySkillPrompter::new()
+            .instruction("Use `{tool}` to learn more about skills.");
+        let prompt = prompter.build_prompt(&skills, "detail_query");
+        assert!(
+            prompt.contains("Use `detail_query` to learn more"),
+            "placeholder should be replaced: {}",
+            prompt
+        );
+    }
+
+    #[test]
+    fn test_full_detail_prompter_ignores_tool_name() {
+        let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
+        let prompter = FullDetailPrompter;
+        let prompt = prompter.build_prompt(&skills, "whatever");
+        assert!(prompt.contains("Detailed test instructions"));
+        assert!(!prompt.contains("whatever"), "FullDetailPrompter should not use tool name");
+    }
+
+    #[test]
+    fn test_lazy_prompter_empty_skills() {
+        let skills: Vec<Arc<dyn Skill>> = vec![];
+        let prompter = LazySkillPrompter::new();
+        let prompt = prompter.build_prompt(&skills, "get_skill_detail");
+        assert!(prompt.is_empty(), "empty skills should produce empty prompt");
+    }
+}
+

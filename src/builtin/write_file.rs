@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use super::path_util::validate_path;
 
 pub struct WriteFileTool {
     pub workspace: PathBuf,
@@ -48,7 +49,7 @@ impl Tool for WriteFileTool {
             .as_str()
             .ok_or_else(|| AgentError::internal("missing 'content' argument"))?;
 
-        let full_path = self.workspace.join(path);
+        let full_path = validate_path(&self.workspace, path)?;
 
         tracing::debug!(path = %path, "write file start");
 

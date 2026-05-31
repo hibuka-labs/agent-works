@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use super::path_util::validate_path;
 
 pub struct ListDirectoryTool {
     pub workspace: PathBuf,
@@ -37,7 +38,7 @@ impl Tool for ListDirectoryTool {
 
     async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
         let path = args["path"].as_str().unwrap_or(".");
-        let full_path = self.workspace.join(path);
+        let full_path = validate_path(&self.workspace, path)?;
 
         tracing::debug!(path = %path, "list directory start");
         let mut entries = tokio::fs::read_dir(&full_path)

@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing;
 
 use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use super::path_util::validate_path;
 
 pub struct ReadFileTool {
     pub workspace: PathBuf,
@@ -41,7 +41,7 @@ impl Tool for ReadFileTool {
             .as_str()
             .ok_or_else(|| AgentError::internal("missing 'path' argument"))?;
 
-        let full_path = self.workspace.join(path);
+        let full_path = validate_path(&self.workspace, path)?;
 
         tracing::debug!(path = %path, "read file start");
         let content = tokio::fs::read_to_string(&full_path)

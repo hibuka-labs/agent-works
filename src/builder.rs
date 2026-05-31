@@ -265,7 +265,7 @@ impl AgentBuilder {
         }
 
         if !self.disable_skill_prompt_injection {
-            let skill_prompt = prompter.build_prompt(&skill_refs);
+            let skill_prompt = prompter.build_prompt(&skill_refs, &self.skill_detail_tool_name);
             if !skill_prompt.is_empty() {
                 let new_prompt = match self.system_prompt.take() {
                     Some(existing) => format!("{}\n\n---\n\n{}", existing, skill_prompt),

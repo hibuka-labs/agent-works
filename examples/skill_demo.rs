@@ -242,11 +242,11 @@ async fn main() -> AgentResult<()> {
     let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
     let lazy = LazySkillPrompter::new();
     println!("LazySkillPrompter output:");
-    println!("{}", lazy.build_prompt(&skills));
+    println!("{}", lazy.build_prompt(&skills, "get_skill_detail"));
 
     let full = FullDetailPrompter;
     println!("\nFullDetailPrompter output:");
-    println!("{}", full.build_prompt(&skills));
+    println!("{}", full.build_prompt(&skills, "get_skill_detail"));
 
     println!("\n=== Demo Complete ===");
     Ok(())

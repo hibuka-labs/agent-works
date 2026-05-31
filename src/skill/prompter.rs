@@ -4,7 +4,7 @@ use super::{Skill, SkillPrompter};
 
 pub struct LazySkillPrompter {
     title: String,
-    instruction: String,
+    instruction_template: String,
     item_prefix: String,
 }
 
@@ -12,8 +12,9 @@ impl Default for LazySkillPrompter {
     fn default() -> Self {
         Self {
             title: "## Available Skills".to_string(),
-            instruction:
-                "> Call get_skill_detail to get detailed instructions for a Skill."
+            // `{tool}` placeholder is replaced with the actual detail tool name
+            instruction_template:
+                "> Call `{tool}` to get detailed instructions for a Skill."
                     .to_string(),
             item_prefix: "- **".to_string(),
         }
@@ -30,8 +31,10 @@ impl LazySkillPrompter {
         self
     }
 
+    /// Set a custom instruction template. Use `{tool}` as a placeholder for
+    /// the detail tool name, e.g. `"> Use {tool} to learn more"`.
     pub fn instruction(mut self, instruction: impl Into<String>) -> Self {
-        self.instruction = instruction.into();
+        self.instruction_template = instruction.into();
         self
     }
 
@@ -42,7 +45,7 @@ impl LazySkillPrompter {
 }
 
 impl SkillPrompter for LazySkillPrompter {
-    fn build_prompt(&self, skills: &[Arc<dyn Skill>]) -> String {
+    fn build_prompt(&self, skills: &[Arc<dyn Skill>], detail_tool_name: &str) -> String {
         if skills.is_empty() {
             return String::new();
         }
@@ -61,7 +64,7 @@ impl SkillPrompter for LazySkillPrompter {
         }
 
         prompt.push('\n');
-        prompt.push_str(&self.instruction);
+        prompt.push_str(&self.instruction_template.replace("{tool}", detail_tool_name));
 
         prompt
     }
@@ -70,7 +73,7 @@ impl SkillPrompter for LazySkillPrompter {
 pub struct FullDetailPrompter;
 
 impl SkillPrompter for FullDetailPrompter {
-    fn build_prompt(&self, skills: &[Arc<dyn Skill>]) -> String {
+    fn build_prompt(&self, skills: &[Arc<dyn Skill>], _detail_tool_name: &str) -> String {
         tracing::debug!("skill prompt generated");
         if skills.is_empty() {
             return String::new();

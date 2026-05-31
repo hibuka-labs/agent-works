@@ -9,6 +9,7 @@ fn make_tool_context() -> ToolContext {
     ToolContext {
         session_id: SessionId::new(1),
         event_bus: tx,
+        event_sender: None,
         llm_client: None,
         session_store: None,
         language: Language::En,

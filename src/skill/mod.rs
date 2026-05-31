@@ -4,7 +4,6 @@ use agent_base::Tool;
 
 pub mod detail_tool;
 pub mod prompter;
-// pub mod loader
 
 pub use detail_tool::SkillDetailTool;
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
@@ -29,5 +28,8 @@ pub trait Skill: Send + Sync {
 }
 
 pub trait SkillPrompter: Send + Sync {
-    fn build_prompt(&self, skills: &[Arc<dyn Skill>]) -> String;
+    /// Build the system prompt snippet for the given skills.
+    /// `detail_tool_name` is the name of the tool the LLM can call to get
+    /// detailed skill descriptions (used by `LazySkillPrompter`).
+    fn build_prompt(&self, skills: &[Arc<dyn Skill>], detail_tool_name: &str) -> String;
 }
