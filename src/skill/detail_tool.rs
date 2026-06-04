@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agent_base::{AgentEvent, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use agent_base::{AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput, UserEvent};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -73,10 +73,9 @@ impl Tool for SkillDetailTool {
             .map(|s| s.detailed_description());
 
         tracing::debug!("skill detail queried");
-        let _ = ctx.event_bus.send(AgentEvent::Custom {
-            session_id: ctx.session_id.clone(),
-            payload: json!({
-                "type": "skill_detail_loaded",
+        ctx.emit_user_event(UserEvent::Structured {
+            event_type: "skill_detail_loaded".to_string(),
+            data: json!({
                 "skill": name,
             }),
         });

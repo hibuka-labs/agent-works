@@ -1,10 +1,10 @@
 use std::io::{self, Write};
 
-use agent_base::{AgentEvent, AgentResult};
+use agent_base::{RuntimeEvent, AgentResult};
 
 pub struct CliEventPrinter {
     pub assistant_prefix_printed: bool,
-    pub custom_handlers: Vec<Box<dyn Fn(&AgentEvent) -> Option<String> + Send>>,
+    pub custom_handlers: Vec<Box<dyn Fn(&RuntimeEvent) -> Option<String> + Send>>,
 }
 
 impl Default for CliEventPrinter {
@@ -21,7 +21,7 @@ impl CliEventPrinter {
         Self::default()
     }
 
-    pub fn handle(&mut self, event: AgentEvent) -> AgentResult<()> {
+    pub fn handle(&mut self, event: RuntimeEvent) -> AgentResult<()> {
         for handler in &self.custom_handlers {
             if let Some(output) = handler(&event) {
                 self.finish();
@@ -34,7 +34,7 @@ impl CliEventPrinter {
         }
 
         match event {
-            AgentEvent::TextDelta { text, .. } => {
+            RuntimeEvent::TextDelta { text, .. } => {
                 if !self.assistant_prefix_printed {
                     print!("Assistant > ");
                     self.assistant_prefix_printed = true;
@@ -44,13 +44,13 @@ impl CliEventPrinter {
                     .flush()
                     .map_err(|e| agent_base::AgentError::internal(format!("flush stdout failed: {e}")))?;
             }
-            AgentEvent::ThoughtDelta { text, .. } => {
+            RuntimeEvent::ThoughtDelta { text, .. } => {
                 print!("\x1b[90m{text}\x1b[0m");
                 io::stdout()
                     .flush()
                     .map_err(|e| agent_base::AgentError::internal(format!("flush stdout failed: {e}")))?;
             }
-            AgentEvent::ToolCallStarted {
+            RuntimeEvent::ToolCallStarted {
                 tool_name,
                 args_json,
                 ..
@@ -58,7 +58,7 @@ impl CliEventPrinter {
                 self.finish();
                 println!("[Tool Start] {tool_name} {args_json}");
             }
-            AgentEvent::ToolCallFinished {
+            RuntimeEvent::ToolCallFinished {
                 tool_name, summary, ..
             } => {
                 self.finish();
@@ -67,13 +67,13 @@ impl CliEventPrinter {
                     println!("  {line}");
                 }
             }
-            AgentEvent::AwaitingApproval { .. } => {
+            RuntimeEvent::AwaitingApproval { .. } => {
                 self.finish();
             }
-            AgentEvent::RunFinished { .. } => {
+            RuntimeEvent::RunFinished { .. } => {
                 self.finish();
             }
-            AgentEvent::PlanGenerated { plan, .. } => {
+            RuntimeEvent::PlanGenerated { plan, .. } => {
                 self.finish();
                 println!("[Plan Generated] id={}", plan.id);
                 for phase in &plan.phases {
@@ -83,7 +83,7 @@ impl CliEventPrinter {
                     }
                 }
             }
-            AgentEvent::PlanStepStarted {
+            RuntimeEvent::PlanStepStarted {
                 step_id,
                 step_description,
                 ..
@@ -91,7 +91,7 @@ impl CliEventPrinter {
                 self.finish();
                 println!("[Plan Step Start] {step_id} - {step_description}");
             }
-            AgentEvent::PlanStepCompleted {
+            RuntimeEvent::PlanStepCompleted {
                 step_id,
                 success,
                 result,
@@ -108,7 +108,7 @@ impl CliEventPrinter {
                     }
                 }
             }
-            AgentEvent::PlanCompleted {
+            RuntimeEvent::PlanCompleted {
                 plan_id, success, ..
             } => {
                 self.finish();
@@ -117,7 +117,7 @@ impl CliEventPrinter {
                     if success { "success" } else { "failed" }
                 );
             }
-            AgentEvent::PlanFailed {
+            RuntimeEvent::PlanFailed {
                 plan_id, error, ..
             } => {
                 self.finish();

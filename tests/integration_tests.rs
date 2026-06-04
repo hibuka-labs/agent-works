@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_works::{
-    AgentBuilder, AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+    AgentBuilder, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, RunOutcome, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
 use async_trait::async_trait;
@@ -272,6 +272,7 @@ async fn test_builder_forwarding_error_recovery() {
 mod skill_tests {
     use super::*;
     use agent_works::skill::{LazySkillPrompter, Skill, SkillPrompter};
+    use agent_works::RuntimeEvent;
     use std::sync::Arc;
     use serde_json::Value;
 
@@ -362,7 +363,7 @@ mod skill_tests {
 
         let (events, _outcome) = result.unwrap();
         let tool_done = events.iter().any(|e| {
-            matches!(e, AgentEvent::ToolCallFinished { tool_name, .. } if tool_name == "add")
+            matches!(e, RuntimeEvent::ToolCallFinished { tool_name, .. } if tool_name == "add")
         });
         assert!(tool_done, "add tool should be called");
     }
@@ -426,7 +427,7 @@ mod skill_tests {
 
         let (events, _outcome) = result.unwrap();
         let skill_loaded = events.iter().any(|e| {
-            matches!(e, AgentEvent::ToolCallFinished { tool_name, summary, .. }
+            matches!(e, RuntimeEvent::ToolCallFinished { tool_name, summary, .. }
                 if tool_name == "skill_info" && summary.contains("Math Skill"))
         });
         assert!(skill_loaded, "skill_info tool should return Math Skill detail");
@@ -637,15 +638,14 @@ async fn test_skill_detail_tool_standalone() {
 #[cfg(feature = "builtin-tools")]
 mod path_traversal_tests {
     use agent_works::builtin::*;
-    use agent_works::{Tool, ToolContext, Language, SessionId, AgentEvent};
+    use agent_works::{Tool, ToolContext, Language, SessionId, UserEvent};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
-        let (tx, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<UserEvent>();
         ToolContext {
             session_id: SessionId::new(1),
-            event_bus: tx,
-            event_sender: None,
+            user_event_tx: tx,
             llm_client: None,
             session_store: None,
             language: Language::En,
