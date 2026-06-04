@@ -128,7 +128,7 @@ async fn test_builder_forwarding_text_reply() {
         .unwrap();
 
     let session_id = runtime.create_session().await;
-    let result = runtime.run_turn_stream(session_id.clone(), "Hi").await;
+    let result = runtime.run_turn_collect(session_id.clone(), "Hi").await;
     assert!(result.is_ok(), "Expected ok, got: {result:?}");
     let (_events, outcome) = result.unwrap();
     assert_eq!(outcome, RunOutcome::Completed);
@@ -161,7 +161,7 @@ async fn test_builder_forwarding_with_tool() {
         .unwrap();
 
     let session_id = runtime.create_session().await;
-    let result = runtime.run_turn_stream(session_id, "Echo hello").await;
+    let result = runtime.run_turn_collect(session_id, "Echo hello").await;
     assert!(result.is_ok(), "Expected ok, got: {result:?}");
     assert_eq!(llm.call_count(), 2);
 }
@@ -201,7 +201,7 @@ async fn test_builder_forwarding_middleware() {
         .unwrap();
 
     let session_id = runtime.create_session().await;
-    let result = runtime.run_turn_stream(session_id, "test").await;
+    let result = runtime.run_turn_collect(session_id, "test").await;
     assert!(result.is_ok());
     assert!(triggered.load(Ordering::SeqCst), "Middleware should be triggered");
 }
@@ -236,7 +236,7 @@ async fn test_builder_forwarding_error_recovery() {
         .unwrap();
 
     let session_id = runtime.create_session().await;
-    let result = runtime.run_turn_stream(session_id, "test").await;
+    let result = runtime.run_turn_collect(session_id, "test").await;
     assert!(result.is_ok());
 }
 
@@ -260,7 +260,7 @@ async fn test_builder_forwarding_error_recovery() {
             .unwrap();
 
         let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_stream(session_id, "do something").await;
+        let result = runtime.run_turn_collect(session_id, "do something").await;
         assert!(result.is_ok(), "Expected ok: {result:?}");
     }
 
@@ -358,7 +358,7 @@ mod skill_tests {
             .unwrap();
 
         let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_stream(session_id, "1+2=?").await;
+        let result = runtime.run_turn_collect(session_id, "1+2=?").await;
         assert!(result.is_ok(), "Expected ok, got: {result:?}");
 
         let (events, _outcome) = result.unwrap();
@@ -393,7 +393,7 @@ mod skill_tests {
             .unwrap();
 
         let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_stream(session_id, "3+4=?").await;
+        let result = runtime.run_turn_collect(session_id, "3+4=?").await;
         assert!(result.is_ok(), "Expected ok, got: {result:?}");
     }
 
@@ -422,7 +422,7 @@ mod skill_tests {
             .unwrap();
 
         let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_stream(session_id, "tell me about math skill").await;
+        let result = runtime.run_turn_collect(session_id, "tell me about math skill").await;
         assert!(result.is_ok(), "Expected ok, got: {result:?}");
 
         let (events, _outcome) = result.unwrap();

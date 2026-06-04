@@ -81,7 +81,7 @@ impl CliRepl {
             let mut printer = super::printer::CliEventPrinter::new();
             match self
                 .runtime
-                .run_turn_with_handler(sid, input, |event| printer.handle(event))
+                .run_turn(sid, input, |event| printer.handle(event))
                 .await
             {
                 Ok(_) => printer.finish(),

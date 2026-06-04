@@ -219,7 +219,7 @@ async fn main() -> AgentResult<()> {
     let session_id = runtime.create_session().await;
 
     let (events, _outcome) = runtime
-        .run_turn_stream(session_id, "help me calculate 123 + 456")
+        .run_turn_collect(session_id, "help me calculate 123 + 456")
         .await?;
 
     for event in &events {
