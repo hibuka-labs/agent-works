@@ -2,9 +2,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_works::{
-    AgentBuilder, AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+use agent_base::{
+    AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+};
+use agent_works::{
+    AgentBuilder,
     skill::{Skill, LazySkillPrompter, FullDetailPrompter, SkillPrompter},
 };
 use async_trait::async_trait;

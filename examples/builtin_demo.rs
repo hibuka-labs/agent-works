@@ -1,7 +1,7 @@
 use agent_works::builtin::{
     FileExistsTool, ListDirectoryTool, ReadFileTool, SearchReplaceTool, WriteFileTool,
 };
-use agent_works::{AgentResult, Language, SessionId, Tool, ToolContext};
+use agent_base::{AgentResult, Language, SessionId, Tool, ToolContext};
 use serde_json::json;
 
 fn make_tool_context() -> ToolContext {

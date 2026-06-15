@@ -2,10 +2,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_works::{
-    AgentBuilder, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+use agent_base::{
+    AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, RunOutcome, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
+use agent_works::AgentBuilder;
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde_json::{json, Value};
@@ -36,7 +37,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&agent_base::ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<Value> {
         unimplemented!()
@@ -46,7 +47,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&agent_base::ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<ChunkStream> {
         *self.call_count.lock().unwrap() += 1;
@@ -177,10 +178,10 @@ async fn test_builder_forwarding_middleware() {
     }
 
     #[async_trait]
-    impl agent_works::Middleware for FlagMiddleware {
+    impl agent_base::Middleware for FlagMiddleware {
         async fn on_post_llm(
             &self,
-            _ctx: &mut agent_works::PostLlmCtx,
+            _ctx: &mut agent_base::PostLlmCtx,
         ) -> AgentResult<()> {
             self.flag.store(true, Ordering::SeqCst);
             Ok(())
@@ -231,7 +232,7 @@ async fn test_builder_forwarding_error_recovery() {
         .register_tool(EchoTool)
         .tool_timeout(30_000)
         .max_tool_output_chars(4096)
-        .language(agent_works::Language::Zh)
+        .language(agent_base::Language::Zh)
         .build()
         .unwrap();
 
@@ -251,11 +252,11 @@ async fn test_builder_forwarding_error_recovery() {
             StreamChunk::Stop,
         ]]));
 
-        let config = agent_works::ToolEnforcementConfig::default();
+        let config = agent_base::ToolEnforcementConfig::default();
         let runtime = AgentBuilder::new(llm)
             .register_tool(EchoTool)
             .system_prompt("sys")
-            .middleware(agent_works::ToolEnforcementMiddleware::new(config))
+            .middleware(agent_base::ToolEnforcementMiddleware::new(config))
             .build()
             .unwrap();
 
@@ -272,7 +273,7 @@ async fn test_builder_forwarding_error_recovery() {
 mod skill_tests {
     use super::*;
     use agent_works::skill::{LazySkillPrompter, Skill, SkillPrompter};
-    use agent_works::RuntimeEvent;
+    use agent_base::RuntimeEvent;
     use std::sync::Arc;
     use serde_json::Value;
 
@@ -638,7 +639,7 @@ async fn test_skill_detail_tool_standalone() {
 #[cfg(feature = "builtin-tools")]
 mod path_traversal_tests {
     use agent_works::builtin::*;
-    use agent_works::{Tool, ToolContext, Language, SessionId, UserEvent};
+    use agent_base::{Tool, ToolContext, Language, SessionId, UserEvent};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
@@ -833,7 +834,7 @@ mod path_traversal_tests {
 #[cfg(feature = "skill")]
 mod prompter_tests {
     use agent_works::skill::{LazySkillPrompter, FullDetailPrompter, SkillPrompter, Skill};
-    use agent_works::Tool;
+    use agent_base::Tool;
     use std::sync::Arc;
 
     struct TestSkill;

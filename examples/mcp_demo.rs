@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     println!("[Step 6] Registering tools into ToolRegistry via hub.register_all()...");
-    use agent_works::ToolRegistry;
+    use agent_base::ToolRegistry;
     let mut registry = ToolRegistry::default();
     hub.register_all(&mut registry);
     println!("  ToolRegistry now has {} tool(s)", registry.len());

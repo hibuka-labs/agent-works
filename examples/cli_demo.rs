@@ -2,9 +2,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_works::{
-    AgentBuilder, AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+use agent_base::{
+    AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, SessionId, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+};
+use agent_works::{
+    AgentBuilder,
     cli::{CliEventPrinter, CliRepl},
 };
 use async_trait::async_trait;
