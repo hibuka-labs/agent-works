@@ -71,16 +71,10 @@ impl AgentHandle {
                             Ok(())
                         }).await;
 
-                        // Handle errors: ensure caller always gets a terminal event
                         match &result {
-                            Ok(_) => {
-                                // run_turn already emitted RunFinished or RunCancelled
-                            }
-                            Err(e) if e.is_cancelled() => {
-                                // RunCancelled already emitted inside run_turn
-                            }
+                            Ok(_) => {}
+                            Err(e) if e.is_cancelled() => {}
                             Err(e) => {
-                                // Non-cancellation error: emit RunFinished so caller isn't stuck
                                 tracing::error!(error = %e, "run_turn failed");
                                 let _ = event_tx.send(RuntimeEvent::RunFinished {
                                     session_id: sid,
@@ -150,9 +144,12 @@ impl AgentHandle {
     }
 
     /// Send user input (async, with error return)
-    /// Uses the default session_id if set via with_session(), otherwise uses SessionId::new(0)
+    /// Uses the default session_id if set via with_session(), otherwise creates a new session
     pub async fn send_input(&self, input: &str) -> Result<(), SendError> {
-        let session_id = self.default_session_id.clone().unwrap_or_else(|| SessionId::new(0));
+        let session_id = match &self.default_session_id {
+            Some(id) => id.clone(),
+            None => self.runtime.create_session().await,
+        };
         self.cmd_tx
             .send(AgentCommand::RunTurn {
                 session_id,

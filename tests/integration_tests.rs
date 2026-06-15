@@ -650,6 +650,7 @@ mod path_traversal_tests {
             llm_client: None,
             session_store: None,
             language: Language::En,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -891,6 +892,201 @@ mod prompter_tests {
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.is_empty(), "empty skills should produce empty prompt");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AgentHandle tests (十七、会话调度测试)
+// ─────────────────────────────────────────────────────────────
+
+mod agent_handle_tests {
+    use super::*;
+    use agent_base::RuntimeEvent;
+    use agent_works::AgentHandle;
+
+    /// 场景1：基本会话调度 — send_input → recv_event → RunFinished
+    #[tokio::test]
+    async fn test_handle_basic_session() {
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
+            StreamChunk::Text("disk: 37% used".to_string()),
+            StreamChunk::Stop,
+        ]]));
+
+        let runtime = AgentBuilder::new(llm)
+            .system_prompt("You are a helpful assistant")
+            .build()
+            .unwrap();
+
+        let mut handle = AgentHandle::new(runtime);
+        handle.send_input("check disk space").await.unwrap();
+
+        let mut all_events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, handle.recv_event()).await {
+            all_events.push(format!("{:?}", event));
+            if matches!(event, RuntimeEvent::RunFinished { .. }) {
+                break;
+            }
+        }
+
+        assert!(
+            all_events.iter().any(|e| e.contains("TextDelta")),
+            "should have received TextDelta, got: {:?}",
+            all_events
+        );
+        assert!(
+            all_events.iter().any(|e| e.contains("RunFinished")),
+            "should have received RunFinished, got: {:?}",
+            all_events
+        );
+    }
+
+    /// 场景2：取消会话 — send_input → cancel → RunCancelled
+    #[tokio::test]
+    async fn test_handle_cancel() {
+        // Create a mock that uses a channel-based stream that blocks
+        struct BlockingLlm {
+            tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentResult<StreamChunk>>>>>,
+        }
+        #[async_trait]
+        impl LlmClient for BlockingLlm {
+            async fn chat(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<Value> {
+                unimplemented!()
+            }
+            async fn chat_stream(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<ChunkStream> {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentResult<StreamChunk>>();
+                *self.tx.lock().unwrap() = Some(tx);
+                // Create a stream from the channel receiver
+                let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+                    let item = rx.recv().await?;
+                    Some((item, rx))
+                });
+                Ok(Box::pin(stream))
+            }
+            fn capabilities(&self) -> LlmCapabilities { LlmCapabilities::default() }
+        }
+
+        let llm = Arc::new(BlockingLlm {
+            tx: Arc::new(Mutex::new(None)),
+        });
+        let llm_ref = llm.clone();
+
+        let runtime = AgentBuilder::new(llm as Arc<dyn LlmClient>)
+            .system_prompt("You are a helpful assistant")
+            .build()
+            .unwrap();
+
+        let mut handle = AgentHandle::new(runtime);
+        handle.send_input("long running task").await.unwrap();
+
+        // Wait for the stream to be created (the LLM call happens)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Send a chunk to start processing
+        if let Some(tx) = llm_ref.tx.lock().unwrap().as_ref() {
+            let _ = tx.send(Ok(StreamChunk::Text("processing...".to_string())));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Cancel while stream is blocked waiting for more chunks
+        handle.cancel();
+
+        // Should receive RunCancelled
+        let mut got_cancelled = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, handle.recv_event()).await {
+            if matches!(event, RuntimeEvent::RunCancelled { .. }) {
+                got_cancelled = true;
+                break;
+            }
+        }
+
+        assert!(got_cancelled, "should have received RunCancelled after cancel()");
+    }
+
+    /// 场景3：错误处理 — error → RunFinished (not hang)
+    #[tokio::test]
+    async fn test_handle_error_recovery() {
+        // Use an LLM that returns an error
+        struct ErrorLlm;
+        #[async_trait]
+        impl LlmClient for ErrorLlm {
+            async fn chat(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<Value> {
+                Err(agent_base::AgentError::internal("simulated LLM failure"))
+            }
+            async fn chat_stream(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<ChunkStream> {
+                Err(agent_base::AgentError::internal("simulated LLM failure"))
+            }
+            fn capabilities(&self) -> LlmCapabilities { LlmCapabilities::default() }
+        }
+
+        let runtime = AgentBuilder::new(Arc::new(ErrorLlm))
+            .system_prompt("test")
+            .build()
+            .unwrap();
+
+        let mut handle = AgentHandle::new(runtime);
+        handle.send_input("trigger error").await.unwrap();
+
+        // Should receive RunFinished (not hang forever)
+        let mut got_finished = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, handle.recv_event()).await {
+            if matches!(event, RuntimeEvent::RunFinished { .. }) {
+                got_finished = true;
+                break;
+            }
+        }
+
+        assert!(got_finished, "should have received RunFinished after error, not hang");
+    }
+
+    /// 场景2b：取消后可以继续发送新命令
+    #[tokio::test]
+    async fn test_handle_cancel_then_continue() {
+        let llm = Arc::new(MockLlmClient::new(vec![
+            // First response: never stops (will be cancelled)
+            vec![StreamChunk::Text("processing...".to_string())],
+            // Second response: normal
+            vec![StreamChunk::Text("done!".to_string()), StreamChunk::Stop],
+        ]));
+
+        let runtime = AgentBuilder::new(llm)
+            .system_prompt("test")
+            .build()
+            .unwrap();
+
+        let mut handle = AgentHandle::new(runtime);
+
+        // First turn: send + cancel
+        handle.send_input("long task").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.cancel();
+
+        // Drain events until RunCancelled
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, handle.recv_event()).await {
+            if matches!(event, RuntimeEvent::RunCancelled { .. }) {
+                break;
+            }
+        }
+
+        // Second turn: should work normally
+        handle.send_input("check disk").await.unwrap();
+        let mut got_finished = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, handle.recv_event()).await {
+            if matches!(event, RuntimeEvent::RunFinished { .. }) {
+                got_finished = true;
+                break;
+            }
+        }
+
+        assert!(got_finished, "should be able to continue after cancel");
     }
 }
 
