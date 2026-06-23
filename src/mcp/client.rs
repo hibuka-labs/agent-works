@@ -210,18 +210,28 @@ impl McpClient {
     }
 }
 
+/// Wraps an MCP server tool as an agent-base `Tool`.
+///
+/// Tool names are prefixed with `mcp.{server_name}.` to prevent collisions
+/// between tools from different MCP servers.
 pub struct McpToolAdapter {
+    /// Prefixed name exposed to the LLM: `mcp.{server}.{tool}`
     name: &'static str,
+    /// Original tool name used when calling the MCP server
+    original_name: String,
     description: String,
     input_schema: Value,
     mcp_client: Arc<McpClient>,
 }
 
 impl McpToolAdapter {
-    pub fn new(info: McpToolInfo, mcp_client: Arc<McpClient>) -> Self {
-        let static_name: &'static str = Box::leak(info.name.into_boxed_str());
+    pub fn new(info: McpToolInfo, mcp_client: Arc<McpClient>, server_name: &str) -> Self {
+        let original_name = info.name;
+        let canonical = format!("mcp.{}.{}", server_name, original_name);
+        let static_name: &'static str = Box::leak(canonical.into_boxed_str());
         Self {
             name: static_name,
+            original_name,
             description: info.description,
             input_schema: info.input_schema,
             mcp_client,
@@ -247,7 +257,7 @@ impl Tool for McpToolAdapter {
     }
 
     async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
-        let result = self.mcp_client.call_tool(self.name, args).await?;
+        let result = self.mcp_client.call_tool(&self.original_name, args).await?;
         let content = result
             .get("content")
             .and_then(|c| c.as_array())

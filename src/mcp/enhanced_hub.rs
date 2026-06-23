@@ -238,7 +238,7 @@ impl EnhancedMcpHub {
             let tools = entry.tools.read().await.clone();
             for tool_info in &tools {
                 if let Some(client) = entry.get_available_client().await {
-                    let adapter = McpToolAdapter::new(tool_info.clone(), client);
+                    let adapter = McpToolAdapter::new(tool_info.clone(), client, name);
                     registry.register(adapter);
                 }
             }

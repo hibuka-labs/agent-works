@@ -33,6 +33,7 @@ futures-util = "0.3.32"
 anyhow = "1.0.102"
 tempfile = "3"
 serial_test = "3"
+tokio-util = "0.7"
 
 [[example]]
 name = "skill_demo"

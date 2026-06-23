@@ -15,3 +15,8 @@ pub mod handle;
 
 pub use crate::builder::AgentBuilder;
 pub use crate::handle::{AgentHandle, SendError};
+
+#[cfg(feature = "skill")]
+pub use skill::{
+    ApplySkillTool, Skill, SkillParam, SkillParamType, SkillRegistry, SkillSummary,
+};

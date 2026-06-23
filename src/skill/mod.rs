@@ -1,18 +1,64 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::Tool;
+use agent_base::{PlanStep, Tool};
+use serde::Serialize;
 
 pub mod detail_tool;
 pub mod prompter;
+pub mod registry;
+pub mod apply_tool;
 
 pub use detail_tool::SkillDetailTool;
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
+pub use registry::{SkillRegistry, SkillSummary};
+pub use apply_tool::ApplySkillTool;
+
+// ── Skill parameter types ──
+
+/// Parameter type for template-based skills.
+#[derive(Debug, Clone, Serialize)]
+pub enum SkillParamType {
+    String,
+    Number,
+    HostRef,
+}
+
+/// Parameter definition for a template-based skill.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillParam {
+    pub name: String,
+    pub description: String,
+    pub param_type: SkillParamType,
+    pub required: bool,
+    pub default: Option<String>,
+}
+
+// ── Skill trait ──
 
 pub trait Skill: Send + Sync {
     fn name(&self) -> &'static str;
     fn brief_description(&self) -> String;
     fn detailed_description(&self) -> String;
-    fn tools(&self) -> Vec<Arc<dyn Tool>>;
+
+    /// Tools provided by knowledge-type skills.
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        vec![]
+    }
+
+    /// Generate PlanSteps from this template skill with the given params.
+    /// Template-type skills override this; knowledge-type skills return None.
+    fn plan_steps(
+        &self,
+        _params: &HashMap<String, String>,
+    ) -> Option<Vec<PlanStep>> {
+        None
+    }
+
+    /// Parameter definitions for template-type skills.
+    fn parameters(&self) -> &[SkillParam] {
+        &[]
+    }
 
     fn version(&self) -> &'static str {
         "0.1.0"
@@ -26,6 +72,8 @@ pub trait Skill: Send + Sync {
         ""
     }
 }
+
+// ── SkillPrompter trait ──
 
 pub trait SkillPrompter: Send + Sync {
     /// Build the system prompt snippet for the given skills.
