@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use super::types::{McpToolInfo, McpTransport};
 
 struct StdioProcess {
+    #[allow(dead_code)] // held for RAII: child process is killed on drop
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,

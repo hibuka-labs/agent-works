@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::{AgentError, AgentResult, ExecutionPlan, PlanStep};
+use agent_base::{AgentError, AgentResult, ExecutionPlan};
 use tokio::sync::RwLock;
 
 use super::{Skill, SkillParam};
@@ -48,7 +48,7 @@ impl SkillRegistry {
                 description: s.brief_description(),
                 tags: s.tags().iter().map(|t| t.to_string()).collect(),
                 param_defs: s.parameters().to_vec(),
-                has_plan: !s.parameters().is_empty(),
+                has_plan: s.plan_steps(&HashMap::new()).is_some(),
                 version: s.version().to_string(),
             })
             .collect()
@@ -153,6 +153,9 @@ mod tests {
         }
         fn detailed_description(&self) -> String {
             format!("Detailed: {}", self.desc)
+        }
+        fn tools(&self) -> Vec<Arc<dyn agent_base::Tool>> {
+            vec![]
         }
     }
 

@@ -72,13 +72,20 @@ impl Tool for ApplySkillTool {
             });
         }
 
-        // Parse params from the args
+        // Parse params from the args — convert all JSON values to strings
         let params: HashMap<String, String> = args
             .get("params")
             .and_then(|v| v.as_object())
             .map(|obj| {
                 obj.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .map(|(k, v)| {
+                        let s = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Null => String::new(),
+                            _ => v.to_string(), // numbers, bools, arrays, objects → JSON text
+                        };
+                        (k.clone(), s)
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -185,6 +192,9 @@ mod tests {
         }
         fn detailed_description(&self) -> String {
             "# Test\nA test template skill.".to_string()
+        }
+        fn tools(&self) -> Vec<Arc<dyn agent_base::Tool>> {
+            vec![]
         }
         fn plan_steps(
             &self,

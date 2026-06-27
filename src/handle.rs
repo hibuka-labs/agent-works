@@ -197,8 +197,6 @@ impl AgentHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_agent_handle_creation() {
         // This test requires a full AgentRuntime, skipped for now

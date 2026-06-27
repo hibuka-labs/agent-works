@@ -4,6 +4,6 @@ pub mod enhanced_hub;
 pub mod types;
 
 pub use client::{McpClient, McpToolAdapter};
-pub use hub::{ConnectionState, McpHub};
-pub use enhanced_hub::EnhancedMcpHub;
+pub use hub::McpHub;
+pub use enhanced_hub::{ConnectionState, EnhancedMcpHub};
 pub use types::{McpServerConfig, McpToolInfo, McpTransport};

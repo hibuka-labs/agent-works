@@ -42,9 +42,8 @@ pub trait Skill: Send + Sync {
     fn detailed_description(&self) -> String;
 
     /// Tools provided by knowledge-type skills.
-    fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![]
-    }
+    /// Template-type skills should return `vec![]`.
+    fn tools(&self) -> Vec<Arc<dyn Tool>>;
 
     /// Generate PlanSteps from this template skill with the given params.
     /// Template-type skills override this; knowledge-type skills return None.

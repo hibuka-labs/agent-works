@@ -4,14 +4,8 @@ use agent_base::{AgentResult, ToolRegistry};
 use tracing::{info, warn};
 
 use super::client::{McpClient, McpToolAdapter};
+use super::enhanced_hub::ConnectionState;
 use super::types::{McpServerConfig, McpToolInfo};
-
-#[derive(Clone, Debug)]
-pub enum ConnectionState {
-    Disconnected,
-    Connected,
-    Failed(String),
-}
 
 struct ServerEntry {
     config: McpServerConfig,

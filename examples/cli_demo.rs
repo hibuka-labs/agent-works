@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+    RuntimeEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, SessionId, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    ReasoningConfig,
 };
 use agent_works::{
     AgentBuilder,
@@ -34,7 +35,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<Value> {
         unimplemented!()
@@ -44,7 +45,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<ChunkStream> {
         let chunks: Vec<AgentResult<StreamChunk>> = self
@@ -159,19 +160,19 @@ async fn main() -> AgentResult<()> {
     println!();
 
     println!("[6] Demo: CliEventPrinter handling events manually");
-    printer.handle(AgentEvent::TextDelta {
+    printer.handle(RuntimeEvent::TextDelta {
         session_id: SessionId::new(0),
         text: "Hello, world!".to_string(),
     })?;
     println!();
 
-    printer.handle(AgentEvent::ToolCallStarted {
+    printer.handle(RuntimeEvent::ToolCallStarted {
         session_id: SessionId::new(0),
         tool_name: "echo".to_string(),
         args_json: r#"{"message": "hello"}"#.to_string(),
     })?;
 
-    printer.handle(AgentEvent::ToolCallFinished {
+    printer.handle(RuntimeEvent::ToolCallFinished {
         session_id: SessionId::new(0),
         tool_name: "echo".to_string(),
         summary: "echo: hello".to_string(),

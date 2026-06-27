@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
+    RuntimeEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
     ResponseFormat, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    ReasoningConfig,
 };
 use agent_works::{
     AgentBuilder,
@@ -34,7 +35,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<Value> {
         unimplemented!()
@@ -44,7 +45,7 @@ impl LlmClient for MockLlmClient {
         &self,
         _messages: &[ChatMessage],
         _tools: &[Value],
-        _reasoning: Option<&agent_works::ReasoningConfig>,
+        _reasoning: Option<&ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<ChunkStream> {
         let chunks: Vec<AgentResult<StreamChunk>> = self
@@ -227,13 +228,13 @@ async fn main() -> AgentResult<()> {
 
     for event in &events {
         match event {
-            AgentEvent::ToolCallStarted { tool_name, args_json, .. } => {
+            RuntimeEvent::ToolCallStarted { tool_name, args_json, .. } => {
                 println!("[Tool Start] {tool_name} {args_json}");
             }
-            AgentEvent::ToolCallFinished { tool_name, summary, .. } => {
+            RuntimeEvent::ToolCallFinished { tool_name, summary, .. } => {
                 println!("[Tool Done] {tool_name}: {summary}");
             }
-            AgentEvent::TextDelta { text, .. } => {
+            RuntimeEvent::TextDelta { text, .. } => {
                 print!("{text}");
             }
             _ => {}

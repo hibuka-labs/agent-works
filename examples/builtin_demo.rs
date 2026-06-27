@@ -1,18 +1,18 @@
 use agent_works::builtin::{
     FileExistsTool, ListDirectoryTool, ReadFileTool, SearchReplaceTool, WriteFileTool,
 };
-use agent_base::{AgentResult, Language, SessionId, Tool, ToolContext};
+use agent_base::{AgentError, AgentResult, Language, SessionId, Tool, ToolContext};
 use serde_json::json;
 
 fn make_tool_context() -> ToolContext {
-    let (tx, _rx) = tokio::sync::broadcast::channel(1);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     ToolContext {
         session_id: SessionId::new(1),
-        event_bus: tx,
-        event_sender: None,
+        user_event_tx: tx,
         llm_client: None,
         session_store: None,
         language: Language::En,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 
@@ -28,7 +28,7 @@ async fn main() -> AgentResult<()> {
     println!("=== agent-works Builtin Tools Demo ===\n");
 
     let tmp = tempfile::tempdir().map_err(|e| {
-        agent_works::AgentError::internal(format!("failed to create temp dir: {e}"))
+        AgentError::internal(format!("failed to create temp dir: {e}"))
     })?;
     let workspace = tmp.path().to_path_buf();
     println!("[0] Temp workspace: {}\n", workspace.display());
