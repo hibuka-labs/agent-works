@@ -16,6 +16,8 @@ pub struct SkillSummary {
     pub param_defs: Vec<SkillParam>,
     pub has_plan: bool,
     pub version: String,
+    pub category: String,
+    pub author: String,
 }
 
 /// Runtime registry for skills. Supports dynamic registration,
@@ -50,6 +52,8 @@ impl SkillRegistry {
                 param_defs: s.parameters().to_vec(),
                 has_plan: s.plan_steps(&HashMap::new()).is_some(),
                 version: s.version().to_string(),
+                category: s.category().to_string(),
+                author: s.author().to_string(),
             })
             .collect()
     }

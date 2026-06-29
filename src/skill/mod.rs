@@ -70,6 +70,10 @@ pub trait Skill: Send + Sync {
     fn author(&self) -> &'static str {
         ""
     }
+
+    fn category(&self) -> &'static str {
+        ""
+    }
 }
 
 // ── SkillPrompter trait ──
