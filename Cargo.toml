@@ -13,9 +13,11 @@ categories = ["development-tools", "asynchronous"]
 default = []
 mcp = []
 skill = []
+prompt_skill = ["serde_yaml"]
+yaml_skill = ["serde_yaml"]
 builtin-tools = ["walkdir"]
 cli = []
-full = ["mcp", "skill", "builtin-tools", "cli"]
+full = ["mcp", "skill", "builtin-tools", "cli", "prompt_skill", "yaml_skill"]
 
 [dependencies]
 agent-base = { path = "../agent-base" }
@@ -26,6 +28,7 @@ tokio = { version = "=1.52.2", features = ["full"] }
 tracing = "0.1"
 reqwest = { version = "0.13.3", features = ["json"] }
 walkdir = { version = "2", optional = true }
+serde_yaml = { version = "0.9", optional = true }
 
 [dev-dependencies]
 futures-core = "0.3.32"

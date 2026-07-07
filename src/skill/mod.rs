@@ -9,6 +9,12 @@ pub mod prompter;
 pub mod registry;
 pub mod apply_tool;
 
+#[cfg(feature = "prompt_skill")]
+pub mod prompt_skill;
+
+#[cfg(feature = "yaml_skill")]
+pub mod yaml_skill;
+
 pub use detail_tool::SkillDetailTool;
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
 pub use registry::{SkillRegistry, SkillSummary};

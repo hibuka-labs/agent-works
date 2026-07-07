@@ -18,5 +18,12 @@ pub use crate::handle::{AgentHandle, SendError};
 
 #[cfg(feature = "skill")]
 pub use skill::{
-    ApplySkillTool, Skill, SkillParam, SkillParamType, SkillRegistry, SkillSummary,
+    ApplySkillTool, FullDetailPrompter, LazySkillPrompter, Skill, SkillDetailTool,
+    SkillParam, SkillParamType, SkillRegistry, SkillSummary,
 };
+
+#[cfg(feature = "prompt_skill")]
+pub use skill::prompt_skill::PromptSkill;
+
+#[cfg(feature = "yaml_skill")]
+pub use skill::yaml_skill::YamlSkill;
