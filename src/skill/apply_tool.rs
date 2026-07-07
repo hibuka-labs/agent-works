@@ -2,28 +2,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_base::{
-    AgentError, AgentResult, PlanStore, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::registry::SkillRegistry;
 
-/// Tool that lets the LLM invoke a template skill, generating an ExecutionPlan.
+/// Tool that lets the LLM invoke a template skill, generating a plan checklist.
 ///
-/// The LLM calls `apply_skill(skill_name, params)` and receives a plan_id
-/// it can then execute via the existing `execute_plan` tool.
+/// The LLM calls `apply_skill(skill_name, params)` and receives a structured
+/// plan it can display via `update_plan` and then execute step by step.
 pub struct ApplySkillTool {
     registry: Arc<SkillRegistry>,
-    plan_store: Arc<dyn PlanStore>,
 }
 
 impl ApplySkillTool {
-    pub fn new(registry: Arc<SkillRegistry>, plan_store: Arc<dyn PlanStore>) -> Self {
-        Self {
-            registry,
-            plan_store,
-        }
+    pub fn new(registry: Arc<SkillRegistry>) -> Self {
+        Self { registry }
     }
 }
 
@@ -90,7 +86,7 @@ impl Tool for ApplySkillTool {
             })
             .unwrap_or_default();
 
-        // Apply the skill — generates ExecutionPlan
+        // Apply the skill — generates UpdatePlanArgs (plan checklist)
         let plan = match self.registry.apply(skill_name, &params).await {
             Ok(Some(plan)) => plan,
             Ok(None) => {
@@ -129,32 +125,29 @@ impl Tool for ApplySkillTool {
             }
         };
 
-        let plan_id = plan.id.clone();
-        let steps_total = plan.total_steps();
+        let steps_total = plan.plan.len();
         let steps_summary: Vec<String> = plan
-            .all_steps()
-            .map(|s| format!("- {}", s.description))
+            .plan
+            .iter()
+            .map(|s| format!("- [{}] {}",
+                match s.status {
+                    agent_base::PlanStepStatus::Pending => " ",
+                    agent_base::PlanStepStatus::InProgress => "→",
+                    agent_base::PlanStepStatus::Completed => "✓",
+                },
+                s.step
+            ))
             .collect();
 
-        // Save to PlanStore so execute_plan can pick it up
-        self.plan_store
-            .save_plan(&plan, json!({"source": "skill", "skill_name": skill_name}))
-            .await
-            .map_err(|e| {
-                AgentError::internal(format!("Failed to store plan from skill '{}': {}", skill_name, e))
-            })?;
-
         let summary = format!(
-            "已从技能 '{}' 生成执行计划 (plan_id: {}, {} 个步骤):\n{}",
+            "已从技能 '{}' 生成执行计划 ({} 个步骤):\n{}\n\n请使用 update_plan 工具向用户展示此计划，然后按步骤执行。",
             skill_name,
-            plan_id,
             steps_total,
             steps_summary.join("\n")
         );
 
         tracing::info!(
             skill_name = skill_name,
-            plan_id = plan_id,
             steps = steps_total,
             "apply_skill: plan generated"
         );
@@ -162,9 +155,16 @@ impl Tool for ApplySkillTool {
         Ok(ToolOutput {
             summary,
             raw: Some(json!({
-                "plan_id": plan_id,
                 "skill_name": skill_name,
-                "steps": steps_total,
+                "objective": plan.objective,
+                "steps": plan.plan.iter().map(|item| json!({
+                    "step": item.step,
+                    "status": match item.status {
+                        agent_base::PlanStepStatus::Pending => "pending",
+                        agent_base::PlanStepStatus::InProgress => "in_progress",
+                        agent_base::PlanStepStatus::Completed => "completed",
+                    }
+                })).collect::<Vec<_>>(),
             })),
             control_flow: ToolControlFlow::Break,
             truncation: None,
@@ -175,7 +175,7 @@ impl Tool for ApplySkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::{InMemoryPlanStore, PlanStep};
+    use agent_base::{PlanItem, PlanStepStatus};
     use crate::skill::{Skill, SkillParam, SkillParamType};
     use std::sync::Arc;
 
@@ -199,14 +199,12 @@ mod tests {
         fn plan_steps(
             &self,
             params: &HashMap<String, String>,
-        ) -> Option<Vec<PlanStep>> {
+        ) -> Option<Vec<PlanItem>> {
             let host = params.get("target_host").cloned().unwrap_or_default();
-            Some(vec![PlanStep::tool_call(
-                "step-1",
-                "Check disk",
-                "execute_command",
-                json!({"command": "df -h", "target_host": host}),
-            )])
+            Some(vec![PlanItem {
+                step: format!("在 {} 上检查磁盘空间", host),
+                status: PlanStepStatus::Pending,
+            }])
         }
         fn parameters(&self) -> &[SkillParam] {
             &self.params
@@ -227,8 +225,7 @@ mod tests {
         });
         registry.register(skill).await;
 
-        let plan_store = Arc::new(InMemoryPlanStore::new());
-        let tool = ApplySkillTool::new(registry, plan_store.clone());
+        let tool = ApplySkillTool::new(registry);
 
         let args = json!({
             "skill_name": "test-template",
@@ -236,22 +233,19 @@ mod tests {
         });
 
         let result = tool.call(&args, &dummy_ctx()).await.unwrap();
-        assert!(result.summary.contains("plan_id"));
-        assert!(result.summary.contains("Check disk"));
+        assert!(result.summary.contains("test-template"));
+        assert!(result.summary.contains("检查磁盘空间"));
 
-        // Verify plan was saved
+        // Verify structured output
         let raw = result.raw.unwrap();
-        let plan_id = raw["plan_id"].as_str().unwrap();
-        let saved = plan_store.load_plan(plan_id).await.unwrap();
-        assert!(saved.is_some());
-        assert_eq!(saved.unwrap().plan.total_steps(), 1);
+        assert_eq!(raw["skill_name"].as_str().unwrap(), "test-template");
+        assert_eq!(raw["steps"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn test_apply_skill_tool_missing_skill() {
         let registry = Arc::new(SkillRegistry::new());
-        let plan_store = Arc::new(InMemoryPlanStore::new());
-        let tool = ApplySkillTool::new(registry, plan_store);
+        let tool = ApplySkillTool::new(registry);
 
         let args = json!({"skill_name": "nonexistent"});
         let result = tool.call(&args, &dummy_ctx()).await.unwrap();

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::{PlanStep, Tool};
+use agent_base::{PlanItem, Tool};
 use serde::Serialize;
 
 pub mod detail_tool;
@@ -45,12 +45,12 @@ pub trait Skill: Send + Sync {
     /// Template-type skills should return `vec![]`.
     fn tools(&self) -> Vec<Arc<dyn Tool>>;
 
-    /// Generate PlanSteps from this template skill with the given params.
+    /// Generate PlanItems from this template skill with the given params.
     /// Template-type skills override this; knowledge-type skills return None.
     fn plan_steps(
         &self,
         _params: &HashMap<String, String>,
-    ) -> Option<Vec<PlanStep>> {
+    ) -> Option<Vec<PlanItem>> {
         None
     }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::{AgentError, AgentResult, ExecutionPlan};
+use agent_base::{AgentError, AgentResult, UpdatePlanArgs};
 use tokio::sync::RwLock;
 
 use super::{Skill, SkillParam};
@@ -64,13 +64,13 @@ impl SkillRegistry {
         skills.iter().find(|s| s.name() == name).cloned()
     }
 
-    /// Apply a template skill: substitute parameters → generate ExecutionPlan.
+    /// Apply a template skill: substitute parameters → generate plan args.
     /// Returns `None` if the skill doesn't exist or is not a template skill.
     pub async fn apply(
         &self,
         name: &str,
         params: &HashMap<String, String>,
-    ) -> AgentResult<Option<ExecutionPlan>> {
+    ) -> AgentResult<Option<UpdatePlanArgs>> {
         let skill = match self.get(name).await {
             Some(s) => s,
             None => return Ok(None),
@@ -86,7 +86,7 @@ impl SkillRegistry {
             }
         }
 
-        // Generate plan steps via template expansion
+        // Generate plan items via template expansion
         let steps = match skill.plan_steps(params) {
             Some(s) => s,
             None => return Ok(None), // Not a template skill
@@ -99,22 +99,17 @@ impl SkillRegistry {
             )));
         }
 
-        let plan_id = format!(
-            "skill-{}-{}",
-            name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-
         let objective = format!(
             "{}: {}",
             name,
             skill.brief_description()
         );
 
-        let plan = ExecutionPlan::with_single_phase(plan_id, objective, steps);
+        let plan = UpdatePlanArgs {
+            objective,
+            explanation: Some(format!("从技能模板 '{}' 生成", name)),
+            plan: steps,
+        };
 
         Ok(Some(plan))
     }

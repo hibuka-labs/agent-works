@@ -73,55 +73,19 @@ impl CliEventPrinter {
             RuntimeEvent::RunFinished { .. } => {
                 self.finish();
             }
-            RuntimeEvent::PlanGenerated { plan, .. } => {
+            RuntimeEvent::PlanUpdated {
+                objective, plan, ..
+            } => {
                 self.finish();
-                println!("[Plan Generated] id={}", plan.id);
-                for phase in &plan.phases {
-                    println!("  Phase: {}", phase.title);
-                    for (i, step) in phase.steps.iter().enumerate() {
-                        println!("    {}. {}", i + 1, step.description);
-                    }
+                println!("[Plan] {objective}");
+                for (i, item) in plan.iter().enumerate() {
+                    let status_icon = match item.status {
+                        agent_base::PlanStepStatus::Completed => "✅",
+                        agent_base::PlanStepStatus::InProgress => "🔄",
+                        agent_base::PlanStepStatus::Pending => "⏳",
+                    };
+                    println!("  {status_icon} {}. {}", i + 1, item.step);
                 }
-            }
-            RuntimeEvent::PlanStepStarted {
-                step_id,
-                step_description,
-                ..
-            } => {
-                self.finish();
-                println!("[Plan Step Start] {step_id} - {step_description}");
-            }
-            RuntimeEvent::PlanStepCompleted {
-                step_id,
-                success,
-                result,
-                ..
-            } => {
-                self.finish();
-                println!(
-                    "[Plan Step Done] {step_id} ({})",
-                    if success { "success" } else { "failed" }
-                );
-                if let Some(result) = result {
-                    for line in result.lines() {
-                        println!("  {line}");
-                    }
-                }
-            }
-            RuntimeEvent::PlanCompleted {
-                plan_id, success, ..
-            } => {
-                self.finish();
-                println!(
-                    "[Plan Done] {plan_id} ({})",
-                    if success { "success" } else { "failed" }
-                );
-            }
-            RuntimeEvent::PlanFailed {
-                plan_id, error, ..
-            } => {
-                self.finish();
-                println!("[Plan Failed] {plan_id} - {error}");
             }
             _ => {}
         }
