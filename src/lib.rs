@@ -10,6 +10,8 @@ pub mod builtin;
 #[cfg(feature = "cli")]
 pub mod cli;
 
+pub mod focus;
+
 mod builder;
 pub mod handle;
 
