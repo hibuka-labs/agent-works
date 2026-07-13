@@ -106,7 +106,7 @@ impl SkillRegistry {
         );
 
         let plan = UpdatePlanArgs {
-            objective,
+            objective: Some(objective),
             explanation: Some(format!("从技能模板 '{}' 生成", name)),
             plan: steps,
         };
