@@ -150,6 +150,22 @@ impl Focus {
     ) -> Result<FocusOutput<T>, FocusError> {
         let user_prompt = input.to_prompt();
 
+        // Logging: first line of prompt + char count (privacy-friendly)
+        let prompt_first_line = user_prompt.lines().next().unwrap_or("(empty)");
+        let prompt_char_count = user_prompt.chars().count();
+        let sys_first_line = self.system_prompt.lines().next().unwrap_or("(empty)");
+        let target_type = std::any::type_name::<T>();
+
+        tracing::info!(
+            target_type = target_type,
+            system_prompt = %sys_first_line,
+            user_prompt_first_line = %prompt_first_line,
+            user_prompt_chars = prompt_char_count,
+            timeout_secs = timeout.as_secs(),
+            "[Focus] calling LLM"
+        );
+
+        let start = std::time::Instant::now();
         let messages = vec![
             ChatMessage::system(self.system_prompt.clone()),
             ChatMessage::user(user_prompt),
@@ -164,19 +180,28 @@ impl Focus {
         .map_err(|_| FocusError::Timeout(timeout))?
         .map_err(|e| FocusError::Llm(e.to_string()))?;
 
+        let elapsed_ms = start.elapsed().as_millis();
         let raw_response = extract_content(&response).to_string();
 
         let result: T = serde_json::from_str(&raw_response).map_err(|e| {
             tracing::warn!(
                 error = %e,
                 raw_response = %raw_response,
-                "Focus: failed to parse LLM response as JSON"
+                elapsed_ms = elapsed_ms,
+                "[Focus] failed to parse LLM response as JSON"
             );
             FocusError::Parse {
                 error: e.to_string(),
                 raw: raw_response.clone(),
             }
         })?;
+
+        tracing::info!(
+            target_type = target_type,
+            raw_response_chars = raw_response.chars().count(),
+            elapsed_ms = elapsed_ms,
+            "[Focus] call succeeded"
+        );
 
         Ok(FocusOutput {
             result,
