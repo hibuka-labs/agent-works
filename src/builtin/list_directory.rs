@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use super::path_util::validate_path;
+use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 
 pub struct ListDirectoryTool {
     pub workspace: PathBuf,
@@ -41,12 +41,10 @@ impl Tool for ListDirectoryTool {
         let full_path = validate_path(&self.workspace, path)?;
 
         tracing::debug!(path = %path, "list directory start");
-        let mut entries = tokio::fs::read_dir(&full_path)
-            .await
-            .map_err(|e| {
-                tracing::error!(path = %path, error = %e, "list directory failed");
-                AgentError::internal(format!("failed to read dir {}: {e}", full_path.display()))
-            })?;
+        let mut entries = tokio::fs::read_dir(&full_path).await.map_err(|e| {
+            tracing::error!(path = %path, error = %e, "list directory failed");
+            AgentError::internal(format!("failed to read dir {}: {e}", full_path.display()))
+        })?;
 
         let mut items: Vec<Value> = Vec::new();
         loop {

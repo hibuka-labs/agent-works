@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::RwLock as StdRwLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use agent_base::{AgentResult, ToolRegistry, AgentError};
-use tokio::sync::{broadcast, RwLock};
+use agent_base::{AgentError, AgentResult, ToolRegistry};
+use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use super::client::{McpClient, McpToolAdapter};
 use super::types::{McpServerConfig, McpToolInfo};
@@ -85,7 +85,10 @@ impl ServerEntry {
         drop(attempts);
 
         // 指数退避
-        let delay = Duration::from_millis(std::cmp::min(1000 * (2_u64.pow(attempt_count.min(5))), 30000));
+        let delay = Duration::from_millis(std::cmp::min(
+            1000 * (2_u64.pow(attempt_count.min(5))),
+            30000,
+        ));
         sleep(delay).await;
 
         // 清除现有连接
@@ -99,7 +102,10 @@ impl ServerEntry {
                 let mut attempts = self.reconnect_attempts.write().await;
                 *attempts = 0;
 
-                info!("Successfully reconnected to MCP server: {}", self.config.name);
+                info!(
+                    "Successfully reconnected to MCP server: {}",
+                    self.config.name
+                );
                 Ok(())
             }
             Err(e) => {
@@ -198,11 +204,14 @@ impl EnhancedMcpHub {
             Ok(())
         } else if errors.len() == servers.len() {
             // All servers failed
-            let msg = errors.iter()
+            let msg = errors
+                .iter()
                 .map(|(name, e)| format!("{name}: {e}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            Err(AgentError::internal(format!("All MCP servers failed to connect: {msg}")))
+            Err(AgentError::internal(format!(
+                "All MCP servers failed to connect: {msg}"
+            )))
         } else {
             // Some succeeded, some failed — log but don't error
             let failed: Vec<&str> = errors.iter().map(|(n, _)| n.as_str()).collect();
@@ -315,7 +324,9 @@ impl EnhancedMcpHub {
                 for (name, entry) in &current {
                     let is_healthy = entry.health_check().await;
 
-                    if !is_healthy && matches!(*entry.state.read().await, ConnectionState::Unhealthy(_)) {
+                    if !is_healthy
+                        && matches!(*entry.state.read().await, ConnectionState::Unhealthy(_))
+                    {
                         if entry.config.auto_reconnect {
                             if let Err(e) = entry.reconnect().await {
                                 error!("Failed to reconnect to {}: {e}", name);
@@ -387,8 +398,14 @@ impl EnhancedMcpHub {
                 let mut state = entry.state.write().await;
                 *state = ConnectionState::Disconnected;
             }
-            if let Err(e) = self.status_tx.send((name.to_string(), ConnectionState::Disconnected)) {
-                warn!("Failed to broadcast disconnect status for '{}': {}", name, e);
+            if let Err(e) = self
+                .status_tx
+                .send((name.to_string(), ConnectionState::Disconnected))
+            {
+                warn!(
+                    "Failed to broadcast disconnect status for '{}': {}",
+                    name, e
+                );
             }
         }
     }

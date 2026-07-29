@@ -3,17 +3,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    RuntimeEvent, AgentResult, ChatMessage, LlmCapabilities, LlmClient,
-    ResponseFormat, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
-    ReasoningConfig,
+    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
+    RuntimeEvent, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
 use agent_works::{
     AgentBuilder,
-    skill::{Skill, LazySkillPrompter, FullDetailPrompter, SkillPrompter},
+    skill::{FullDetailPrompter, LazySkillPrompter, Skill, SkillPrompter},
 };
 use async_trait::async_trait;
 use futures_core::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 type ChunkStream = Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>;
 
@@ -228,10 +227,16 @@ async fn main() -> AgentResult<()> {
 
     for event in &events {
         match event {
-            RuntimeEvent::ToolCallStarted { tool_name, args_json, .. } => {
+            RuntimeEvent::ToolCallStarted {
+                tool_name,
+                args_json,
+                ..
+            } => {
                 println!("[Tool Start] {tool_name} {args_json}");
             }
-            RuntimeEvent::ToolCallFinished { tool_name, summary, .. } => {
+            RuntimeEvent::ToolCallFinished {
+                tool_name, summary, ..
+            } => {
                 println!("[Tool Done] {tool_name}: {summary}");
             }
             RuntimeEvent::TextDelta { text, .. } => {

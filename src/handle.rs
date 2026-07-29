@@ -66,19 +66,20 @@ impl AgentHandle {
                     AgentCommand::RunTurn { session_id, input } => {
                         let tx = event_tx.clone();
                         let sid = session_id.clone();
-                        let result = rt.run_turn(session_id, &input, move |event| {
-                            let _ = tx.send(event);
-                            Ok(())
-                        }).await;
+                        let result = rt
+                            .run_turn(session_id, &input, move |event| {
+                                let _ = tx.send(event);
+                                Ok(())
+                            })
+                            .await;
 
                         match &result {
                             Ok(_) => {}
                             Err(e) if e.is_cancelled() => {}
                             Err(e) => {
                                 tracing::error!(error = %e, "run_turn failed");
-                                let _ = event_tx.send(RuntimeEvent::RunFinished {
-                                    session_id: sid,
-                                });
+                                let _ =
+                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid });
                             }
                         }
                     }
@@ -109,10 +110,12 @@ impl AgentHandle {
                     AgentCommand::RunTurn { session_id, input } => {
                         let tx = event_tx.clone();
                         let sid = session_id.clone();
-                        let result = rt.run_turn(session_id, &input, move |event| {
-                            let _ = tx.send(event);
-                            Ok(())
-                        }).await;
+                        let result = rt
+                            .run_turn(session_id, &input, move |event| {
+                                let _ = tx.send(event);
+                                Ok(())
+                            })
+                            .await;
 
                         // Handle errors: ensure caller always gets a terminal event
                         match &result {
@@ -125,9 +128,8 @@ impl AgentHandle {
                             Err(e) => {
                                 // Non-cancellation error: emit RunFinished so caller isn't stuck
                                 tracing::error!(error = %e, "run_turn failed");
-                                let _ = event_tx.send(RuntimeEvent::RunFinished {
-                                    session_id: sid,
-                                });
+                                let _ =
+                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid });
                             }
                         }
                     }

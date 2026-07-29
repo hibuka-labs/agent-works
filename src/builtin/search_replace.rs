@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use super::path_util::validate_path;
+use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 
 pub struct SearchReplaceTool {
     pub workspace: PathBuf,
@@ -61,7 +61,9 @@ impl Tool for SearchReplaceTool {
         if old_str == new_str {
             return Ok(ToolOutput {
                 summary: format!("No changes needed in {} (old_str == new_str)", path),
-                raw: Some(json!({"path": path, "found": true, "replaced": false, "reason": "identical strings"})),
+                raw: Some(
+                    json!({"path": path, "found": true, "replaced": false, "reason": "identical strings"}),
+                ),
                 control_flow: ToolControlFlow::Break,
                 truncation: None,
             });
@@ -70,12 +72,10 @@ impl Tool for SearchReplaceTool {
         let full_path = validate_path(&self.workspace, path)?;
 
         tracing::debug!(file = %path, "search replace start");
-        let content = tokio::fs::read_to_string(&full_path)
-            .await
-            .map_err(|e| {
-                tracing::error!(file = %path, error = %e, "search replace failed");
-                AgentError::internal(format!("failed to read {}: {e}", full_path.display()))
-            })?;
+        let content = tokio::fs::read_to_string(&full_path).await.map_err(|e| {
+            tracing::error!(file = %path, error = %e, "search replace failed");
+            AgentError::internal(format!("failed to read {}: {e}", full_path.display()))
+        })?;
 
         let replaced = content.replacen(old_str, new_str, 1);
 

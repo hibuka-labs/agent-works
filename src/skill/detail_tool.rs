@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use agent_base::{AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput, UserEvent};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::Skill;
 
@@ -45,10 +45,7 @@ impl Tool for SkillDetailTool {
     }
 
     async fn call(&self, args: &Value, ctx: &ToolContext) -> AgentResult<ToolOutput> {
-        let name = args
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let name = args.get("name").and_then(Value::as_str).unwrap_or("");
 
         if name.is_empty() {
             return Ok(ToolOutput {

@@ -99,11 +99,7 @@ impl SkillRegistry {
             )));
         }
 
-        let objective = format!(
-            "{}: {}",
-            name,
-            skill.brief_description()
-        );
+        let objective = format!("{}: {}", name, skill.brief_description());
 
         let plan = UpdatePlanArgs {
             objective: Some(objective),

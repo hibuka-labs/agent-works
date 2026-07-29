@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentResult, ChatMessage, LlmCapabilities, LlmClient,
-    ResponseFormat, RunOutcome, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ResponseFormat, RunOutcome, StreamChunk,
+    Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
 use agent_works::AgentBuilder;
 use async_trait::async_trait;
 use futures_core::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 type ChunkStream = Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>;
 
@@ -179,10 +179,7 @@ async fn test_builder_forwarding_middleware() {
 
     #[async_trait]
     impl agent_base::Middleware for FlagMiddleware {
-        async fn on_post_llm(
-            &self,
-            _ctx: &mut agent_base::PostLlmCtx,
-        ) -> AgentResult<()> {
+        async fn on_post_llm(&self, _ctx: &mut agent_base::PostLlmCtx) -> AgentResult<()> {
             self.flag.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -204,7 +201,10 @@ async fn test_builder_forwarding_middleware() {
     let session_id = runtime.create_session().await;
     let result = runtime.run_turn_collect(session_id, "test").await;
     assert!(result.is_ok());
-    assert!(triggered.load(Ordering::SeqCst), "Middleware should be triggered");
+    assert!(
+        triggered.load(Ordering::SeqCst),
+        "Middleware should be triggered"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -246,24 +246,24 @@ async fn test_builder_forwarding_error_recovery() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-    async fn test_tool_enforcement_available_via_works() {
-        let llm = Arc::new(MockLlmClient::new(vec![vec![
-            StreamChunk::Text("I will do it...".to_string()),
-            StreamChunk::Stop,
-        ]]));
+async fn test_tool_enforcement_available_via_works() {
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
+        StreamChunk::Text("I will do it...".to_string()),
+        StreamChunk::Stop,
+    ]]));
 
-        let config = agent_base::ToolEnforcementConfig::default();
-        let runtime = AgentBuilder::new(llm)
-            .register_tool(EchoTool)
-            .system_prompt("sys")
-            .middleware(agent_base::ToolEnforcementMiddleware::new(config))
-            .build()
-            .unwrap();
+    let config = agent_base::ToolEnforcementConfig::default();
+    let runtime = AgentBuilder::new(llm)
+        .register_tool(EchoTool)
+        .system_prompt("sys")
+        .middleware(agent_base::ToolEnforcementMiddleware::new(config))
+        .build()
+        .unwrap();
 
-        let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_collect(session_id, "do something").await;
-        assert!(result.is_ok(), "Expected ok: {result:?}");
-    }
+    let session_id = runtime.create_session().await;
+    let result = runtime.run_turn_collect(session_id, "do something").await;
+    assert!(result.is_ok(), "Expected ok: {result:?}");
+}
 
 // ---------------------------------------------------------------------------
 // Skill feature tests
@@ -272,10 +272,10 @@ async fn test_builder_forwarding_error_recovery() {
 #[cfg(feature = "skill")]
 mod skill_tests {
     use super::*;
-    use agent_works::skill::{LazySkillPrompter, Skill, SkillPrompter};
     use agent_base::RuntimeEvent;
-    use std::sync::Arc;
+    use agent_works::skill::{LazySkillPrompter, Skill, SkillPrompter};
     use serde_json::Value;
+    use std::sync::Arc;
 
     struct AddTool;
 
@@ -363,9 +363,9 @@ mod skill_tests {
         assert!(result.is_ok(), "Expected ok, got: {result:?}");
 
         let (events, _outcome) = result.unwrap();
-        let tool_done = events.iter().any(|e| {
-            matches!(e, RuntimeEvent::ToolCallFinished { tool_name, .. } if tool_name == "add")
-        });
+        let tool_done = events.iter().any(
+            |e| matches!(e, RuntimeEvent::ToolCallFinished { tool_name, .. } if tool_name == "add"),
+        );
         assert!(tool_done, "add tool should be called");
     }
 
@@ -423,7 +423,9 @@ mod skill_tests {
             .unwrap();
 
         let session_id = runtime.create_session().await;
-        let result = runtime.run_turn_collect(session_id, "tell me about math skill").await;
+        let result = runtime
+            .run_turn_collect(session_id, "tell me about math skill")
+            .await;
         assert!(result.is_ok(), "Expected ok, got: {result:?}");
 
         let (events, _outcome) = result.unwrap();
@@ -431,7 +433,10 @@ mod skill_tests {
             matches!(e, RuntimeEvent::ToolCallFinished { tool_name, summary, .. }
                 if tool_name == "skill_info" && summary.contains("Math Skill"))
         });
-        assert!(skill_loaded, "skill_info tool should return Math Skill detail");
+        assert!(
+            skill_loaded,
+            "skill_info tool should return Math Skill detail"
+        );
     }
 
     #[tokio::test]
@@ -460,7 +465,10 @@ mod skill_tests {
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.contains("math"), "Prompt should contain skill name");
-        assert!(prompt.contains("get_skill_detail"), "Prompt should contain instruction");
+        assert!(
+            prompt.contains("get_skill_detail"),
+            "Prompt should contain instruction"
+        );
     }
 
     #[test]
@@ -482,7 +490,10 @@ mod skill_tests {
         let prompter = agent_works::skill::FullDetailPrompter;
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.contains("math"), "Should contain skill name");
-        assert!(prompt.contains("Math Skill"), "Should contain detailed description");
+        assert!(
+            prompt.contains("Math Skill"),
+            "Should contain detailed description"
+        );
     }
 
     #[test]
@@ -629,7 +640,10 @@ async fn test_skill_detail_tool_standalone() {
 
     let def = detail_tool.definition();
     let func = def.get("function").unwrap();
-    assert_eq!(func.get("name").unwrap().as_str().unwrap(), "get_skill_detail");
+    assert_eq!(
+        func.get("name").unwrap().as_str().unwrap(),
+        "get_skill_detail"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -638,8 +652,8 @@ async fn test_skill_detail_tool_standalone() {
 
 #[cfg(feature = "builtin-tools")]
 mod path_traversal_tests {
+    use agent_base::{Language, SessionId, Tool, ToolContext, UserEvent};
     use agent_works::builtin::*;
-    use agent_base::{Tool, ToolContext, Language, SessionId, UserEvent};
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
@@ -668,7 +682,9 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_read_file_blocks_traversal() {
         let ws = setup_workspace();
-        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let tool = ReadFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "../../etc/passwd"}), &ctx).await;
@@ -685,7 +701,9 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_read_file_blocks_null_byte() {
         let ws = setup_workspace();
-        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let tool = ReadFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "hello\0world"}), &ctx).await;
@@ -695,22 +713,34 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_read_file_allows_valid_path() {
         let ws = setup_workspace();
-        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let tool = ReadFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "secret.txt"}), &ctx).await;
-        assert!(result.is_ok(), "read_file should allow valid path: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "read_file should allow valid path: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().summary.contains("top secret"));
     }
 
     #[tokio::test]
     async fn test_read_file_allows_subdir_path() {
         let ws = setup_workspace();
-        let tool = ReadFileTool { workspace: ws.path().to_path_buf() };
+        let tool = ReadFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "sub/nested.txt"}), &ctx).await;
-        assert!(result.is_ok(), "read_file should allow subdir path: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "read_file should allow subdir path: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().summary.contains("nested content"));
     }
 
@@ -719,13 +749,17 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_write_file_blocks_traversal() {
         let ws = setup_workspace();
-        let tool = WriteFileTool { workspace: ws.path().to_path_buf() };
+        let tool = WriteFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
-        let result = tool.call(
-            &json!({"path": "../escape.txt", "content": "escaped"}),
-            &ctx,
-        ).await;
+        let result = tool
+            .call(
+                &json!({"path": "../escape.txt", "content": "escaped"}),
+                &ctx,
+            )
+            .await;
         assert!(result.is_err(), "write_file should reject traversal path");
     }
 
@@ -734,11 +768,16 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_list_directory_blocks_traversal() {
         let ws = setup_workspace();
-        let tool = ListDirectoryTool { workspace: ws.path().to_path_buf() };
+        let tool = ListDirectoryTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "../.."}), &ctx).await;
-        assert!(result.is_err(), "list_directory should reject traversal path");
+        assert!(
+            result.is_err(),
+            "list_directory should reject traversal path"
+        );
     }
 
     // -- file_exists traversal --
@@ -746,7 +785,9 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_file_exists_blocks_traversal() {
         let ws = setup_workspace();
-        let tool = FileExistsTool { workspace: ws.path().to_path_buf() };
+        let tool = FileExistsTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(&json!({"path": "../../etc/passwd"}), &ctx).await;
@@ -758,14 +799,21 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_search_replace_blocks_traversal() {
         let ws = setup_workspace();
-        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let tool = SearchReplaceTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
-        let result = tool.call(
-            &json!({"path": "../../etc/passwd", "old_str": "root", "new_str": "hacked"}),
-            &ctx,
-        ).await;
-        assert!(result.is_err(), "search_replace should reject traversal path");
+        let result = tool
+            .call(
+                &json!({"path": "../../etc/passwd", "old_str": "root", "new_str": "hacked"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "search_replace should reject traversal path"
+        );
     }
 
     // -- search_replace old == new --
@@ -773,13 +821,17 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_search_replace_same_old_new() {
         let ws = setup_workspace();
-        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let tool = SearchReplaceTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
-        let result = tool.call(
-            &json!({"path": "secret.txt", "old_str": "same", "new_str": "same"}),
-            &ctx,
-        ).await;
+        let result = tool
+            .call(
+                &json!({"path": "secret.txt", "old_str": "same", "new_str": "same"}),
+                &ctx,
+            )
+            .await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(
@@ -794,7 +846,9 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_search_replace_not_found() {
         let ws = setup_workspace();
-        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let tool = SearchReplaceTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
         let result = tool.call(
@@ -810,19 +864,28 @@ mod path_traversal_tests {
     #[tokio::test]
     async fn test_search_replace_success() {
         let ws = setup_workspace();
-        let tool = SearchReplaceTool { workspace: ws.path().to_path_buf() };
+        let tool = SearchReplaceTool {
+            workspace: ws.path().to_path_buf(),
+        };
         let ctx = make_ctx();
 
-        let result = tool.call(
-            &json!({"path": "secret.txt", "old_str": "top secret", "new_str": "declassified"}),
-            &ctx,
-        ).await;
+        let result = tool
+            .call(
+                &json!({"path": "secret.txt", "old_str": "top secret", "new_str": "declassified"}),
+                &ctx,
+            )
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().summary.contains("Successfully"));
 
         // Verify the replacement
-        let read_tool = ReadFileTool { workspace: ws.path().to_path_buf() };
-        let content = read_tool.call(&json!({"path": "secret.txt"}), &ctx).await.unwrap();
+        let read_tool = ReadFileTool {
+            workspace: ws.path().to_path_buf(),
+        };
+        let content = read_tool
+            .call(&json!({"path": "secret.txt"}), &ctx)
+            .await
+            .unwrap();
         assert!(content.summary.contains("declassified"));
         assert!(!content.summary.contains("top secret"));
     }
@@ -834,16 +897,24 @@ mod path_traversal_tests {
 
 #[cfg(feature = "skill")]
 mod prompter_tests {
-    use agent_works::skill::{LazySkillPrompter, FullDetailPrompter, SkillPrompter, Skill};
     use agent_base::Tool;
+    use agent_works::skill::{FullDetailPrompter, LazySkillPrompter, Skill, SkillPrompter};
     use std::sync::Arc;
 
     struct TestSkill;
     impl Skill for TestSkill {
-        fn name(&self) -> &'static str { "test_skill" }
-        fn brief_description(&self) -> String { "A test skill".to_string() }
-        fn detailed_description(&self) -> String { "Detailed test instructions".to_string() }
-        fn tools(&self) -> Vec<Arc<dyn Tool>> { vec![] }
+        fn name(&self) -> &'static str {
+            "test_skill"
+        }
+        fn brief_description(&self) -> String {
+            "A test skill".to_string()
+        }
+        fn detailed_description(&self) -> String {
+            "Detailed test instructions".to_string()
+        }
+        fn tools(&self) -> Vec<Arc<dyn Tool>> {
+            vec![]
+        }
     }
 
     #[test]
@@ -851,7 +922,10 @@ mod prompter_tests {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
-        assert!(prompt.contains("get_skill_detail"), "default prompt should mention the tool name");
+        assert!(
+            prompt.contains("get_skill_detail"),
+            "default prompt should mention the tool name"
+        );
         assert!(prompt.contains("test_skill"));
     }
 
@@ -860,15 +934,21 @@ mod prompter_tests {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "my_custom_detail");
-        assert!(prompt.contains("my_custom_detail"), "should use custom tool name");
-        assert!(!prompt.contains("get_skill_detail"), "should NOT contain default name");
+        assert!(
+            prompt.contains("my_custom_detail"),
+            "should use custom tool name"
+        );
+        assert!(
+            !prompt.contains("get_skill_detail"),
+            "should NOT contain default name"
+        );
     }
 
     #[test]
     fn test_lazy_prompter_custom_instruction_with_placeholder() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
-        let prompter = LazySkillPrompter::new()
-            .instruction("Use `{tool}` to learn more about skills.");
+        let prompter =
+            LazySkillPrompter::new().instruction("Use `{tool}` to learn more about skills.");
         let prompt = prompter.build_prompt(&skills, "detail_query");
         assert!(
             prompt.contains("Use `detail_query` to learn more"),
@@ -883,7 +963,10 @@ mod prompter_tests {
         let prompter = FullDetailPrompter;
         let prompt = prompter.build_prompt(&skills, "whatever");
         assert!(prompt.contains("Detailed test instructions"));
-        assert!(!prompt.contains("whatever"), "FullDetailPrompter should not use tool name");
+        assert!(
+            !prompt.contains("whatever"),
+            "FullDetailPrompter should not use tool name"
+        );
     }
 
     #[test]
@@ -891,7 +974,10 @@ mod prompter_tests {
         let skills: Vec<Arc<dyn Skill>> = vec![];
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
-        assert!(prompt.is_empty(), "empty skills should produce empty prompt");
+        assert!(
+            prompt.is_empty(),
+            "empty skills should produce empty prompt"
+        );
     }
 }
 
@@ -951,10 +1037,22 @@ mod agent_handle_tests {
         }
         #[async_trait]
         impl LlmClient for BlockingLlm {
-            async fn chat(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<Value> {
+            async fn chat(
+                &self,
+                _: &[ChatMessage],
+                _: &[Value],
+                _: Option<&agent_base::ReasoningConfig>,
+                _: Option<&ResponseFormat>,
+            ) -> AgentResult<Value> {
                 unimplemented!()
             }
-            async fn chat_stream(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<ChunkStream> {
+            async fn chat_stream(
+                &self,
+                _: &[ChatMessage],
+                _: &[Value],
+                _: Option<&agent_base::ReasoningConfig>,
+                _: Option<&ResponseFormat>,
+            ) -> AgentResult<ChunkStream> {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentResult<StreamChunk>>();
                 *self.tx.lock().unwrap() = Some(tx);
                 // Create a stream from the channel receiver
@@ -964,7 +1062,9 @@ mod agent_handle_tests {
                 });
                 Ok(Box::pin(stream))
             }
-            fn capabilities(&self) -> LlmCapabilities { LlmCapabilities::default() }
+            fn capabilities(&self) -> LlmCapabilities {
+                LlmCapabilities::default()
+            }
         }
 
         let llm = Arc::new(BlockingLlm {
@@ -1004,7 +1104,10 @@ mod agent_handle_tests {
             }
         }
 
-        assert!(got_cancelled, "should have received RunCancelled after cancel()");
+        assert!(
+            got_cancelled,
+            "should have received RunCancelled after cancel()"
+        );
     }
 
     /// 场景3：错误处理 — error → RunFinished (not hang)
@@ -1014,13 +1117,27 @@ mod agent_handle_tests {
         struct ErrorLlm;
         #[async_trait]
         impl LlmClient for ErrorLlm {
-            async fn chat(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<Value> {
+            async fn chat(
+                &self,
+                _: &[ChatMessage],
+                _: &[Value],
+                _: Option<&agent_base::ReasoningConfig>,
+                _: Option<&ResponseFormat>,
+            ) -> AgentResult<Value> {
                 Err(agent_base::AgentError::internal("simulated LLM failure"))
             }
-            async fn chat_stream(&self, _: &[ChatMessage], _: &[Value], _: Option<&agent_base::ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<ChunkStream> {
+            async fn chat_stream(
+                &self,
+                _: &[ChatMessage],
+                _: &[Value],
+                _: Option<&agent_base::ReasoningConfig>,
+                _: Option<&ResponseFormat>,
+            ) -> AgentResult<ChunkStream> {
                 Err(agent_base::AgentError::internal("simulated LLM failure"))
             }
-            fn capabilities(&self) -> LlmCapabilities { LlmCapabilities::default() }
+            fn capabilities(&self) -> LlmCapabilities {
+                LlmCapabilities::default()
+            }
         }
 
         let runtime = AgentBuilder::new(Arc::new(ErrorLlm))
@@ -1042,7 +1159,10 @@ mod agent_handle_tests {
             }
         }
 
-        assert!(got_finished, "should have received RunFinished after error, not hang");
+        assert!(
+            got_finished,
+            "should have received RunFinished after error, not hang"
+        );
     }
 
     /// 场景2b：取消后可以继续发送新命令
@@ -1089,4 +1209,3 @@ mod agent_handle_tests {
         assert!(got_finished, "should be able to continue after cancel");
     }
 }
-

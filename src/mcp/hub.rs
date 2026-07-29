@@ -81,7 +81,8 @@ impl McpHub {
                 continue;
             };
             for tool_info in &entry.tools {
-                let adapter = McpToolAdapter::new(tool_info.clone(), client.clone(), &entry.config.name);
+                let adapter =
+                    McpToolAdapter::new(tool_info.clone(), client.clone(), &entry.config.name);
                 registry.register(adapter);
             }
         }

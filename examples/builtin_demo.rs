@@ -1,7 +1,7 @@
+use agent_base::{AgentError, AgentResult, Language, SessionId, Tool, ToolContext};
 use agent_works::builtin::{
     FileExistsTool, ListDirectoryTool, ReadFileTool, SearchReplaceTool, WriteFileTool,
 };
-use agent_base::{AgentError, AgentResult, Language, SessionId, Tool, ToolContext};
 use serde_json::json;
 
 fn make_tool_context() -> ToolContext {
@@ -27,9 +27,8 @@ fn print_definition(tool: &dyn Tool) {
 async fn main() -> AgentResult<()> {
     println!("=== agent-works Builtin Tools Demo ===\n");
 
-    let tmp = tempfile::tempdir().map_err(|e| {
-        AgentError::internal(format!("failed to create temp dir: {e}"))
-    })?;
+    let tmp = tempfile::tempdir()
+        .map_err(|e| AgentError::internal(format!("failed to create temp dir: {e}")))?;
     let workspace = tmp.path().to_path_buf();
     println!("[0] Temp workspace: {}\n", workspace.display());
 
@@ -63,21 +62,14 @@ async fn main() -> AgentResult<()> {
     let test_content = "Hello, World!\nThis is a test file.\nLine three.";
 
     let result = write_tool
-        .call(
-            &json!({"path": test_file, "content": test_content}),
-            &ctx,
-        )
+        .call(&json!({"path": test_file, "content": test_content}), &ctx)
         .await?;
     println!("[2] WriteFileTool -> {}: {}", test_file, result.summary);
 
-    let result = exists_tool
-        .call(&json!({"path": test_file}), &ctx)
-        .await?;
+    let result = exists_tool.call(&json!({"path": test_file}), &ctx).await?;
     println!("[3] FileExistsTool -> {}: {}", test_file, result.summary);
 
-    let result = read_tool
-        .call(&json!({"path": test_file}), &ctx)
-        .await?;
+    let result = read_tool.call(&json!({"path": test_file}), &ctx).await?;
     println!("[4] ReadFileTool -> {}:", test_file);
     for line in result.summary.lines() {
         println!("    {line}");
@@ -98,9 +90,7 @@ async fn main() -> AgentResult<()> {
         println!("    {line}");
     }
 
-    let result = list_tool
-        .call(&json!({"path": sub_dir}), &ctx)
-        .await?;
+    let result = list_tool.call(&json!({"path": sub_dir}), &ctx).await?;
     println!("[6] ListDirectoryTool -> {sub_dir}:");
     for line in result.summary.lines() {
         println!("    {line}");
@@ -118,9 +108,7 @@ async fn main() -> AgentResult<()> {
         .await?;
     println!("[7] SearchReplaceTool -> {}: {}", test_file, result.summary);
 
-    let result = read_tool
-        .call(&json!({"path": test_file}), &ctx)
-        .await?;
+    let result = read_tool.call(&json!({"path": test_file}), &ctx).await?;
     println!("[8] Verified replacement in {}:", test_file);
     for line in result.summary.lines() {
         println!("    {line}");

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use super::path_util::validate_path;
+use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 
 pub struct FileExistsTool {
     pub workspace: PathBuf,
@@ -46,12 +46,8 @@ impl Tool for FileExistsTool {
         let metadata = tokio::fs::metadata(&full_path).await;
 
         let exists = metadata.is_ok();
-        let is_file = metadata
-            .as_ref()
-            .is_ok_and(|m| m.is_file());
-        let is_dir = metadata
-            .as_ref()
-            .is_ok_and(|m| m.is_dir());
+        let is_file = metadata.as_ref().is_ok_and(|m| m.is_file());
+        let is_dir = metadata.as_ref().is_ok_and(|m| m.is_dir());
 
         tracing::trace!(path = %path, exists = exists, "file exists check");
         Ok(ToolOutput {
@@ -60,7 +56,9 @@ impl Tool for FileExistsTool {
             } else {
                 format!("{} does not exist", path)
             },
-            raw: Some(json!({"path": path, "exists": exists, "is_file": is_file, "is_dir": is_dir})),
+            raw: Some(
+                json!({"path": path, "exists": exists, "is_file": is_file, "is_dir": is_dir}),
+            ),
             control_flow: ToolControlFlow::Break,
             truncation: None,
         })

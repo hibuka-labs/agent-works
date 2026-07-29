@@ -278,8 +278,7 @@ mod tests {
             .add("command", "apt install nginx")
             .add("elapsed", "30s")
             .add("screen", "Reading package lists...");
-        let expected =
-            "【command】\napt install nginx\n\n【elapsed】\n30s\n\n【screen】\nReading package lists...";
+        let expected = "【command】\napt install nginx\n\n【elapsed】\n30s\n\n【screen】\nReading package lists...";
         assert_eq!(ctx.to_prompt(), expected);
     }
 

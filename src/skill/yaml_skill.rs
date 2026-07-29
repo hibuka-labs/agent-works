@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::{PlanItem, PlanStepStatus};
 use crate::skill::{Skill, SkillParam, SkillParamType};
+use agent_base::{PlanItem, PlanStepStatus};
 use serde::Deserialize;
 
 // ── YAML schema ──
@@ -92,8 +92,8 @@ pub struct YamlSkill {
 impl YamlSkill {
     /// Parse a YAML string into a `YamlSkill`.
     pub fn from_yaml(yaml: &str) -> Result<Self, String> {
-        let def: SkillDef = serde_yaml::from_str(yaml)
-            .map_err(|e| format!("YAML parse error: {e}"))?;
+        let def: SkillDef =
+            serde_yaml::from_str(yaml).map_err(|e| format!("YAML parse error: {e}"))?;
 
         if def.name.is_empty() {
             return Err("Skill name is empty".to_string());
@@ -129,8 +129,7 @@ impl YamlSkill {
         );
         let static_author: &'static str =
             Box::leak(def.author.clone().unwrap_or_default().into_boxed_str());
-        let static_category: &'static str =
-            Box::leak(def.category.clone().into_boxed_str());
+        let static_category: &'static str = Box::leak(def.category.clone().into_boxed_str());
 
         Ok(Self {
             def,
@@ -149,7 +148,11 @@ impl YamlSkill {
     }
 
     /// Substitute `{{var}}` placeholders in a string with parameter values.
-    fn substitute(&self, template: &str, params: &HashMap<String, String>) -> Result<String, String> {
+    fn substitute(
+        &self,
+        template: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<String, String> {
         let mut result = template.to_string();
         for (key, value) in params {
             let placeholder = format!("{{{{{}}}}}", key);
@@ -217,10 +220,7 @@ impl Skill for YamlSkill {
         vec![]
     }
 
-    fn plan_steps(
-        &self,
-        params: &HashMap<String, String>,
-    ) -> Option<Vec<PlanItem>> {
+    fn plan_steps(&self, params: &HashMap<String, String>) -> Option<Vec<PlanItem>> {
         if self.def.phases.is_empty() {
             return None;
         }
@@ -247,11 +247,7 @@ impl Skill for YamlSkill {
             }
         }
 
-        if steps.is_empty() {
-            None
-        } else {
-            Some(steps)
-        }
+        if steps.is_empty() { None } else { Some(steps) }
     }
 
     fn parameters(&self) -> &[SkillParam] {

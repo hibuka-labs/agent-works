@@ -79,9 +79,7 @@ async fn start_mock_mcp_server() -> u16 {
                             .pointer("/params/name")
                             .and_then(Value::as_str)
                             .unwrap_or("unknown");
-                        let args = req
-                            .pointer("/params/arguments")
-                            .unwrap_or(&Value::Null);
+                        let args = req.pointer("/params/arguments").unwrap_or(&Value::Null);
 
                         match name {
                             "get_weather" => {
@@ -101,10 +99,7 @@ async fn start_mock_mcp_server() -> u16 {
                                 })
                             }
                             "search_docs" => {
-                                let query = args
-                                    .get("query")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("");
+                                let query = args.get("query").and_then(Value::as_str).unwrap_or("");
                                 json!({
                                     "content": [
                                         {
@@ -242,7 +237,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             server_tools.len()
         );
         for tool in server_tools {
-            println!("    - {} (schema keys: {:?})", tool.name, tool.input_schema.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            println!(
+                "    - {} (schema keys: {:?})",
+                tool.name,
+                tool.input_schema
+                    .as_object()
+                    .map(|o| o.keys().collect::<Vec<_>>())
+            );
         }
     }
     println!();

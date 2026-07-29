@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use super::path_util::validate_path;
+use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 
 pub struct WriteFileTool {
     pub workspace: PathBuf,
@@ -56,7 +56,10 @@ impl Tool for WriteFileTool {
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 tracing::error!(path = %path, error = %e, "write file failed");
-                AgentError::internal(format!("failed to create directory {}: {e}", parent.display()))
+                AgentError::internal(format!(
+                    "failed to create directory {}: {e}",
+                    parent.display()
+                ))
             })?;
         }
 

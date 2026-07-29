@@ -22,7 +22,10 @@ pub fn validate_path(workspace: &Path, user_path: &str) -> AgentResult<PathBuf> 
     // If the file doesn't exist yet (for writes), canonicalize the parent.
     let canonical = if full_path.exists() {
         full_path.canonicalize().map_err(|e| {
-            AgentError::internal(format!("failed to resolve path {}: {e}", full_path.display()))
+            AgentError::internal(format!(
+                "failed to resolve path {}: {e}",
+                full_path.display()
+            ))
         })?
     } else {
         // For new files, canonicalize the parent directory and append the filename

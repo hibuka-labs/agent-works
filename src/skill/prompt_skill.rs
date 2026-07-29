@@ -98,12 +98,8 @@ impl PromptSkill {
                 .unwrap_or_else(|| "1.0".to_string())
                 .into_boxed_str(),
         );
-        let static_category: &'static str = Box::leak(
-            frontmatter
-                .category
-                .clone()
-                .into_boxed_str(),
-        );
+        let static_category: &'static str =
+            Box::leak(frontmatter.category.clone().into_boxed_str());
         let static_author: &'static str = Box::leak(
             frontmatter
                 .author
@@ -157,7 +153,9 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
 
     let frontmatter_str = &after_first[..closing];
     let body_start = closing + 4; // skip past "\n---"
-    let body = after_first[body_start..].trim_start_matches('\n').trim_start_matches('\r');
+    let body = after_first[body_start..]
+        .trim_start_matches('\n')
+        .trim_start_matches('\r');
 
     Ok((frontmatter_str, body))
 }

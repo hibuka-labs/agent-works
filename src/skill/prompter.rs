@@ -13,9 +13,8 @@ impl Default for LazySkillPrompter {
         Self {
             title: "## Available Skills".to_string(),
             // `{tool}` placeholder is replaced with the actual detail tool name
-            instruction_template:
-                "> Call `{tool}` to get detailed instructions for a Skill."
-                    .to_string(),
+            instruction_template: "> Call `{tool}` to get detailed instructions for a Skill."
+                .to_string(),
             item_prefix: "- **".to_string(),
         }
     }
@@ -64,7 +63,11 @@ impl SkillPrompter for LazySkillPrompter {
         }
 
         prompt.push('\n');
-        prompt.push_str(&self.instruction_template.replace("{tool}", detail_tool_name));
+        prompt.push_str(
+            &self
+                .instruction_template
+                .replace("{tool}", detail_tool_name),
+        );
 
         prompt
     }

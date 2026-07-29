@@ -134,8 +134,8 @@ impl McpClient {
             "params": params,
         });
 
-        let mut request_line =
-            serde_json::to_string(&request).map_err(|e| AgentError::json(format!("serialize: {e}")))?;
+        let mut request_line = serde_json::to_string(&request)
+            .map_err(|e| AgentError::json(format!("serialize: {e}")))?;
         request_line.push('\n');
 
         let response_line = {
@@ -153,8 +153,8 @@ impl McpClient {
             line
         };
 
-        let res: Value =
-            serde_json::from_str(&response_line).map_err(|e| AgentError::json(format!("parse: {e}")))?;
+        let res: Value = serde_json::from_str(&response_line)
+            .map_err(|e| AgentError::json(format!("parse: {e}")))?;
 
         if let Some(error) = res.get("error") {
             return Err(AgentError::internal(format!("MCP error: {error}")));
@@ -195,11 +195,7 @@ impl McpClient {
         Ok(infos)
     }
 
-    pub async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: &Value,
-    ) -> AgentResult<Value> {
+    pub async fn call_tool(&self, tool_name: &str, arguments: &Value) -> AgentResult<Value> {
         self.send_request(
             "tools/call",
             json!({

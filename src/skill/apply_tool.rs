@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_base::{
-    AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput,
-};
+use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::registry::SkillRegistry;
 
@@ -54,10 +52,7 @@ impl Tool for ApplySkillTool {
     }
 
     async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
-        let skill_name = args
-            .get("skill_name")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let skill_name = args.get("skill_name").and_then(Value::as_str).unwrap_or("");
 
         if skill_name.is_empty() {
             return Ok(ToolOutput {
@@ -129,14 +124,17 @@ impl Tool for ApplySkillTool {
         let steps_summary: Vec<String> = plan
             .plan
             .iter()
-            .map(|s| format!("- [{}] {}",
-                match s.status {
-                    agent_base::PlanStepStatus::Pending => " ",
-                    agent_base::PlanStepStatus::InProgress => "→",
-                    agent_base::PlanStepStatus::Completed => "✓",
-                },
-                s.step
-            ))
+            .map(|s| {
+                format!(
+                    "- [{}] {}",
+                    match s.status {
+                        agent_base::PlanStepStatus::Pending => " ",
+                        agent_base::PlanStepStatus::InProgress => "→",
+                        agent_base::PlanStepStatus::Completed => "✓",
+                    },
+                    s.step
+                )
+            })
             .collect();
 
         let summary = format!(
@@ -175,8 +173,8 @@ impl Tool for ApplySkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::{PlanItem, PlanStepStatus};
     use crate::skill::{Skill, SkillParam, SkillParamType};
+    use agent_base::{PlanItem, PlanStepStatus};
     use std::sync::Arc;
 
     struct TemplateSkill {
@@ -196,10 +194,7 @@ mod tests {
         fn tools(&self) -> Vec<Arc<dyn agent_base::Tool>> {
             vec![]
         }
-        fn plan_steps(
-            &self,
-            params: &HashMap<String, String>,
-        ) -> Option<Vec<PlanItem>> {
+        fn plan_steps(&self, params: &HashMap<String, String>) -> Option<Vec<PlanItem>> {
             let host = params.get("target_host").cloned().unwrap_or_default();
             Some(vec![PlanItem {
                 step: format!("在 {} 上检查磁盘空间", host),

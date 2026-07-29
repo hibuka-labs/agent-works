@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use agent_base::{RuntimeEvent, AgentResult};
+use agent_base::{AgentResult, RuntimeEvent};
 
 pub struct CliEventPrinter {
     pub assistant_prefix_printed: bool,
@@ -26,9 +26,9 @@ impl CliEventPrinter {
             if let Some(output) = handler(&event) {
                 self.finish();
                 print!("{output}");
-                io::stdout()
-                    .flush()
-                    .map_err(|e| agent_base::AgentError::internal(format!("flush stdout failed: {e}")))?;
+                io::stdout().flush().map_err(|e| {
+                    agent_base::AgentError::internal(format!("flush stdout failed: {e}"))
+                })?;
                 return Ok(());
             }
         }
@@ -40,15 +40,15 @@ impl CliEventPrinter {
                     self.assistant_prefix_printed = true;
                 }
                 print!("{text}");
-                io::stdout()
-                    .flush()
-                    .map_err(|e| agent_base::AgentError::internal(format!("flush stdout failed: {e}")))?;
+                io::stdout().flush().map_err(|e| {
+                    agent_base::AgentError::internal(format!("flush stdout failed: {e}"))
+                })?;
             }
             RuntimeEvent::ThoughtDelta { text, .. } => {
                 print!("\x1b[90m{text}\x1b[0m");
-                io::stdout()
-                    .flush()
-                    .map_err(|e| agent_base::AgentError::internal(format!("flush stdout failed: {e}")))?;
+                io::stdout().flush().map_err(|e| {
+                    agent_base::AgentError::internal(format!("flush stdout failed: {e}"))
+                })?;
             }
             RuntimeEvent::ToolCallStarted {
                 tool_name,
