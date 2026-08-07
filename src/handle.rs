@@ -79,7 +79,7 @@ impl AgentHandle {
                             Err(e) => {
                                 tracing::error!(error = %e, "run_turn failed");
                                 let _ =
-                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid });
+                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid, agent_id: None, trace_id: None });
                             }
                         }
                     }
@@ -129,7 +129,7 @@ impl AgentHandle {
                                 // Non-cancellation error: emit RunFinished so caller isn't stuck
                                 tracing::error!(error = %e, "run_turn failed");
                                 let _ =
-                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid });
+                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid, agent_id: None, trace_id: None });
                             }
                         }
                     }

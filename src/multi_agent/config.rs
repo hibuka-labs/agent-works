@@ -1,22 +1,22 @@
 //! Multi-agent configuration.
 //!
 //! Controls whether multi-agent capabilities are enabled and sets resource limits.
-//! Multi-agent is disabled by default — simple chatbot scenarios shouldn't pay the
-//! cost of 6 extra tools.
+//! Multi-agent is enabled by default — users who don't need it can disable via
+//! `.without_multi_agent()` or feature gate.
 
 /// Configuration for the multi-agent subsystem.
 ///
 /// # Default
 ///
-/// Multi-agent is **disabled** by default. Enable it with:
+/// Multi-agent is **enabled** by default with limits of 8 sub-agents and depth 1.
+/// Disable it with:
 ///
 /// ```rust,ignore
-/// use agent_works::multi_agent::MultiAgentConfig;
+/// use agent_works::AgentBuilder;
 ///
-/// let config = MultiAgentConfig {
-///     enabled: true,
-///     ..Default::default()
-/// };
+/// let agent = AgentBuilder::new(client)
+///     .without_multi_agent()
+///     .build()?;
 /// ```
 ///
 /// # Limits
@@ -26,11 +26,11 @@
 pub struct MultiAgentConfig {
     /// Enable multi-agent capabilities.
     ///
-    /// When `false` (default): no multi-agent tools are registered, and the system
-    /// prompt does not mention multi-agent capabilities.
+    /// When `true` (default): all 6 multi-agent tools are registered, and the main
+    /// agent's system prompt is augmented with usage guidance.
     ///
-    /// When `true`: all 6 multi-agent tools are registered, and the main agent's
-    /// system prompt is augmented with usage guidance.
+    /// When `false`: no multi-agent tools are registered, and the system
+    /// prompt does not mention multi-agent capabilities.
     pub enabled: bool,
 
     /// Maximum number of concurrent sub-agents.
@@ -48,7 +48,7 @@ pub struct MultiAgentConfig {
 impl Default for MultiAgentConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_sub_agents: 8,
             max_agent_depth: 1,
         }
@@ -79,9 +79,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_disabled() {
+    fn default_is_enabled() {
         let config = MultiAgentConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.max_sub_agents, 8);
         assert_eq!(config.max_agent_depth, 1);
     }

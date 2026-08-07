@@ -484,6 +484,8 @@ async fn run_child_loop(
                                         subagent: bridge_path.clone(),
                                         event: Box::new(event),
                                     },
+                                    agent_id: None,
+                                    trace_id: None,
                                 });
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

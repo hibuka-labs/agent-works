@@ -76,6 +76,16 @@ impl AgentBuilder {
         self
     }
 
+    /// Disable multi-agent support.
+    ///
+    /// Removes any previously set multi-agent configuration. No multi-agent tools
+    /// will be registered and the system prompt will not mention multi-agent capabilities.
+    pub fn without_multi_agent(mut self) -> Self {
+        self.multi_agent_config = None;
+        self.multi_agent_tool_factory = None;
+        self
+    }
+
     /// Set a custom factory for creating multi-agent tools.
     ///
     /// The factory receives the `MultiAgentRuntime` and returns the tools to register.
@@ -141,6 +151,34 @@ impl AgentBuilder {
     pub fn max_tool_output_chars(self, max_chars: usize) -> Self {
         Self {
             inner: self.inner.max_tool_output_chars(max_chars),
+            ..self
+        }
+    }
+
+    pub fn max_sessions(self, max: usize) -> Self {
+        Self {
+            inner: self.inner.max_sessions(max),
+            ..self
+        }
+    }
+
+    pub fn max_turns_per_session(self, max: usize) -> Self {
+        Self {
+            inner: self.inner.max_turns_per_session(max),
+            ..self
+        }
+    }
+
+    pub fn execution_max_turns(self, max: u32) -> Self {
+        Self {
+            inner: self.inner.execution_max_turns(max),
+            ..self
+        }
+    }
+
+    pub fn max_message_tokens(self, max: usize) -> Self {
+        Self {
+            inner: self.inner.max_message_tokens(max),
             ..self
         }
     }
@@ -252,6 +290,20 @@ impl AgentBuilder {
         }
     }
 
+    /// Conditionally apply a transformation when `value` is `Some`.
+    ///
+    /// This is a convenience for option-chaining builder patterns:
+    ///
+    /// ```ignore
+    /// builder.apply_if(args.thinking_budget, |b, budget| b.thinking_budget(budget))
+    /// ```
+    pub fn apply_if<T>(self, value: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match value {
+            Some(v) => f(self, v),
+            None => self,
+        }
+    }
+
     #[cfg(feature = "skill")]
     pub fn register_skill(mut self, skill: impl Skill + 'static) -> Self {
         self.skills.push(Arc::new(skill));
@@ -295,6 +347,7 @@ impl AgentBuilder {
         }
     }
 
+    #[allow(dead_code)]
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
         let lang = self.language.clone().unwrap_or_default();
         let ma_config = self.multi_agent_config.clone();
@@ -799,12 +852,12 @@ mod tests {
     fn test_builder_disabled_multi_agent_skips_factory() {
         let client = make_client();
         let factory: MultiAgentToolFactory = Arc::new(|_rt| {
-            panic!("factory should not be called when multi-agent is disabled");
+            panic!("factory should not be called when multi-agent is not configured");
         });
 
         let runtime = AgentBuilder::new(client)
             .with_multi_agent_tool_factory(factory)
-            // Don't enable multi-agent — leave default (disabled)
+            // Don't enable multi-agent — default (None) means disabled
             .build()
             .unwrap();
 
@@ -835,5 +888,52 @@ mod tests {
         assert!(prompt.contains("When to Spawn"));
         assert!(prompt.contains("When NOT to Spawn"));
         assert!(prompt.contains("Communication Pattern"));
+    }
+
+    // ── without_multi_agent ──
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_without_multi_agent_clears_config_and_factory() {
+        let client = make_client();
+
+        // Set up a factory that would panic if called — without_multi_agent should prevent it
+        let factory: MultiAgentToolFactory = Arc::new(|_rt| {
+            panic!("factory should not be called when multi-agent is cleared");
+        });
+
+        let runtime = AgentBuilder::new(client)
+            .with_multi_agent(MultiAgentConfig::enabled())
+            .with_multi_agent_tool_factory(factory)
+            .without_multi_agent() // clear both
+            .build()
+            .unwrap();
+
+        let tools = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+        });
+        assert!(!tools.contains(&"spawn_agent".to_string()));
+    }
+
+    // ── apply_if ──
+
+    #[test]
+    fn test_apply_if_some_applies_transformation() {
+        let client = make_client();
+        let builder = AgentBuilder::new(client).apply_if(Some("custom prompt"), |b, prompt| {
+            b.system_prompt(prompt)
+        });
+        // system_prompt is stored in self.system_prompt; verify it was set
+        assert!(builder.system_prompt.unwrap().contains("custom prompt"));
+    }
+
+    #[test]
+    fn test_apply_if_none_passes_through() {
+        let client = make_client();
+        let builder = AgentBuilder::new(client).apply_if(None as Option<&str>, |b, _prompt| {
+            panic!("should not be called when value is None");
+        });
+        assert!(builder.system_prompt.is_none());
     }
 }

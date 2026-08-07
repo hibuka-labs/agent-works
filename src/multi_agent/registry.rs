@@ -350,7 +350,7 @@ mod tests {
     fn disabled_config_allows_spawn() {
         // When config.enabled is false, limits are NOT checked
         // (spawning still works, it's just that the 6 tools aren't registered)
-        let config = MultiAgentConfig::default(); // enabled=false
+        let config = MultiAgentConfig { enabled: false, ..MultiAgentConfig::default() };
         let reg = AgentRegistry::new(config);
 
         // can_spawn still returns Ok even with 0 sub_agents allowed
