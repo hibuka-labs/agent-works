@@ -17,6 +17,10 @@ pub type MultiAgentToolFactory =
 pub type SkillDetailToolFactory =
     Arc<dyn Fn(Vec<Arc<dyn Skill>>, String) -> Arc<dyn Tool> + Send + Sync>;
 
+/// Factory type for creating a list-skills tool from a SkillRegistry.
+#[cfg(feature = "skill")]
+pub type ListSkillsToolFactory = Arc<dyn Fn(Arc<crate::skill::SkillRegistry>) -> Arc<dyn Tool> + Send + Sync>;
+
 pub struct AgentBuilder {
     inner: agent_base::AgentBuilder,
     system_prompt: Option<String>,
@@ -40,6 +44,8 @@ pub struct AgentBuilder {
     #[cfg(feature = "skill")]
     skill_detail_tool_factory: Option<SkillDetailToolFactory>,
     #[cfg(feature = "skill")]
+    list_skills_tool_factory: Option<ListSkillsToolFactory>,
+    #[cfg(feature = "skill")]
     disable_skill_prompt_injection: bool,
 }
 
@@ -62,6 +68,8 @@ impl AgentBuilder {
             skill_detail_tool_name: "get_skill_detail".to_string(),
             #[cfg(feature = "skill")]
             skill_detail_tool_factory: None,
+            #[cfg(feature = "skill")]
+            list_skills_tool_factory: None,
             #[cfg(feature = "skill")]
             disable_skill_prompt_injection: false,
         }
@@ -103,6 +111,15 @@ impl AgentBuilder {
     #[cfg(feature = "skill")]
     pub fn with_skill_detail_tool_factory(mut self, factory: SkillDetailToolFactory) -> Self {
         self.skill_detail_tool_factory = Some(factory);
+        self
+    }
+
+    /// Set a custom factory for creating the list-skills tool.
+    ///
+    /// The factory receives the SkillRegistry and returns the tool.
+    #[cfg(feature = "skill")]
+    pub fn with_list_skills_tool_factory(mut self, factory: ListSkillsToolFactory) -> Self {
+        self.list_skills_tool_factory = Some(factory);
         self
     }
 
@@ -386,6 +403,17 @@ impl AgentBuilder {
         Ok(runtime)
     }
 
+    /// Build the runtime with skill support.
+    ///
+    /// # Runtime requirement
+    ///
+    /// This method uses [`tokio::task::block_in_place`] to populate the skill
+    /// registry from a synchronous context. It **requires** a multi-threaded
+    /// tokio runtime. Calling it on a `#[tokio::main]` single-threaded
+    /// (`current_thread`) runtime will panic.
+    ///
+    /// The phi-agent CLI and all examples use the default multi-threaded runtime,
+    /// so this is safe in practice.
     #[cfg(feature = "skill")]
     fn build_with_skills(mut self) -> AgentResult<AgentRuntime> {
         let mut ab = self.inner;
@@ -436,8 +464,22 @@ impl AgentBuilder {
 
             // Use injected factory if available, otherwise skip creating detail tool
             if let Some(factory) = self.skill_detail_tool_factory.take() {
-                let detail_tool = factory(skill_refs, self.skill_detail_tool_name);
+                let detail_tool = factory(skill_refs.clone(), self.skill_detail_tool_name);
                 ab = ab.register_tool_arc(detail_tool);
+            }
+
+            // Create SkillRegistry and populate it for the list-skills tool
+            if let Some(factory) = self.list_skills_tool_factory.take() {
+                let registry = Arc::new(crate::skill::SkillRegistry::new());
+                for skill in &skill_refs {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            registry.register(skill.clone()).await;
+                        })
+                    });
+                }
+                let list_tool = factory(registry);
+                ab = ab.register_tool_arc(list_tool);
             }
         }
 
@@ -931,7 +973,7 @@ mod tests {
     #[test]
     fn test_apply_if_none_passes_through() {
         let client = make_client();
-        let builder = AgentBuilder::new(client).apply_if(None as Option<&str>, |b, _prompt| {
+        let builder = AgentBuilder::new(client).apply_if(None as Option<&str>, |_b, _prompt| {
             panic!("should not be called when value is None");
         });
         assert!(builder.system_prompt.is_none());

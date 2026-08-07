@@ -2,13 +2,31 @@
 //!
 //! Prompt Skills are lightweight instruction files that get injected into the
 //! system prompt to guide AI behavior. Compatible with Trae/Cursor/Claude rules format.
+//!
+//! Supports the [Agent Skills](https://agentskills.io) open standard
+//! (Anthropic 2025.12).
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::skill::{Skill, SkillParam};
 use serde::Deserialize;
 
 // ── Frontmatter schema ──
+
+/// Skill argument/parameter placeholder definition.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SkillArg {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillFrontmatter {
@@ -22,6 +40,44 @@ pub struct SkillFrontmatter {
     pub version: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
+
+    // ── Agent Skills 开放标准字段 (agentskills.io) ──
+
+    /// Tools allowed when this skill is active (comma-separated or YAML list).
+    /// Empty = all tools allowed.
+    #[serde(default, alias = "allowed-tools")]
+    pub allowed_tools: Vec<String>,
+
+    /// Tools disallowed when this skill is active.
+    #[serde(default, alias = "disallowed-tools")]
+    pub disallowed_tools: Vec<String>,
+
+    /// Override model selection. `None` / `"inherit"` = use parent model.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Whether the user can manually invoke this skill via `/skill-name`.
+    #[serde(default = "default_true", alias = "user-invocable")]
+    pub user_invocable: bool,
+
+    /// If true, the LLM cannot auto-trigger this skill (for side-effectful skills
+    /// like deploy/commit).
+    #[serde(default, alias = "disable-model-invocation")]
+    pub disable_model_invocation: bool,
+
+    /// Parameter placeholders (e.g. `[{name: branch, description: "Target branch"}]`).
+    /// Body uses `$branch` to reference these.
+    #[serde(default)]
+    pub arguments: Vec<SkillArg>,
+
+    /// If `"fork"`, the skill runs in an isolated sub-agent context.
+    #[serde(default)]
+    pub context: Option<String>,
+
+    /// Gitignore-style glob patterns. The skill is only activated when changed
+    /// files match these patterns.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 // ── PromptSkill ──
@@ -30,12 +86,28 @@ pub struct SkillFrontmatter {
 ///
 /// Implements `Skill` — can be registered into `SkillRegistry`
 /// and used for system prompt injection.
+///
+/// Supports two loading modes:
+/// - `from_markdown(content)` — parse a single SKILL.md string (no directory context)
+/// - `from_dir(path)` — load from a standard skill directory with SKILL.md,
+///   optional scripts/, references/, and templates/ subdirectories
+///
+/// ## Memory note
+///
+/// `PromptSkill` uses `Box::leak` to convert `String` fields into `&'static str`
+/// references required by the `Skill` trait. This is acceptable for one-time
+/// startup loading (a few KB of "leaked" memory), but is **not** compatible with
+/// frequent hot-reload cycles — each reload adds new strings to the leaked pool.
+/// If you use `hot-reload`, prefer event-triggered rather than timer-based reloading.
+#[derive(Debug)]
 pub struct PromptSkill {
     frontmatter: SkillFrontmatter,
     /// The full Markdown content (including frontmatter)
     content: String,
     /// The Markdown body (excluding frontmatter)
     body: String,
+    /// Directory on disk (set via `from_dir()`)
+    skill_dir: Option<PathBuf>,
     /// Leaked name for &'static str return
     static_name: &'static str,
     /// Leaked version for &'static str return
@@ -46,6 +118,12 @@ pub struct PromptSkill {
     static_author: &'static str,
     /// Leaked tags for &'static [&'static str] return
     static_tags: Vec<&'static str>,
+    /// Leaked allowed_tools
+    static_allowed_tools: Vec<String>,
+    /// Leaked disallowed_tools
+    static_disallowed_tools: Vec<String>,
+    /// Leaked paths
+    static_paths: Vec<String>,
 }
 
 impl PromptSkill {
@@ -112,16 +190,23 @@ impl PromptSkill {
             .iter()
             .map(|t| Box::leak(t.clone().into_boxed_str()) as &'static str)
             .collect();
+        let static_allowed_tools: Vec<String> = frontmatter.allowed_tools.clone();
+        let static_disallowed_tools: Vec<String> = frontmatter.disallowed_tools.clone();
+        let static_paths: Vec<String> = frontmatter.paths.clone();
 
         Ok(Self {
             frontmatter,
             content: content.to_string(),
             body: body.to_string(),
+            skill_dir: None,
             static_name,
             static_version,
             static_category,
             static_author,
             static_tags,
+            static_allowed_tools,
+            static_disallowed_tools,
+            static_paths,
         })
     }
 
@@ -133,6 +218,138 @@ impl PromptSkill {
     /// The Markdown body (without frontmatter).
     pub fn body(&self) -> &str {
         &self.body
+    }
+
+    /// The skill directory on disk, if loaded via `from_dir()`.
+    pub fn skill_dir_path(&self) -> Option<&Path> {
+        self.skill_dir.as_deref()
+    }
+
+    /// Path to the `scripts/` subdirectory, if it exists.
+    pub fn scripts_dir(&self) -> Option<PathBuf> {
+        self.skill_dir.as_ref().map(|d| d.join("scripts")).filter(|p| p.is_dir())
+    }
+
+    /// Path to the `references/` subdirectory, if it exists.
+    pub fn references_dir(&self) -> Option<PathBuf> {
+        self.skill_dir.as_ref().map(|d| d.join("references")).filter(|p| p.is_dir())
+    }
+
+    /// Path to the `templates/` subdirectory, if it exists.
+    pub fn templates_dir(&self) -> Option<PathBuf> {
+        self.skill_dir.as_ref().map(|d| d.join("templates")).filter(|p| p.is_dir())
+    }
+
+    /// Load a skill from a standard directory structure.
+    ///
+    /// Expected layout:
+    /// ```text
+    /// skill-name/
+    ///   SKILL.md          (required — YAML frontmatter + Markdown body)
+    ///   scripts/          (optional)
+    ///   references/       (optional)
+    ///   templates/        (optional)
+    /// ```
+    ///
+    /// The directory name must match the `name` field in SKILL.md frontmatter.
+    pub fn from_dir(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        let skill_md = path.join("SKILL.md");
+
+        if !skill_md.exists() {
+            return Err(format!("SKILL.md not found in {}", path.display()));
+        }
+
+        let content = std::fs::read_to_string(&skill_md)
+            .map_err(|e| format!("Failed to read {}: {}", skill_md.display(), e))?;
+
+        let mut skill = Self::from_markdown(&content)?;
+
+        // Validate directory name matches skill name
+        if let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
+            && dir_name != skill.frontmatter.name
+        {
+            return Err(format!(
+                "Directory name '{}' does not match skill name '{}'",
+                dir_name, skill.frontmatter.name
+            ));
+        }
+
+        skill.skill_dir = Some(path.to_path_buf());
+        Ok(skill)
+    }
+
+    /// Scan a directory for skill subdirectories.
+    ///
+    /// Each subdirectory that contains a `SKILL.md` file is loaded as a
+    /// [`PromptSkill`]. Subdirectories without `SKILL.md` are silently skipped.
+    ///
+    /// Returns an empty `Vec` if the directory does not exist.
+    pub fn scan_dir(path: impl AsRef<Path>) -> Result<Vec<Self>, String> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let mut skills = Vec::new();
+        let entries = std::fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {}: {}", path.display(), e))?;
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let entry_path = entry.path();
+            if entry_path.is_dir() && entry_path.join("SKILL.md").exists() {
+                match Self::from_dir(&entry_path) {
+                    Ok(skill) => skills.push(skill),
+                    Err(e) => {
+                        tracing::warn!(
+                            dir = %entry_path.display(),
+                            error = %e,
+                            "skipping invalid skill directory"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Sort by name for deterministic ordering
+        skills.sort_by(|a, b| a.frontmatter.name.cmp(&b.frontmatter.name));
+        Ok(skills)
+    }
+
+    /// Resolve variables in the skill body.
+    ///
+    /// Supported variables:
+    /// - `$ARGUMENTS` — raw text after `/skill-name`
+    /// - `$name` — named parameter value (from frontmatter `arguments` list)
+    /// - `$PHI_SKILL_DIR` — path to the skill directory (for referencing scripts/)
+    pub fn resolve_body(&self, params: &HashMap<String, String>, raw_arguments: &str) -> String {
+        let mut result = self.body.clone();
+
+        // $ARGUMENTS
+        result = result.replace("$ARGUMENTS", raw_arguments);
+
+        // $PHI_SKILL_DIR
+        if let Some(dir) = &self.skill_dir {
+            result = result.replace("$PHI_SKILL_DIR", &dir.to_string_lossy());
+        }
+
+        // Named parameters: $param_name
+        // Sort by key length descending to prevent prefix clobbering.
+        // Example: with keys ["host", "hostname"], $hostname must be substituted
+        // before $host, otherwise $hostname becomes "Xname" instead of "Y".
+        let mut sorted_keys: Vec<&String> = params.keys().collect();
+        sorted_keys.sort_by_key(|b| std::cmp::Reverse(b.len()));
+        for key in sorted_keys {
+            let value = &params[key];
+            let placeholder = format!("${}", key);
+            result = result.replace(&placeholder, value);
+        }
+
+        result
     }
 }
 
@@ -195,6 +412,68 @@ impl Skill for PromptSkill {
 
     fn category(&self) -> &'static str {
         self.static_category
+    }
+
+    fn allowed_tools(&self) -> &[String] {
+        &self.static_allowed_tools
+    }
+
+    fn disallowed_tools(&self) -> &[String] {
+        &self.static_disallowed_tools
+    }
+
+    fn model_override(&self) -> Option<&str> {
+        self.frontmatter.model.as_deref().filter(|m| *m != "inherit")
+    }
+
+    fn is_user_invocable(&self) -> bool {
+        self.frontmatter.user_invocable
+    }
+
+    fn disable_model_invocation(&self) -> bool {
+        self.frontmatter.disable_model_invocation
+    }
+
+    fn context_mode(&self) -> Option<&str> {
+        self.frontmatter.context.as_deref()
+    }
+
+    fn path_patterns(&self) -> &[String] {
+        &self.static_paths
+    }
+
+    fn skill_dir(&self) -> Option<&Path> {
+        self.skill_dir.as_deref()
+    }
+
+    fn read_reference(&self, relative_path: &str) -> Result<String, String> {
+        let ref_dir = self.references_dir().ok_or_else(|| {
+            format!(
+                "Skill '{}' has no references/ directory",
+                self.frontmatter.name
+            )
+        })?;
+
+        // Prevent path traversal: canonicalize both paths for reliable comparison
+        // (symlinks, case-insensitive FS, etc.)
+        let ref_dir_canon = ref_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve references/ directory: {}", e))?;
+
+        let resolved = ref_dir.join(relative_path);
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve reference path '{}': {}", relative_path, e))?;
+
+        if !canonical.starts_with(&ref_dir_canon) {
+            return Err(format!(
+                "Path traversal denied: '{}' is outside references/",
+                relative_path
+            ));
+        }
+
+        std::fs::read_to_string(&canonical)
+            .map_err(|e| format!("Failed to read reference '{}': {}", relative_path, e))
     }
 }
 
@@ -275,5 +554,296 @@ author: test
         assert_eq!(skill.author(), ""); // default
         assert_eq!(skill.category(), ""); // default
         assert!(skill.tags().is_empty());
+    }
+
+    // ── Phase 4: new frontmatter fields ──
+
+    const SKILL_WITH_NEW_FIELDS: &str = r#"---
+name: advanced-skill
+description: An advanced skill with new fields
+category: ops
+tags: [deploy, production]
+version: "2.0"
+author: ops-team
+allowed-tools: [bash, git, docker]
+disallowed-tools: [rm, drop]
+model: opus
+user-invocable: true
+disable-model-invocation: true
+arguments:
+  - name: branch
+    description: Target branch
+    required: true
+  - name: env
+    description: Target environment
+context: fork
+paths: ["src/**", "deploy/**"]
+---
+
+# Advanced Skill
+
+Deploy to $env on branch $branch.
+Scripts are in $PHI_SKILL_DIR/scripts/
+Full arguments: $ARGUMENTS
+"#;
+
+    #[test]
+    fn test_new_frontmatter_fields() {
+        let skill = PromptSkill::from_markdown(SKILL_WITH_NEW_FIELDS).unwrap();
+        assert_eq!(skill.name(), "advanced-skill");
+
+        // allowed-tools / disallowed-tools
+        assert_eq!(skill.allowed_tools(), &["bash", "git", "docker"]);
+        assert_eq!(skill.disallowed_tools(), &["rm", "drop"]);
+
+        // model
+        assert_eq!(skill.model_override(), Some("opus"));
+
+        // user-invocable
+        assert!(skill.is_user_invocable());
+
+        // disable-model-invocation
+        assert!(skill.disable_model_invocation());
+
+        // context
+        assert_eq!(skill.context_mode(), Some("fork"));
+
+        // paths
+        assert_eq!(skill.path_patterns(), &["src/**", "deploy/**"]);
+
+        // Frontmatter introspection
+        let fm = skill.frontmatter();
+        assert_eq!(fm.arguments.len(), 2);
+        assert_eq!(fm.arguments[0].name, "branch");
+        assert!(fm.arguments[0].required);
+        assert_eq!(fm.arguments[1].name, "env");
+        assert!(!fm.arguments[1].required);
+    }
+
+    #[test]
+    fn test_new_fields_defaults() {
+        // Old format without new fields should still parse with defaults
+        let skill = PromptSkill::from_markdown(TEST_PROMPT_SKILL).unwrap();
+        assert!(skill.allowed_tools().is_empty());
+        assert!(skill.disallowed_tools().is_empty());
+        assert_eq!(skill.model_override(), None);
+        assert!(skill.is_user_invocable()); // default true
+        assert!(!skill.disable_model_invocation()); // default false
+        assert_eq!(skill.context_mode(), None);
+        assert!(skill.path_patterns().is_empty());
+    }
+
+    #[test]
+    fn test_model_inherit_treated_as_none() {
+        let md = "---\nname: inherit-skill\ndescription: test\nmodel: inherit\n---\nBody";
+        let skill = PromptSkill::from_markdown(md).unwrap();
+        assert_eq!(skill.model_override(), None);
+    }
+
+    #[test]
+    fn test_resolve_body() {
+        let skill = PromptSkill::from_markdown(SKILL_WITH_NEW_FIELDS).unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("branch".to_string(), "main".to_string());
+        params.insert("env".to_string(), "staging".to_string());
+
+        let resolved = skill.resolve_body(&params, "--force");
+
+        assert!(resolved.contains("Deploy to staging on branch main."));
+        assert!(resolved.contains("Full arguments: --force"));
+        // $PHI_SKILL_DIR should NOT be replaced since skill was loaded from markdown (no dir)
+        assert!(resolved.contains("$PHI_SKILL_DIR"));
+    }
+
+    #[test]
+    fn test_skill_dir_none_when_from_markdown() {
+        let skill = PromptSkill::from_markdown(TEST_PROMPT_SKILL).unwrap();
+        assert!(skill.skill_dir().is_none());
+        assert!(skill.scripts_dir().is_none());
+        assert!(skill.references_dir().is_none());
+        assert!(skill.templates_dir().is_none());
+    }
+
+    #[test]
+    fn test_read_reference_no_dir_returns_error() {
+        let skill = PromptSkill::from_markdown(TEST_PROMPT_SKILL).unwrap();
+        let result = skill.read_reference("guide.md");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no references/"));
+    }
+
+    // ── from_dir / scan_dir tests ──
+
+    #[test]
+    fn test_from_dir_loads_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("test-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        let skill_md = r#"---
+name: test-skill
+description: A skill from directory
+---
+# Skill Body
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        std::fs::create_dir(skill_dir.join("scripts")).unwrap();
+        std::fs::create_dir(skill_dir.join("references")).unwrap();
+
+        let skill = PromptSkill::from_dir(&skill_dir).unwrap();
+        assert_eq!(skill.name(), "test-skill");
+        assert_eq!(skill.brief_description(), "A skill from directory");
+        assert!(skill.skill_dir().is_some());
+        assert!(skill.scripts_dir().is_some());
+        assert!(skill.references_dir().is_some());
+        assert!(skill.templates_dir().is_none());
+    }
+
+    #[test]
+    fn test_from_dir_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("wrong-name");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        let skill_md = r#"---
+name: correct-name
+description: Test
+---
+Body
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+
+        let result = PromptSkill::from_dir(&skill_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not match"));
+    }
+
+    #[test]
+    fn test_from_dir_missing_skill_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("no-skill-md");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        let result = PromptSkill::from_dir(&skill_dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SKILL.md not found"));
+    }
+
+    #[test]
+    fn test_scan_dir_discovers_skills() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create skill directories
+        for name in &["deploy", "review", "test"] {
+            let skill_dir = dir.path().join(name);
+            std::fs::create_dir(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {}\ndescription: {} skill\n---\nBody", name, name),
+            ).unwrap();
+        }
+
+        // Create a non-skill directory (no SKILL.md)
+        let misc_dir = dir.path().join("misc");
+        std::fs::create_dir(&misc_dir).unwrap();
+
+        let skills = PromptSkill::scan_dir(dir.path()).unwrap();
+        assert_eq!(skills.len(), 3);
+
+        let names: Vec<&str> = skills.iter().map(|s| s.name()).collect();
+        assert_eq!(names, &["deploy", "review", "test"]); // sorted
+    }
+
+    #[test]
+    fn test_scan_dir_nonexistent_returns_empty() {
+        let skills = PromptSkill::scan_dir("/nonexistent/path/12345").unwrap();
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn test_read_reference_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("ref-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: ref-skill\ndescription: test\n---\nBody").unwrap();
+        std::fs::write(refs_dir.join("guide.md"), "# Reference Guide\n\nImportant info.").unwrap();
+
+        let skill = PromptSkill::from_dir(&skill_dir).unwrap();
+        let content = skill.read_reference("guide.md").unwrap();
+        assert!(content.contains("Reference Guide"));
+        assert!(content.contains("Important info"));
+    }
+
+    #[test]
+    fn test_read_reference_path_traversal_prevented() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("secure-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir(&refs_dir).unwrap();
+
+        // Create a file INSIDE the skill dir but OUTSIDE references/
+        // (e.g. skill_dir/secret.txt, accessible via ../secret.txt from references/)
+        std::fs::write(skill_dir.join("secret.txt"), "top secret").unwrap();
+
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: secure-skill\ndescription: test\n---\nBody").unwrap();
+
+        let skill = PromptSkill::from_dir(&skill_dir).unwrap();
+        let result = skill.read_reference("../secret.txt");
+        assert!(result.is_err(), "expected error for path traversal, got {:?}", result.ok());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Path traversal") || err.contains("outside references"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_body_with_skill_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("resolve-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+
+        let skill_md = r#"---
+name: resolve-skill
+description: test
+---
+Run scripts from $PHI_SKILL_DIR/scripts/
+Arguments: $ARGUMENTS
+"#;
+        std::fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+
+        let skill = PromptSkill::from_dir(&skill_dir).unwrap();
+        let params = HashMap::new();
+        let resolved = skill.resolve_body(&params, "extra args");
+
+        assert!(resolved.contains(&*skill_dir.to_string_lossy()));
+        assert!(resolved.contains("extra args"));
+        assert!(!resolved.contains("$PHI_SKILL_DIR"));
+        assert!(!resolved.contains("$ARGUMENTS"));
+    }
+
+    #[test]
+    fn test_resolve_body_prefix_clobbering_prevented() {
+        // If $host is substituted before $hostname, "Connect to $hostname"
+        // becomes "Connect to Xname" instead of "Connect to Y".
+        let md = "---\nname: prefix-skill\ndescription: test\n---\nConnect to $hostname at $host";
+        let skill = PromptSkill::from_markdown(md).unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("host".to_string(), "192.168.1.1".to_string());
+        params.insert("hostname".to_string(), "web-prod".to_string());
+
+        let resolved = skill.resolve_body(&params, "");
+        assert!(
+            resolved.contains("Connect to web-prod at 192.168.1.1"),
+            "expected correct substitution order, got: {}",
+            resolved
+        );
     }
 }

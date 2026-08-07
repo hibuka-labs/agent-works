@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use agent_base::{PlanItem, Tool};
@@ -19,7 +20,7 @@ pub use registry::{SkillRegistry, SkillSummary};
 // ── Skill parameter types ──
 
 /// Parameter type for template-based skills.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum SkillParamType {
     String,
     Number,
@@ -27,7 +28,7 @@ pub enum SkillParamType {
 }
 
 /// Parameter definition for a template-based skill.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SkillParam {
     pub name: String,
     pub description: String,
@@ -72,6 +73,55 @@ pub trait Skill: Send + Sync {
 
     fn category(&self) -> &'static str {
         ""
+    }
+
+    // ── Agent Skills 开放标准字段 (agentskills.io) ──
+
+    /// Tools allowed when this skill is active (empty = all tools allowed).
+    fn allowed_tools(&self) -> &[String] {
+        &[]
+    }
+
+    /// Tools disallowed when this skill is active (empty = no restrictions).
+    fn disallowed_tools(&self) -> &[String] {
+        &[]
+    }
+
+    /// Override the model selection. `None` means inherit from parent.
+    fn model_override(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether the user can manually invoke this skill via `/skill-name`.
+    fn is_user_invocable(&self) -> bool {
+        true
+    }
+
+    /// If true, the LLM cannot auto-trigger this skill (for side-effectful skills
+    /// like deploy/commit). The user must explicitly invoke it.
+    fn disable_model_invocation(&self) -> bool {
+        false
+    }
+
+    /// If `Some("fork")`, the skill runs in an isolated sub-agent context.
+    fn context_mode(&self) -> Option<&str> {
+        None
+    }
+
+    /// Gitignore-style glob patterns. The skill is only activated when changed
+    /// files match these patterns.
+    fn path_patterns(&self) -> &[String] {
+        &[]
+    }
+
+    /// The skill directory on disk (for `$PHI_SKILL_DIR` variable substitution).
+    fn skill_dir(&self) -> Option<&Path> {
+        None
+    }
+
+    /// Read a file from the skill's `references/` directory.
+    fn read_reference(&self, _relative_path: &str) -> Result<String, String> {
+        Err("references not supported".into())
     }
 }
 
