@@ -12,8 +12,7 @@ impl Default for LazySkillPrompter {
     fn default() -> Self {
         Self {
             title: "## Available Skills".to_string(),
-            // `{tool}` placeholder is replaced with the actual detail tool name
-            instruction_template: "> Call `{tool}` to get detailed instructions for a Skill."
+            instruction_template: "> Use `read_file` with the file path to read the full skill instructions."
                 .to_string(),
             item_prefix: "- **".to_string(),
         }
@@ -44,7 +43,7 @@ impl LazySkillPrompter {
 }
 
 impl SkillPrompter for LazySkillPrompter {
-    fn build_prompt(&self, skills: &[Arc<dyn Skill>], detail_tool_name: &str) -> String {
+    fn build_prompt(&self, skills: &[Arc<dyn Skill>], _detail_tool_name: &str) -> String {
         if skills.is_empty() {
             return String::new();
         }
@@ -54,20 +53,23 @@ impl SkillPrompter for LazySkillPrompter {
         prompt.push('\n');
 
         for skill in skills {
+            let file_hint = if let Some(path) = skill.source_path() {
+                format!(" → `{}`", path.display())
+            } else {
+                String::new()
+            };
             prompt.push_str(&format!(
-                "{}**{}**: {}\n",
+                "{}{}**{}**: {}{}\n",
                 self.item_prefix,
+                "", // placeholder prefix for future categorization
                 skill.name(),
-                skill.brief_description()
+                skill.brief_description(),
+                file_hint,
             ));
         }
 
         prompt.push('\n');
-        prompt.push_str(
-            &self
-                .instruction_template
-                .replace("{tool}", detail_tool_name),
-        );
+        prompt.push_str(&self.instruction_template);
 
         prompt
     }

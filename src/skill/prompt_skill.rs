@@ -108,6 +108,8 @@ pub struct PromptSkill {
     body: String,
     /// Directory on disk (set via `from_dir()`)
     skill_dir: Option<PathBuf>,
+    /// Path to SKILL.md file (set via `from_dir()`)
+    source_path: Option<PathBuf>,
     /// Leaked name for &'static str return
     static_name: &'static str,
     /// Leaked version for &'static str return
@@ -199,6 +201,7 @@ impl PromptSkill {
             content: content.to_string(),
             body: body.to_string(),
             skill_dir: None,
+            source_path: None,
             static_name,
             static_version,
             static_category,
@@ -276,6 +279,7 @@ impl PromptSkill {
         }
 
         skill.skill_dir = Some(path.to_path_buf());
+        skill.source_path = Some(path.join("SKILL.md"));
         Ok(skill)
     }
 
@@ -444,6 +448,10 @@ impl Skill for PromptSkill {
 
     fn skill_dir(&self) -> Option<&Path> {
         self.skill_dir.as_deref()
+    }
+
+    fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
     }
 
     fn read_reference(&self, relative_path: &str) -> Result<String, String> {

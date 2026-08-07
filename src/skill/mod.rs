@@ -119,6 +119,12 @@ pub trait Skill: Send + Sync {
         None
     }
 
+    /// The path to the skill's main source file (e.g. SKILL.md).
+    /// Used in prompt-injection mode to tell the LLM where to read the full skill.
+    fn source_path(&self) -> Option<&Path> {
+        None
+    }
+
     /// Read a file from the skill's `references/` directory.
     fn read_reference(&self, _relative_path: &str) -> Result<String, String> {
         Err("references not supported".into())
