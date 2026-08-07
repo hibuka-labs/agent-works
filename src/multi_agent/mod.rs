@@ -11,16 +11,16 @@
 //! ├── registry.rs     AgentRegistry
 //! ├── mailbox.rs      Mailbox
 //! ├── path.rs         AgentPath
-//! ├── tools/          (6 LLM tools)
 //! └── runtime.rs      MultiAgentRuntime
 //! ```
+//!
+//! The 6 LLM tools that use this infrastructure live in `phi-kernel-tools`.
 
 pub mod config;
 pub mod mailbox;
 pub mod path;
 pub mod registry;
 pub mod runtime;
-pub mod tools;
 
 pub use config::MultiAgentConfig;
 pub use path::AgentPath;

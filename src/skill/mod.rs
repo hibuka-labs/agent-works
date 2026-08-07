@@ -4,8 +4,6 @@ use std::sync::Arc;
 use agent_base::{PlanItem, Tool};
 use serde::Serialize;
 
-pub mod apply_tool;
-pub mod detail_tool;
 pub mod prompter;
 pub mod registry;
 
@@ -15,8 +13,6 @@ pub mod prompt_skill;
 #[cfg(feature = "yaml_skill")]
 pub mod yaml_skill;
 
-pub use apply_tool::ApplySkillTool;
-pub use detail_tool::SkillDetailTool;
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
 pub use registry::{SkillRegistry, SkillSummary};
 

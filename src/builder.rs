@@ -6,7 +6,16 @@ use agent_base::{AgentResult, AgentRuntime, LlmClient, Tool};
 use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
 
 #[cfg(feature = "skill")]
-use crate::skill::{LazySkillPrompter, Skill, SkillDetailTool, SkillPrompter};
+use crate::skill::{LazySkillPrompter, Skill, SkillPrompter};
+
+/// Factory type for creating multi-agent tools from a MultiAgentRuntime.
+pub type MultiAgentToolFactory =
+    Arc<dyn Fn(Arc<MultiAgentRuntime>) -> Vec<Arc<dyn Tool>> + Send + Sync>;
+
+/// Factory type for creating a skill detail tool from skills and a tool name.
+#[cfg(feature = "skill")]
+pub type SkillDetailToolFactory =
+    Arc<dyn Fn(Vec<Arc<dyn Skill>>, String) -> Arc<dyn Tool> + Send + Sync>;
 
 pub struct AgentBuilder {
     inner: agent_base::AgentBuilder,
@@ -16,6 +25,8 @@ pub struct AgentBuilder {
     business_tools: Vec<Arc<dyn Tool>>,
     /// Multi-agent configuration (None = disabled).
     multi_agent_config: Option<MultiAgentConfig>,
+    /// Factory to create multi-agent tools (injected by phi-kernel-tools).
+    multi_agent_tool_factory: Option<MultiAgentToolFactory>,
     /// Error recovery (stored for multi-agent child inheritance).
     error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
     /// Language preference.
@@ -26,6 +37,8 @@ pub struct AgentBuilder {
     skill_prompter: Option<Arc<dyn SkillPrompter>>,
     #[cfg(feature = "skill")]
     skill_detail_tool_name: String,
+    #[cfg(feature = "skill")]
+    skill_detail_tool_factory: Option<SkillDetailToolFactory>,
     #[cfg(feature = "skill")]
     disable_skill_prompt_injection: bool,
 }
@@ -38,6 +51,7 @@ impl AgentBuilder {
             tool_names: HashSet::new(),
             business_tools: Vec::new(),
             multi_agent_config: None,
+            multi_agent_tool_factory: None,
             error_recovery: None,
             language: None,
             #[cfg(feature = "skill")]
@@ -47,13 +61,38 @@ impl AgentBuilder {
             #[cfg(feature = "skill")]
             skill_detail_tool_name: "get_skill_detail".to_string(),
             #[cfg(feature = "skill")]
+            skill_detail_tool_factory: None,
+            #[cfg(feature = "skill")]
             disable_skill_prompt_injection: false,
         }
     }
 
     /// Enable multi-agent support with the given configuration.
+    ///
+    /// Also sets the tool factory to create the 6 multi-agent tools.
+    /// Callers should use `phi_kernel_tools::multi_agent::create_all_tools` as the factory.
     pub fn with_multi_agent(mut self, config: MultiAgentConfig) -> Self {
         self.multi_agent_config = Some(config);
+        self
+    }
+
+    /// Set a custom factory for creating multi-agent tools.
+    ///
+    /// The factory receives the `MultiAgentRuntime` and returns the tools to register.
+    /// If not set but multi-agent is enabled, no tools are registered (caller must
+    /// set this for multi-agent to work).
+    pub fn with_multi_agent_tool_factory(mut self, factory: MultiAgentToolFactory) -> Self {
+        self.multi_agent_tool_factory = Some(factory);
+        self
+    }
+
+    /// Set a custom factory for creating the skill detail tool.
+    ///
+    /// The factory receives the skill list and tool name, and returns the tool.
+    /// If not set but skills are registered, no detail tool is added.
+    #[cfg(feature = "skill")]
+    pub fn with_skill_detail_tool_factory(mut self, factory: SkillDetailToolFactory) -> Self {
+        self.skill_detail_tool_factory = Some(factory);
         self
     }
 
@@ -259,6 +298,7 @@ impl AgentBuilder {
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
         let lang = self.language.clone().unwrap_or_default();
         let ma_config = self.multi_agent_config.clone();
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
         let business_tools = std::mem::take(&mut self.business_tools);
         let error_recovery = self.error_recovery.clone();
         let tool_names = self.tool_names.clone();
@@ -275,10 +315,18 @@ impl AgentBuilder {
 
         let runtime = self.inner.build()?;
 
-        // Post-build: register multi-agent tools if enabled
-        if let Some(config) = ma_config && config.enabled {
+        // Post-build: register multi-agent tools if enabled and factory is set
+        if let Some(config) = ma_config
+            && config.enabled
+        {
             setup_multi_agent(
-                &runtime, config, lang, business_tools, error_recovery, &tool_names,
+                &runtime,
+                config,
+                lang,
+                business_tools,
+                error_recovery,
+                &tool_names,
+                ma_tool_factory,
             )?;
         }
 
@@ -290,6 +338,7 @@ impl AgentBuilder {
         let mut ab = self.inner;
         let lang = self.language.clone().unwrap_or_default();
         let ma_config = self.multi_agent_config.clone();
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
         let business_tools = std::mem::take(&mut self.business_tools);
         let error_recovery = self.error_recovery.clone();
         let tool_names = self.tool_names.clone();
@@ -332,8 +381,11 @@ impl AgentBuilder {
                 }
             }
 
-            let detail_tool = SkillDetailTool::new(skill_refs, self.skill_detail_tool_name);
-            ab = ab.register_tool(detail_tool);
+            // Use injected factory if available, otherwise skip creating detail tool
+            if let Some(factory) = self.skill_detail_tool_factory.take() {
+                let detail_tool = factory(skill_refs, self.skill_detail_tool_name);
+                ab = ab.register_tool_arc(detail_tool);
+            }
         }
 
         // Inject multi-agent prompt
@@ -349,9 +401,17 @@ impl AgentBuilder {
         let runtime = ab.build()?;
 
         // Post-build: register multi-agent tools
-        if let Some(config) = ma_config && config.enabled {
+        if let Some(config) = ma_config
+            && config.enabled
+        {
             setup_multi_agent(
-                &runtime, config, lang, business_tools, error_recovery, &tool_names,
+                &runtime,
+                config,
+                lang,
+                business_tools,
+                error_recovery,
+                &tool_names,
+                ma_tool_factory,
             )?;
         }
 
@@ -369,14 +429,15 @@ impl AgentBuilder {
 ///
 /// The phi-agent CLI and all examples use the default multi-threaded runtime,
 /// so this is safe in practice.
-fn setup_multi_agent(
+pub fn setup_multi_agent(
     runtime: &AgentRuntime,
     config: MultiAgentConfig,
     lang: agent_base::Language,
     business_tools: Vec<Arc<dyn Tool>>,
     error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
     existing_tool_names: &HashSet<String>,
-) -> AgentResult<()> {
+    tool_factory: Option<MultiAgentToolFactory>,
+) -> AgentResult<Arc<MultiAgentRuntime>> {
     let client = runtime.client();
     let cancel_token = runtime.cancel_token();
 
@@ -400,23 +461,25 @@ fn setup_multi_agent(
         }
     });
 
-    // Register 6 multi-agent tools
-    let tools = crate::multi_agent::tools::create_all_tools(ma_runtime);
-    let registry = runtime.tools_mut();
-    let mut reg = tokio::task::block_in_place(|| registry.blocking_write());
-    for tool in tools {
-        let tool_name = tool.name().to_string();
-        if !existing_tool_names.contains(&tool_name) {
-            reg.register_arc(tool);
+    // Register multi-agent tools if a factory is provided
+    if let Some(factory) = tool_factory {
+        let tools = factory(ma_runtime.clone());
+        let registry = runtime.tools_mut();
+        let mut reg = tokio::task::block_in_place(|| registry.blocking_write());
+        for tool in tools {
+            let tool_name = tool.name().to_string();
+            if !existing_tool_names.contains(&tool_name) {
+                reg.register_arc(tool);
+            }
         }
+        drop(reg);
     }
-    drop(reg);
 
-    Ok(())
+    Ok(ma_runtime)
 }
 
 /// Build the multi-agent system prompt guidance for the main agent.
-fn build_multi_agent_system_prompt() -> String {
+pub fn build_multi_agent_system_prompt() -> String {
     r#"## Multi-Agent Capabilities
 
 You have the ability to spawn sub-agents to execute tasks concurrently. Use these tools to delegate work:
@@ -447,4 +510,330 @@ You have the ability to spawn sub-agents to execute tasks concurrently. Use thes
 3. `wait_agent` → collect results
 4. `close_agent` → clean up when done"#
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_base::ToolControlFlow;
+    use std::pin::Pin;
+
+    // ── Stub LLM client ──
+
+    struct StubClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for StubClient {
+        async fn chat(
+            &self,
+            _messages: &[agent_base::ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&agent_base::ResponseFormat>,
+        ) -> AgentResult<serde_json::Value> {
+            Ok(serde_json::json!({"choices": [{"message": {"content": "ok"}}]}))
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[agent_base::ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&agent_base::ResponseFormat>,
+        ) -> AgentResult<
+            Pin<Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>>,
+        > {
+            let chunks: Vec<AgentResult<agent_base::StreamChunk>> = vec![
+                Ok(agent_base::StreamChunk::Text("ok".to_string())),
+                Ok(agent_base::StreamChunk::Stop),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(chunks)))
+        }
+
+        fn capabilities(&self) -> agent_base::LlmCapabilities {
+            agent_base::LlmCapabilities {
+                supports_streaming: true,
+                supports_tools: true,
+                supports_vision: false,
+                supports_thinking: false,
+                max_context_tokens: None,
+                max_output_tokens: None,
+            }
+        }
+    }
+
+    fn make_client() -> Arc<dyn LlmClient> {
+        Arc::new(StubClient)
+    }
+
+    // ── setup_multi_agent tests ──
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_setup_multi_agent_without_factory_registers_no_tools() {
+        let client = make_client();
+        let runtime = agent_base::AgentBuilder::new(client.clone())
+            .build()
+            .unwrap();
+        let config = MultiAgentConfig::enabled();
+
+        let result = setup_multi_agent(
+            &runtime,
+            config,
+            agent_base::Language::En,
+            vec![],
+            None,
+            &HashSet::new(),
+            None, // no factory
+        );
+        assert!(result.is_ok());
+        let ma_runtime = result.unwrap();
+        // Verify no tools were registered (the 6 multi-agent tools are absent)
+        let agents = ma_runtime.list_agents();
+        assert!(agents.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_setup_multi_agent_with_factory_registers_tools() {
+        let client = make_client();
+        let runtime = agent_base::AgentBuilder::new(client.clone())
+            .build()
+            .unwrap();
+        let config = MultiAgentConfig::enabled();
+
+        let factory: MultiAgentToolFactory = Arc::new(|_rt| {
+            // Minimal factory returning a single fake tool
+            struct FakeTool;
+            #[async_trait::async_trait]
+            impl Tool for FakeTool {
+                fn name(&self) -> &'static str {
+                    "fake_tool"
+                }
+                fn definition(&self) -> serde_json::Value {
+                    serde_json::json!({"type": "function", "function": {"name": "fake_tool"}})
+                }
+                async fn call(
+                    &self,
+                    _args: &serde_json::Value,
+                    _ctx: &agent_base::ToolContext,
+                ) -> AgentResult<agent_base::ToolOutput> {
+                    Ok(agent_base::ToolOutput {
+                        summary: "ok".into(),
+                        raw: None,
+                        control_flow: ToolControlFlow::Continue,
+                        truncation: None,
+                    })
+                }
+            }
+            vec![Arc::new(FakeTool)]
+        });
+
+        let result = setup_multi_agent(
+            &runtime,
+            config,
+            agent_base::Language::En,
+            vec![],
+            None,
+            &HashSet::new(),
+            Some(factory),
+        );
+        assert!(result.is_ok());
+
+        // Check the tool was registered on the runtime
+        let tools: Vec<String> = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect()
+        });
+        assert!(tools.contains(&"fake_tool".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_setup_multi_agent_skips_duplicate_tool_names() {
+        let client = make_client();
+        let runtime = agent_base::AgentBuilder::new(client.clone())
+            .build()
+            .unwrap();
+
+        // Pre-register a tool with a conflicting name
+        struct DupTool;
+        #[async_trait::async_trait]
+        impl Tool for DupTool {
+            fn name(&self) -> &'static str {
+                "dup_tool"
+            }
+            fn definition(&self) -> serde_json::Value {
+                serde_json::json!({"type": "function", "function": {"name": "dup_tool"}})
+            }
+            async fn call(
+                &self,
+                _args: &serde_json::Value,
+                _ctx: &agent_base::ToolContext,
+            ) -> AgentResult<agent_base::ToolOutput> {
+                Ok(agent_base::ToolOutput {
+                    summary: "ok".into(),
+                    raw: None,
+                    control_flow: ToolControlFlow::Continue,
+                    truncation: None,
+                })
+            }
+        }
+        {
+            let tools = runtime.tools_mut();
+            let mut reg = tokio::task::block_in_place(|| tools.blocking_write());
+            reg.register(DupTool);
+        }
+
+        let factory: MultiAgentToolFactory = Arc::new(|_rt| {
+            struct FakeTool;
+            #[async_trait::async_trait]
+            impl Tool for FakeTool {
+                fn name(&self) -> &'static str {
+                    "dup_tool"
+                }
+                fn definition(&self) -> serde_json::Value {
+                    serde_json::json!({"type": "function", "function": {"name": "dup_tool"}})
+                }
+                async fn call(
+                    &self,
+                    _args: &serde_json::Value,
+                    _ctx: &agent_base::ToolContext,
+                ) -> AgentResult<agent_base::ToolOutput> {
+                    Ok(agent_base::ToolOutput {
+                        summary: "ok".into(),
+                        raw: None,
+                        control_flow: ToolControlFlow::Continue,
+                        truncation: None,
+                    })
+                }
+            }
+            vec![Arc::new(FakeTool)]
+        });
+
+        let mut existing = HashSet::new();
+        existing.insert("dup_tool".to_string());
+
+        let result = setup_multi_agent(
+            &runtime,
+            MultiAgentConfig::enabled(),
+            agent_base::Language::En,
+            vec![],
+            None,
+            &existing,
+            Some(factory),
+        );
+        assert!(result.is_ok());
+        // dup_tool should NOT have been registered twice
+        let tools = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+        });
+        let count = tools.iter().filter(|n| n.as_str() == "dup_tool").count();
+        assert_eq!(count, 1);
+    }
+
+    // ── AgentBuilder factory methods ──
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_with_multi_agent_without_factory_builds_ok() {
+        let client = make_client();
+        let runtime = AgentBuilder::new(client)
+            .with_multi_agent(MultiAgentConfig::enabled())
+            .build()
+            .unwrap();
+        // Should succeed even without a factory (no tools registered)
+        let tools = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+        });
+        // No multi-agent tools registered
+        assert!(!tools.contains(&"spawn_agent".to_string()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_with_factory_registers_tools() {
+        let client = make_client();
+        // Create a simple factory that registers one recognizable tool
+        let factory: MultiAgentToolFactory = Arc::new(|_rt| {
+            struct TestTool;
+            #[async_trait::async_trait]
+            impl Tool for TestTool {
+                fn name(&self) -> &'static str {
+                    "factory_test_tool"
+                }
+                fn definition(&self) -> serde_json::Value {
+                    serde_json::json!({"type": "function", "function": {"name": "factory_test_tool"}})
+                }
+                async fn call(
+                    &self,
+                    _args: &serde_json::Value,
+                    _ctx: &agent_base::ToolContext,
+                ) -> AgentResult<agent_base::ToolOutput> {
+                    Ok(agent_base::ToolOutput {
+                        summary: "ok".into(),
+                        raw: None,
+                        control_flow: ToolControlFlow::Continue,
+                        truncation: None,
+                    })
+                }
+            }
+            vec![Arc::new(TestTool)]
+        });
+
+        let runtime = AgentBuilder::new(client)
+            .with_multi_agent(MultiAgentConfig::enabled())
+            .with_multi_agent_tool_factory(factory)
+            .build()
+            .unwrap();
+
+        let tools = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+        });
+        assert!(tools.contains(&"factory_test_tool".to_string()));
+    }
+
+    #[test]
+    fn test_builder_disabled_multi_agent_skips_factory() {
+        let client = make_client();
+        let factory: MultiAgentToolFactory = Arc::new(|_rt| {
+            panic!("factory should not be called when multi-agent is disabled");
+        });
+
+        let runtime = AgentBuilder::new(client)
+            .with_multi_agent_tool_factory(factory)
+            // Don't enable multi-agent — leave default (disabled)
+            .build()
+            .unwrap();
+
+        let tools = tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+        });
+        assert!(!tools.contains(&"spawn_agent".to_string()));
+    }
+
+    // ── build_multi_agent_system_prompt ──
+
+    #[test]
+    fn test_system_prompt_contains_tool_names() {
+        let prompt = build_multi_agent_system_prompt();
+        assert!(prompt.contains("spawn_agent"));
+        assert!(prompt.contains("send_message"));
+        assert!(prompt.contains("followup_task"));
+        assert!(prompt.contains("wait_agent"));
+        assert!(prompt.contains("list_agents"));
+        assert!(prompt.contains("close_agent"));
+    }
+
+    #[test]
+    fn test_system_prompt_contains_guidance() {
+        let prompt = build_multi_agent_system_prompt();
+        assert!(prompt.contains("When to Spawn"));
+        assert!(prompt.contains("When NOT to Spawn"));
+        assert!(prompt.contains("Communication Pattern"));
+    }
 }

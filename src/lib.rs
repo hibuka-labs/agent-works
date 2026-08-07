@@ -16,13 +16,17 @@ pub mod multi_agent;
 mod builder;
 pub mod handle;
 
-pub use crate::builder::AgentBuilder;
+pub use crate::builder::{
+    AgentBuilder, MultiAgentToolFactory, build_multi_agent_system_prompt, setup_multi_agent,
+};
+#[cfg(feature = "skill")]
+pub use crate::builder::SkillDetailToolFactory;
 pub use crate::handle::{AgentHandle, SendError};
 
 #[cfg(feature = "skill")]
 pub use skill::{
-    ApplySkillTool, FullDetailPrompter, LazySkillPrompter, Skill, SkillDetailTool, SkillParam,
-    SkillParamType, SkillRegistry, SkillSummary,
+    FullDetailPrompter, LazySkillPrompter, Skill, SkillParam, SkillParamType, SkillRegistry,
+    SkillSummary,
 };
 
 #[cfg(feature = "prompt_skill")]
