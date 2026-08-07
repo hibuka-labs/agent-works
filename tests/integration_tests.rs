@@ -1209,3 +1209,249 @@ mod agent_handle_tests {
         assert!(got_finished, "should be able to continue after cancel");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-Agent integration tests
+// ---------------------------------------------------------------------------
+
+mod multi_agent_tests {
+    use super::*;
+    use agent_works::multi_agent::{AgentPath, MultiAgentConfig, MultiAgentRuntime};
+
+    /// Test that AgentPath parsing and navigation work correctly.
+    #[test]
+    fn test_agent_path_basics() {
+        let root = AgentPath::root();
+        assert!(root.is_root());
+        assert_eq!(root.depth(), 0);
+        assert_eq!(root.to_string(), "root");
+
+        let child = root.join("searcher");
+        assert!(!child.is_root());
+        assert_eq!(child.depth(), 1);
+        assert_eq!(child.name(), "searcher");
+        assert_eq!(child.parent(), Some(root));
+
+        let parsed: AgentPath = "root/searcher".parse().unwrap();
+        assert_eq!(parsed, child);
+    }
+
+    /// Test that MultiAgentConfig defaults are correct.
+    #[test]
+    fn test_multi_agent_config_defaults() {
+        let config = MultiAgentConfig::enabled();
+        assert!(config.enabled);
+        assert_eq!(config.max_sub_agents, 8);
+        assert_eq!(config.max_agent_depth, 1);
+    }
+
+    /// Test building an agent with multi-agent enabled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_build_with_multi_agent_enabled() {
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
+            StreamChunk::Text("I'll analyze this in parallel.".to_string()),
+            StreamChunk::Stop,
+        ]]));
+
+        let runtime = AgentBuilder::new(llm)
+            .register_tool(EchoTool)
+            .with_multi_agent(MultiAgentConfig::enabled())
+            .build()
+            .unwrap();
+
+        let session_id = runtime.create_session().await;
+        let result = runtime
+            .run_turn_collect(session_id.clone(), "research topic")
+            .await;
+
+        assert!(result.is_ok(), "Expected ok, got: {result:?}");
+        let (_events, outcome) = result.unwrap();
+        assert_eq!(outcome, RunOutcome::Completed);
+    }
+
+    /// Test that multi-agent builder with custom limits works.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_agent_custom_limits() {
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
+            StreamChunk::Text("ok".to_string()),
+            StreamChunk::Stop,
+        ]]));
+
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_sub_agents: 4,
+            max_agent_depth: 2,
+        };
+
+        let runtime = AgentBuilder::new(llm)
+            .with_multi_agent(config)
+            .build()
+            .unwrap();
+
+        let session_id = runtime.create_session().await;
+        let result = runtime.run_turn_collect(session_id, "test").await;
+        assert!(result.is_ok(), "Expected ok: {result:?}");
+    }
+
+    /// Test multi-agent spawn-and-task lifecycle via the runtime API.
+    #[tokio::test]
+    async fn test_runtime_spawn_child_and_wait() {
+        use tokio_util::sync::CancellationToken;
+
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
+            StreamChunk::Text("child response".to_string()),
+            StreamChunk::Stop,
+        ]]));
+
+        let cancel = CancellationToken::new();
+        let config = MultiAgentConfig::enabled();
+
+        let runtime = Arc::new(MultiAgentRuntime::new(
+            config,
+            llm,
+            vec![],
+            cancel,
+            None,
+            agent_base::Language::En,
+        ));
+
+        // Spawn a child
+        let path = runtime
+            .spawn_child("test-worker", "You are a test worker.".to_string(), 1, 0)
+            .await
+            .expect("spawn should succeed");
+
+        assert_eq!(path, "root/test-worker");
+
+        // Verify child is registered
+        let agents = runtime.list_agents();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_path, "root/test-worker");
+        assert_eq!(agents[0].status, "idle");
+        assert_eq!(agents[0].tool_count, 0);
+
+        // Send a task
+        runtime
+            .send_task(&path, "do something".to_string(), true)
+            .expect("send_task should succeed");
+
+        // Wait for result
+        let result = runtime.wait_for_result(Some(&path), 5000).await;
+        assert_eq!(result.status, "ok");
+        assert!(result.result.is_some());
+
+        // Close the child
+        let close_result = runtime.close_agent(&path).expect("close should succeed");
+        assert!(close_result.closed);
+        assert_eq!(close_result.message, "agent closed");
+
+        // Verify closed
+        let agents = runtime.list_agents();
+        assert!(agents.is_empty());
+    }
+
+    /// Test spawn limit enforcement through the registry.
+    #[tokio::test]
+    async fn test_spawn_limit_enforcement() {
+        use tokio_util::sync::CancellationToken;
+
+        let llm = Arc::new(MockLlmClient::new(vec![]));
+        let cancel = CancellationToken::new();
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_sub_agents: 2,
+            max_agent_depth: 1,
+        };
+
+        let runtime = Arc::new(MultiAgentRuntime::new(
+            config,
+            llm,
+            vec![],
+            cancel,
+            None,
+            agent_base::Language::En,
+        ));
+
+        // Should be able to spawn up to max
+        runtime
+            .spawn_child("worker-1", "prompt".to_string(), 1, 0)
+            .await
+            .expect("first spawn");
+        runtime
+            .spawn_child("worker-2", "prompt".to_string(), 1, 0)
+            .await
+            .expect("second spawn");
+
+        // Third spawn should fail
+        let err = runtime
+            .spawn_child("worker-3", "prompt".to_string(), 1, 0)
+            .await;
+        assert!(err.is_err(), "third spawn should fail: {:?}", err);
+        let msg = err.unwrap_err();
+        assert!(msg.contains("max"), "expected 'max' in error: {}", msg);
+
+        let agents = runtime.list_agents();
+        assert_eq!(agents.len(), 2);
+    }
+
+    /// Test depth limit enforcement.
+    #[tokio::test]
+    async fn test_depth_limit_enforcement() {
+        use tokio_util::sync::CancellationToken;
+
+        let llm = Arc::new(MockLlmClient::new(vec![]));
+        let cancel = CancellationToken::new();
+        let config = MultiAgentConfig {
+            enabled: true,
+            max_sub_agents: 10,
+            max_agent_depth: 1,
+        };
+
+        let runtime = Arc::new(MultiAgentRuntime::new(
+            config,
+            llm,
+            vec![],
+            cancel,
+            None,
+            agent_base::Language::En,
+        ));
+
+        // depth=1: allowed
+        runtime
+            .spawn_child("level1", "prompt".to_string(), 1, 0)
+            .await
+            .expect("depth 1 should be allowed");
+
+        // depth=2: should fail
+        let err = runtime
+            .spawn_child("level2", "prompt".to_string(), 2, 0)
+            .await;
+        assert!(err.is_err(), "depth 2 should fail: {:?}", err);
+        let msg = err.unwrap_err();
+        assert!(msg.contains("depth"), "expected 'depth' in error: {}", msg);
+    }
+
+    /// Test close_agent on non-existent path returns error.
+    #[tokio::test]
+    async fn test_close_nonexistent_agent() {
+        use tokio_util::sync::CancellationToken;
+
+        let llm = Arc::new(MockLlmClient::new(vec![]));
+        let cancel = CancellationToken::new();
+        let config = MultiAgentConfig::enabled();
+
+        let runtime = Arc::new(MultiAgentRuntime::new(
+            config,
+            llm,
+            vec![],
+            cancel,
+            None,
+            agent_base::Language::En,
+        ));
+
+        let result = runtime.close_agent("root/ghost");
+        assert!(result.is_ok());
+        assert!(!result.as_ref().unwrap().closed);
+    }
+}
+

@@ -11,6 +11,7 @@ pub mod builtin;
 pub mod cli;
 
 pub mod focus;
+pub mod multi_agent;
 
 mod builder;
 pub mod handle;
