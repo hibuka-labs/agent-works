@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use agent_base::{AgentResult, AgentRuntime, RunOutcome, RuntimeEvent, SessionId};
+use agent_base::{AgentResult, AgentRuntime, RunOutcome, RuntimeEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,6 +41,7 @@ use tokio::sync::Mutex;
 // ── JSON-RPC 2.0 types ──
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcRequest {
     jsonrpc: String,
     #[serde(default)]
@@ -435,7 +436,7 @@ impl McpServer {
 
                 // Write progress to the shared writer (same as the response writer),
                 // avoiding interleaved output on stdout.
-                if let (Some(progress), Some(ref writer)) = (progress_msg, &progress_writer) {
+                if let (Some(progress), Some(writer)) = (progress_msg, &progress_writer) {
                     let notification = JsonRpcNotification {
                         jsonrpc: "2.0",
                         method: "notifications/progress".to_string(),
