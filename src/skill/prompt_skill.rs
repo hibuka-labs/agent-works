@@ -42,7 +42,6 @@ pub struct SkillFrontmatter {
     pub author: Option<String>,
 
     // ── Agent Skills 开放标准字段 (agentskills.io) ──
-
     /// Tools allowed when this skill is active (comma-separated or YAML list).
     /// Empty = all tools allowed.
     #[serde(default, alias = "allowed-tools")]
@@ -230,17 +229,26 @@ impl PromptSkill {
 
     /// Path to the `scripts/` subdirectory, if it exists.
     pub fn scripts_dir(&self) -> Option<PathBuf> {
-        self.skill_dir.as_ref().map(|d| d.join("scripts")).filter(|p| p.is_dir())
+        self.skill_dir
+            .as_ref()
+            .map(|d| d.join("scripts"))
+            .filter(|p| p.is_dir())
     }
 
     /// Path to the `references/` subdirectory, if it exists.
     pub fn references_dir(&self) -> Option<PathBuf> {
-        self.skill_dir.as_ref().map(|d| d.join("references")).filter(|p| p.is_dir())
+        self.skill_dir
+            .as_ref()
+            .map(|d| d.join("references"))
+            .filter(|p| p.is_dir())
     }
 
     /// Path to the `templates/` subdirectory, if it exists.
     pub fn templates_dir(&self) -> Option<PathBuf> {
-        self.skill_dir.as_ref().map(|d| d.join("templates")).filter(|p| p.is_dir())
+        self.skill_dir
+            .as_ref()
+            .map(|d| d.join("templates"))
+            .filter(|p| p.is_dir())
     }
 
     /// Load a skill from a standard directory structure.
@@ -427,7 +435,10 @@ impl Skill for PromptSkill {
     }
 
     fn model_override(&self) -> Option<&str> {
-        self.frontmatter.model.as_deref().filter(|m| *m != "inherit")
+        self.frontmatter
+            .model
+            .as_deref()
+            .filter(|m| *m != "inherit")
     }
 
     fn is_user_invocable(&self) -> bool {
@@ -469,9 +480,12 @@ impl Skill for PromptSkill {
             .map_err(|e| format!("Failed to resolve references/ directory: {}", e))?;
 
         let resolved = ref_dir.join(relative_path);
-        let canonical = resolved
-            .canonicalize()
-            .map_err(|e| format!("Failed to resolve reference path '{}': {}", relative_path, e))?;
+        let canonical = resolved.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve reference path '{}': {}",
+                relative_path, e
+            )
+        })?;
 
         if !canonical.starts_with(&ref_dir_canon) {
             return Err(format!(
@@ -748,8 +762,12 @@ Body
             std::fs::create_dir(&skill_dir).unwrap();
             std::fs::write(
                 skill_dir.join("SKILL.md"),
-                format!("---\nname: {}\ndescription: {} skill\n---\nBody", name, name),
-            ).unwrap();
+                format!(
+                    "---\nname: {}\ndescription: {} skill\n---\nBody",
+                    name, name
+                ),
+            )
+            .unwrap();
         }
 
         // Create a non-skill directory (no SKILL.md)
@@ -777,8 +795,16 @@ Body
         let refs_dir = skill_dir.join("references");
         std::fs::create_dir(&refs_dir).unwrap();
 
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: ref-skill\ndescription: test\n---\nBody").unwrap();
-        std::fs::write(refs_dir.join("guide.md"), "# Reference Guide\n\nImportant info.").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: ref-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
+        std::fs::write(
+            refs_dir.join("guide.md"),
+            "# Reference Guide\n\nImportant info.",
+        )
+        .unwrap();
 
         let skill = PromptSkill::from_dir(&skill_dir).unwrap();
         let content = skill.read_reference("guide.md").unwrap();
@@ -798,11 +824,19 @@ Body
         // (e.g. skill_dir/secret.txt, accessible via ../secret.txt from references/)
         std::fs::write(skill_dir.join("secret.txt"), "top secret").unwrap();
 
-        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: secure-skill\ndescription: test\n---\nBody").unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: secure-skill\ndescription: test\n---\nBody",
+        )
+        .unwrap();
 
         let skill = PromptSkill::from_dir(&skill_dir).unwrap();
         let result = skill.read_reference("../secret.txt");
-        assert!(result.is_err(), "expected error for path traversal, got {:?}", result.ok());
+        assert!(
+            result.is_err(),
+            "expected error for path traversal, got {:?}",
+            result.ok()
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("Path traversal") || err.contains("outside references"),

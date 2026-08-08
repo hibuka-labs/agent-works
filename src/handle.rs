@@ -78,8 +78,11 @@ impl AgentHandle {
                             Err(e) if e.is_cancelled() => {}
                             Err(e) => {
                                 tracing::error!(error = %e, "run_turn failed");
-                                let _ =
-                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid, agent_id: None, trace_id: None });
+                                let _ = event_tx.send(RuntimeEvent::RunFinished {
+                                    session_id: sid,
+                                    agent_id: None,
+                                    trace_id: None,
+                                });
                             }
                         }
                     }
@@ -128,8 +131,11 @@ impl AgentHandle {
                             Err(e) => {
                                 // Non-cancellation error: emit RunFinished so caller isn't stuck
                                 tracing::error!(error = %e, "run_turn failed");
-                                let _ =
-                                    event_tx.send(RuntimeEvent::RunFinished { session_id: sid, agent_id: None, trace_id: None });
+                                let _ = event_tx.send(RuntimeEvent::RunFinished {
+                                    session_id: sid,
+                                    agent_id: None,
+                                    trace_id: None,
+                                });
                             }
                         }
                     }

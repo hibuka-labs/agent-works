@@ -218,7 +218,10 @@ impl SkillRegistry {
     pub async fn enabled_count(&self) -> usize {
         let skills = self.skills.read().await;
         let disabled = self.disabled.read().await;
-        skills.iter().filter(|s| !disabled.contains(s.name())).count()
+        skills
+            .iter()
+            .filter(|s| !disabled.contains(s.name()))
+            .count()
     }
 
     /// Get all enabled skills as full `Arc<dyn Skill>` for use with
@@ -226,7 +229,11 @@ impl SkillRegistry {
     pub async fn all_skills(&self) -> Vec<Arc<dyn Skill>> {
         let skills = self.skills.read().await;
         let disabled = self.disabled.read().await;
-        skills.iter().filter(|s| !disabled.contains(s.name())).cloned().collect()
+        skills
+            .iter()
+            .filter(|s| !disabled.contains(s.name()))
+            .cloned()
+            .collect()
     }
 
     /// Get all registered skills including disabled ones.
@@ -269,9 +276,9 @@ impl SkillRegistry {
 
         for dir in &dirs {
             if dir.is_dir() {
-                watcher
-                    .watch(dir, RecursiveMode::Recursive)
-                    .map_err(|e| AgentError::internal(format!("Failed to watch {}: {}", dir.display(), e)))?;
+                watcher.watch(dir, RecursiveMode::Recursive).map_err(|e| {
+                    AgentError::internal(format!("Failed to watch {}: {}", dir.display(), e))
+                })?;
             }
         }
 

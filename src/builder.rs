@@ -19,7 +19,8 @@ pub type SkillDetailToolFactory =
 
 /// Factory type for creating a list-skills tool from a SkillRegistry.
 #[cfg(feature = "skill")]
-pub type ListSkillsToolFactory = Arc<dyn Fn(Arc<crate::skill::SkillRegistry>) -> Arc<dyn Tool> + Send + Sync>;
+pub type ListSkillsToolFactory =
+    Arc<dyn Fn(Arc<crate::skill::SkillRegistry>) -> Arc<dyn Tool> + Send + Sync>;
 
 pub struct AgentBuilder {
     inner: agent_base::AgentBuilder,
@@ -453,8 +454,7 @@ impl AgentBuilder {
             }
 
             if !self.disable_skill_prompt_injection {
-                let skill_prompt =
-                    prompter.build_prompt(&skill_refs, &self.skill_detail_tool_name);
+                let skill_prompt = prompter.build_prompt(&skill_refs, &self.skill_detail_tool_name);
                 if !skill_prompt.is_empty() {
                     let new_prompt = match self.system_prompt.take() {
                         Some(existing) => format!("{}\n\n---\n\n{}", existing, skill_prompt),
@@ -888,7 +888,11 @@ mod tests {
         let tools = tokio::task::block_in_place(|| {
             let tools = runtime.tools_mut();
             let guard = tools.blocking_read();
-            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+            guard
+                .metadatas()
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<String>>()
         });
         let count = tools.iter().filter(|n| n.as_str() == "dup_tool").count();
         assert_eq!(count, 1);
@@ -907,7 +911,11 @@ mod tests {
         let tools = tokio::task::block_in_place(|| {
             let tools = runtime.tools_mut();
             let guard = tools.blocking_read();
-            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+            guard
+                .metadatas()
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<String>>()
         });
         // No multi-agent tools registered
         assert!(!tools.contains(&"spawn_agent".to_string()));
@@ -952,7 +960,11 @@ mod tests {
         let tools = tokio::task::block_in_place(|| {
             let tools = runtime.tools_mut();
             let guard = tools.blocking_read();
-            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+            guard
+                .metadatas()
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<String>>()
         });
         assert!(tools.contains(&"factory_test_tool".to_string()));
     }
@@ -973,7 +985,11 @@ mod tests {
         let tools = tokio::task::block_in_place(|| {
             let tools = runtime.tools_mut();
             let guard = tools.blocking_read();
-            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+            guard
+                .metadatas()
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<String>>()
         });
         assert!(!tools.contains(&"spawn_agent".to_string()));
     }
@@ -1020,7 +1036,11 @@ mod tests {
         let tools = tokio::task::block_in_place(|| {
             let tools = runtime.tools_mut();
             let guard = tools.blocking_read();
-            guard.metadatas().into_iter().map(|m| m.name).collect::<Vec<String>>()
+            guard
+                .metadatas()
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<String>>()
         });
         assert!(!tools.contains(&"spawn_agent".to_string()));
     }
@@ -1030,9 +1050,8 @@ mod tests {
     #[test]
     fn test_apply_if_some_applies_transformation() {
         let client = make_client();
-        let builder = AgentBuilder::new(client).apply_if(Some("custom prompt"), |b, prompt| {
-            b.system_prompt(prompt)
-        });
+        let builder = AgentBuilder::new(client)
+            .apply_if(Some("custom prompt"), |b, prompt| b.system_prompt(prompt));
         // system_prompt is stored in self.system_prompt; verify it was set
         assert!(builder.system_prompt.unwrap().contains("custom prompt"));
     }

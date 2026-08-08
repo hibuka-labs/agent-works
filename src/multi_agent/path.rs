@@ -160,7 +160,8 @@ impl serde::Serialize for AgentPath {
 impl<'de> serde::Deserialize<'de> for AgentPath {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        AgentPath::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid agent path: '{}'", s)))
+        AgentPath::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid agent path: '{}'", s)))
     }
 }
 
@@ -202,10 +203,7 @@ mod tests {
 
     #[test]
     fn parse_valid() {
-        assert_eq!(
-            "root".parse::<AgentPath>().unwrap(),
-            AgentPath::root()
-        );
+        assert_eq!("root".parse::<AgentPath>().unwrap(), AgentPath::root());
         assert_eq!(
             "root/searcher".parse::<AgentPath>().unwrap(),
             AgentPath::root().join("searcher")

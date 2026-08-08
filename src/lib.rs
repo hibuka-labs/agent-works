@@ -16,12 +16,12 @@ pub mod multi_agent;
 mod builder;
 pub mod handle;
 
+#[cfg(feature = "skill")]
+pub use crate::builder::SkillDetailToolFactory;
 pub use crate::builder::{
     AgentBuilder, MultiAgentToolFactory, build_memory_system_prompt,
     build_multi_agent_system_prompt, setup_multi_agent,
 };
-#[cfg(feature = "skill")]
-pub use crate::builder::SkillDetailToolFactory;
 pub use crate::handle::{AgentHandle, SendError};
 
 #[cfg(feature = "skill")]

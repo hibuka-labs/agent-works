@@ -1,27 +1,42 @@
 //! Benchmarks: AgentBuilder construction in agent-works.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use futures_core::Stream;
 use agent_base::{
     AgentResult, ChatMessage, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
     StreamChunk, Tool, ToolContext, ToolControlFlow, ToolMetadata, ToolOutput,
 };
 use agent_works::AgentBuilder;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use futures_core::Stream;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Mock LLM client.
 struct BenchLlmClient;
 #[async_trait::async_trait]
 impl LlmClient for BenchLlmClient {
-    async fn chat(&self, _: &[ChatMessage], _: &[serde_json::Value], _: Option<&ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<serde_json::Value> {
+    async fn chat(
+        &self,
+        _: &[ChatMessage],
+        _: &[serde_json::Value],
+        _: Option<&ReasoningConfig>,
+        _: Option<&ResponseFormat>,
+    ) -> AgentResult<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
-    async fn chat_stream(&self, _: &[ChatMessage], _: &[serde_json::Value], _: Option<&ReasoningConfig>, _: Option<&ResponseFormat>) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+    async fn chat_stream(
+        &self,
+        _: &[ChatMessage],
+        _: &[serde_json::Value],
+        _: Option<&ReasoningConfig>,
+        _: Option<&ResponseFormat>,
+    ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
         struct EmptyStream;
         impl Stream for EmptyStream {
             type Item = AgentResult<StreamChunk>;
-            fn poll_next(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+            fn poll_next(
+                self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
                 std::task::Poll::Ready(None)
             }
         }
@@ -29,9 +44,12 @@ impl LlmClient for BenchLlmClient {
     }
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities {
-            supports_thinking: false, supports_streaming: false,
-            supports_tools: true, supports_vision: false,
-            max_context_tokens: Some(4096), max_output_tokens: Some(4096),
+            supports_thinking: false,
+            supports_streaming: false,
+            supports_tools: true,
+            supports_vision: false,
+            max_context_tokens: Some(4096),
+            max_output_tokens: Some(4096),
         }
     }
 }
@@ -41,20 +59,27 @@ impl LlmClient for BenchLlmClient {
 struct NoopTool;
 #[async_trait::async_trait]
 impl Tool for NoopTool {
-    fn name(&self) -> &'static str { "noop" }
+    fn name(&self) -> &'static str {
+        "noop"
+    }
     fn definition(&self) -> serde_json::Value {
         serde_json::json!({"function": {"name": "noop", "description": "no-op", "parameters": {}}})
     }
     async fn call(&self, _: &serde_json::Value, _: &ToolContext) -> AgentResult<ToolOutput> {
         Ok(ToolOutput {
-            summary: "ok".into(), raw: None,
-            control_flow: ToolControlFlow::Continue, truncation: None,
+            summary: "ok".into(),
+            raw: None,
+            control_flow: ToolControlFlow::Continue,
+            truncation: None,
         })
     }
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {
-            name: "noop".into(), description: "no-op".into(),
-            origin: "bench".into(), version: "0.0.0".into(), requirements: vec![],
+            name: "noop".into(),
+            description: "no-op".into(),
+            origin: "bench".into(),
+            version: "0.0.0".into(),
+            requirements: vec![],
         }
     }
 }

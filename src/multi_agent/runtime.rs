@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, DenyAllApprovalHandler, Language, LlmClient,
-    RuntimeEvent, RunOutcome, SessionId, Tool, UserEvent,
+    RunOutcome, RuntimeEvent, SessionId, Tool, UserEvent,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -118,9 +118,7 @@ impl MultiAgentRuntime {
         // 1. Check limits and register
         {
             let mut registry = self.registry.lock().unwrap();
-            registry
-                .can_spawn(depth)
-                .map_err(|e| e.to_string())?;
+            registry.can_spawn(depth).map_err(|e| e.to_string())?;
             registry
                 .register(&path, depth, tool_count)
                 .map_err(|e| e.to_string())?;
@@ -218,11 +216,7 @@ impl MultiAgentRuntime {
     /// Wait for a result from any or a specific child agent.
     ///
     /// Called by `wait_agent` tool. Blocks until a result arrives or timeout.
-    pub async fn wait_for_result(
-        &self,
-        agent_path: Option<&str>,
-        timeout_ms: u64,
-    ) -> WaitResult {
+    pub async fn wait_for_result(&self, agent_path: Option<&str>, timeout_ms: u64) -> WaitResult {
         let filter_path = match agent_path {
             Some(s) => match AgentPath::parse(s) {
                 Some(p) => Some(p),
@@ -232,15 +226,14 @@ impl MultiAgentRuntime {
                         result: Some(format!("invalid agent path: {}", s)),
                         agent_path: None,
                         has_more: false,
-                    }
+                    };
                 }
             },
             None => None,
         };
 
         let mut seq = self.mailbox.subscribe_seq();
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(timeout_ms);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
         loop {
             // Check for existing results
@@ -375,7 +368,9 @@ impl Drop for MultiAgentRuntime {
         // Drain any already-completed join handles to detect panics
         let mut js = self.join_set.lock().unwrap();
         while let Some(result) = js.try_join_next() {
-            if let Err(e) = result && e.is_panic() {
+            if let Err(e) = result
+                && e.is_panic()
+            {
                 tracing::error!(
                     error = %e,
                     "child agent task panicked"
@@ -386,7 +381,6 @@ impl Drop for MultiAgentRuntime {
 }
 
 impl MultiAgentRuntime {
-
     fn parse_path(&self, s: &str) -> Result<AgentPath, String> {
         AgentPath::parse(s).ok_or_else(|| format!("invalid agent path: '{}'", s))
     }
@@ -588,7 +582,9 @@ mod tests {
 
     #[test]
     fn test_summarize_failed() {
-        let outcome = RunOutcome::Failed { error: "connection refused".to_string() };
+        let outcome = RunOutcome::Failed {
+            error: "connection refused".to_string(),
+        };
         let s = summarize_outcome(&outcome);
         assert_eq!(s, "task failed: connection refused");
     }

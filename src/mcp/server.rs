@@ -195,9 +195,10 @@ impl McpServer {
         // use hyper/axum for proper HTTP + SSE. This is a minimal implementation
         // suitable for local use.
         loop {
-            let (mut socket, peer) = listener.accept().await.map_err(|e| {
-                agent_base::AgentError::internal(format!("Accept error: {}", e))
-            })?;
+            let (mut socket, peer) = listener
+                .accept()
+                .await
+                .map_err(|e| agent_base::AgentError::internal(format!("Accept error: {}", e)))?;
 
             tracing::debug!(peer = %peer, "MCP HTTP connection");
 
@@ -382,9 +383,12 @@ impl McpServer {
         let session_id = self.runtime.create_session().await;
 
         // Collect events into a result
-        let thought_texts: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tool_calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let final_text: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thought_texts: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool_calls: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let final_text: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let thought_texts_clone = thought_texts.clone();
         let tool_calls_clone = tool_calls.clone();
@@ -416,13 +420,13 @@ impl McpServer {
                             "name": tool_name,
                         }))
                     }
-                    RuntimeEvent::ToolCallFinished { tool_name, summary, .. } => {
-                        Some(serde_json::json!({
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "summary": summary,
-                        }))
-                    }
+                    RuntimeEvent::ToolCallFinished {
+                        tool_name, summary, ..
+                    } => Some(serde_json::json!({
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "summary": summary,
+                    })),
                     RuntimeEvent::TextDelta { text, .. } => {
                         final_text.lock().unwrap().push(text.clone());
                         Some(serde_json::json!({
@@ -471,13 +475,25 @@ impl McpServer {
         let result_text = match &outcome {
             Ok(RunOutcome::Completed) => final_text.join("\n"),
             Ok(RunOutcome::Cancelled) => {
-                if final_text.is_empty() { "Task cancelled.".to_string() } else { final_text.join("\n") }
+                if final_text.is_empty() {
+                    "Task cancelled.".to_string()
+                } else {
+                    final_text.join("\n")
+                }
             }
             Ok(RunOutcome::MaxTurnsExceeded { turns }) => {
-                format!("Reached max turns ({}).\n\nPartial output:\n{}", turns, final_text.join("\n"))
+                format!(
+                    "Reached max turns ({}).\n\nPartial output:\n{}",
+                    turns,
+                    final_text.join("\n")
+                )
             }
             Ok(RunOutcome::Failed { error }) => {
-                format!("Error: {}\n\nPartial output:\n{}", error, final_text.join("\n"))
+                format!(
+                    "Error: {}\n\nPartial output:\n{}",
+                    error,
+                    final_text.join("\n")
+                )
             }
             Err(e) => format!("Agent error: {}", e),
         };
@@ -614,7 +630,12 @@ mod tests {
 
         assert_eq!(expected_result["protocolVersion"], "2024-11-05");
         assert_eq!(expected_result["serverInfo"]["name"], "phi-agent");
-        assert!(!expected_result["serverInfo"]["version"].as_str().unwrap().is_empty());
+        assert!(
+            !expected_result["serverInfo"]["version"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── tools/call validation (Phase 4.1 — tool name check) ──

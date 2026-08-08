@@ -229,15 +229,13 @@ impl MailboxHub {
     /// Returns the oldest unread result for the agent, or `None`.
     pub fn try_recv_result(&self, agent_path: &AgentPath) -> Option<MailboxResult> {
         let mut entries = self.entries.lock().unwrap();
-        entries
-            .get_mut(agent_path)
-            .and_then(|e| {
-                if e.results.is_empty() {
-                    None
-                } else {
-                    Some(e.results.remove(0))
-                }
-            })
+        entries.get_mut(agent_path).and_then(|e| {
+            if e.results.is_empty() {
+                None
+            } else {
+                Some(e.results.remove(0))
+            }
+        })
     }
 
     /// Try to receive any result (non-blocking).

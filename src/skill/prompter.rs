@@ -12,8 +12,9 @@ impl Default for LazySkillPrompter {
     fn default() -> Self {
         Self {
             title: "## Available Skills".to_string(),
-            instruction_template: "> Use `read_file` with the file path to read the full skill instructions."
-                .to_string(),
+            instruction_template:
+                "> Use `read_file` with the file path to read the full skill instructions."
+                    .to_string(),
             item_prefix: "- **".to_string(),
         }
     }

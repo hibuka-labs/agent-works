@@ -1422,4 +1422,3 @@ mod multi_agent_tests {
         assert!(!result.as_ref().unwrap().closed);
     }
 }
-
