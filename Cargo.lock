@@ -5,6 +5,8 @@ version = 4
 [[package]]
 name = "agent-base"
 version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03bde94375308b9b12042322574236228edf986d819247256cb1ad1e1af185b9"
 dependencies = [
  "anyhow",
  "async-trait",
