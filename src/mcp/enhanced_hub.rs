@@ -275,6 +275,29 @@ impl EnhancedMcpHub {
         }
     }
 
+    /// Register tools from a single MCP server into the given registry.
+    ///
+    /// Unlike [`register_all`], this only registers tools from the
+    /// specified server, avoiding O(total-servers) re-registration.
+    /// This is the preferred method for runtime `attach_mcp` calls.
+    pub async fn register_server(&self, registry: &mut ToolRegistry, server_name: &str) {
+        let entry = {
+            let guard = self.servers.read().unwrap();
+            guard.get(server_name).cloned()
+        };
+
+        if let Some(entry) = entry {
+            let tools = entry.tools.read().await.clone();
+            for tool_info in &tools {
+                if let Some(client) = entry.get_available_client().await {
+                    let adapter = McpToolAdapter::new(tool_info.clone(), client, server_name);
+                    registry.register(adapter);
+                }
+            }
+            info!(server_name = %server_name, tool_count = tools.len(), "Registered tools from MCP server");
+        }
+    }
+
     pub async fn disconnect_all(&self) {
         // Signal health check loop to stop
         self.shutdown.store(true, Ordering::SeqCst);

@@ -34,12 +34,17 @@ serde_yaml = { version = "0.9", optional = true }
 notify = { version = "7", optional = true, default-features = false, features = ["macos_kqueue"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 futures-core = "0.3"
 futures-util = "0.3"
 anyhow = "1"
 tempfile = "3"
 serial_test = "3"
 tokio-util = "0.7"
+
+[[bench]]
+name = "agent_builder"
+harness = false
 
 [[example]]
 name = "skill_demo"

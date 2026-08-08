@@ -41,6 +41,9 @@ pub struct AgentBuilder {
     skill_prompter: Option<Arc<dyn SkillPrompter>>,
     #[cfg(feature = "skill")]
     skill_detail_tool_name: String,
+    /// Optional: inject a custom skill-detail tool (old tool-based mode).
+    /// In default prompt-injection mode, the LLM reads `SKILL.md` via
+    /// `read_file` — no dedicated detail tool is needed.
     #[cfg(feature = "skill")]
     skill_detail_tool_factory: Option<SkillDetailToolFactory>,
     #[cfg(feature = "skill")]
@@ -462,7 +465,8 @@ impl AgentBuilder {
                 }
             }
 
-            // Use injected factory if available, otherwise skip creating detail tool
+            // Use injected factory if available, otherwise skip — prompt-injection
+            // mode uses read_file instead of a dedicated detail tool.
             if let Some(factory) = self.skill_detail_tool_factory.take() {
                 let detail_tool = factory(skill_refs.clone(), self.skill_detail_tool_name);
                 ab = ab.register_tool_arc(detail_tool);
@@ -604,6 +608,69 @@ You have the ability to spawn sub-agents to execute tasks concurrently. Use thes
 2. `followup_task` → assign work (can call multiple times)
 3. `wait_agent` → collect results
 4. `close_agent` → clean up when done"#
+        .to_string()
+}
+
+/// Build the memory system prompt guidance.
+///
+/// Tells the LLM how to use the file-based persistent memory system.
+/// Memory is stored as markdown files — the LLM uses `read_file` / `write_file`
+/// to manage them, following the same convention as Claude Code Memory.
+///
+/// This is prompt-injection only — no dedicated memory tools are registered.
+/// The LLM uses the general-purpose file tools to read/write memory files.
+pub fn build_memory_system_prompt() -> String {
+    r#"## Memory
+
+You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `write_file` to manage it — there are no dedicated memory tools.
+
+### How Memory Works
+
+- `MEMORY.md` is the index — it lists all memories with one-line descriptions. Read it first when you need to recall something.
+- Each memory is a separate `.md` file with YAML frontmatter:
+  ```yaml
+  ---
+  name: <short-kebab-case-slug>
+  description: <one-line summary — used to decide relevance during recall>
+  metadata:
+    node_type: memory
+    type: user | feedback | project | reference
+  ---
+
+  <the fact or instruction>
+  ```
+- The `description` field is the key for recall — write it so you can tell at a glance whether this memory is relevant to the current task.
+- Link related memories with `[[memory-name]]` in the body.
+- `user` type = who the user is (role, expertise, preferences).
+- `feedback` type = guidance the user has given on how you should work.
+- `project` type = ongoing work, goals, or constraints.
+- `reference` type = pointers to external resources (URLs, dashboards, tickets).
+
+### When to Use Memory
+
+- The user explicitly asks you to remember something ("remember this", "save that")
+- You learn something important about the user's preferences or workflow
+- After completing a significant task, save context that would help in future sessions
+- The user gives you feedback on how to work — save it as `feedback` type
+
+### When NOT to Use Memory
+
+- For transient information that won't be useful beyond this session
+- For facts already recorded in the codebase (code structure, git history, config files)
+- For items that only matter to the current conversation
+
+### Pro Tips
+
+- When creating your first memory of a new type, you can read template files for format reference (check `.phi/templates/memory/` if available).
+- Keep the MEMORY.md index concise — it's loaded into context every session.
+- Before writing a new memory, check if an existing file already covers it — update instead of duplicating.
+
+### Workflow
+
+**To recall:** read `MEMORY.md` → find relevant entries by description → read the specific `.md` files you need.
+**To remember:** create a new `.md` file with proper frontmatter → update `MEMORY.md` with a new entry.
+**To update:** edit the existing `.md` file (don't create a duplicate).
+**To forget:** delete the `.md` file → remove its entry from `MEMORY.md`."#
         .to_string()
 }
 
@@ -977,5 +1044,17 @@ mod tests {
             panic!("should not be called when value is None");
         });
         assert!(builder.system_prompt.is_none());
+    }
+
+    // ── build_memory_system_prompt ──
+
+    #[test]
+    fn test_build_memory_system_prompt_non_empty() {
+        let prompt = build_memory_system_prompt();
+        assert!(!prompt.is_empty());
+        assert!(prompt.contains("Memory"));
+        assert!(prompt.contains("MEMORY.md"));
+        assert!(prompt.contains("read_file"));
+        assert!(prompt.contains("write_file"));
     }
 }
