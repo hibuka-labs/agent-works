@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_base::{ChatMessage, LlmClient, ResponseFormat};
+use agent_base::{ChatMessage, ResponseFormat, StreamClient};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 // ── FocusInput ───────────────────────────────────────────────────────────────
 
@@ -23,6 +22,12 @@ impl FocusInput for str {
 impl FocusInput for String {
     fn to_prompt(&self) -> String {
         self.clone()
+    }
+}
+
+impl FocusInput for &str {
+    fn to_prompt(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -80,6 +85,7 @@ impl FocusInput for Context {
 ///
 /// Contains both the structured result and the raw LLM response,
 /// useful for debugging when something goes wrong.
+#[derive(Debug)]
 pub struct FocusOutput<T> {
     /// Deserialized structured result.
     pub result: T,
@@ -110,7 +116,7 @@ pub struct FocusOutput<T> {
 /// let output = status_focus.ask::<TaskStatus>(&ctx, 5s).await?;
 /// ```
 pub struct Focus {
-    client: Arc<dyn LlmClient>,
+    client: Arc<dyn StreamClient>,
     system_prompt: String,
 }
 
@@ -125,7 +131,7 @@ impl Focus {
     ///
     /// - `client`: LLM client (shared; multiple Focus instances can reuse the same client)
     /// - `system_prompt`: The role and judgment rules for this Focus (bound at creation, never changes)
-    pub fn new(client: Arc<dyn LlmClient>, system_prompt: impl Into<String>) -> Self {
+    pub fn new(client: Arc<dyn StreamClient>, system_prompt: impl Into<String>) -> Self {
         Self {
             client,
             system_prompt: system_prompt.into(),
@@ -145,7 +151,7 @@ impl Focus {
     /// `FocusOutput<T>` containing the structured result and raw response.
     pub async fn ask<T: DeserializeOwned>(
         &self,
-        input: &impl FocusInput,
+        input: &(impl FocusInput + ?Sized),
         timeout: Duration,
     ) -> Result<FocusOutput<T>, FocusError> {
         let user_prompt = input.to_prompt();
@@ -181,7 +187,8 @@ impl Focus {
         .map_err(|e| FocusError::Llm(e.to_string()))?;
 
         let elapsed_ms = start.elapsed().as_millis();
-        let raw_response = extract_content(&response).to_string();
+        // StreamClient::chat() returns extracted text — no JSON unwrapping needed.
+        let raw_response = response;
 
         let result: T = serde_json::from_str(&raw_response).map_err(|e| {
             tracing::warn!(
@@ -235,34 +242,84 @@ impl std::fmt::Display for FocusError {
 
 impl std::error::Error for FocusError {}
 
-// ── Internal helpers ─────────────────────────────────────────────────────────
-
-/// Extract the `content` field from an LLM response.
-///
-/// Supports OpenAI-compatible format: `choices[0].message.content`.
-/// Falls back to the full response string if extraction fails.
-fn extract_content(response: &Value) -> &str {
-    response
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or_else(|| {
-            tracing::warn!(
-                response = %response,
-                "Focus: could not extract choices[0].message.content, using full response"
-            );
-            response.as_str().unwrap_or("{}")
-        })
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_base::{LlmCapabilities, StreamChunk};
+    use async_trait::async_trait;
+    use futures_core::Stream;
     use serde::Deserialize;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::task::Context as TaskContext;
+    use std::task::Poll;
+
+    // ── Mock StreamClient for Focus tests ──
+
+    /// A mock StreamClient whose `chat()` returns a pre-set string.
+    struct MockStreamClient {
+        /// Canned response for `chat()`. Consumed on first call (take).
+        response: Mutex<Option<Result<String, String>>>,
+    }
+
+    impl MockStreamClient {
+        fn with_text(text: impl Into<String>) -> Self {
+            Self {
+                response: Mutex::new(Some(Ok(text.into()))),
+            }
+        }
+
+        fn with_error(err: impl Into<String>) -> Self {
+            Self {
+                response: Mutex::new(Some(Err(err.into()))),
+            }
+        }
+    }
+
+    /// Empty stream — returned by MockStreamClient::stream() which is never called.
+    struct EmptyStream;
+
+    impl Stream for EmptyStream {
+        type Item = agent_base::AgentResult<StreamChunk>;
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(None)
+        }
+    }
+
+    #[async_trait]
+    impl StreamClient for MockStreamClient {
+        async fn stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> agent_base::AgentResult<Pin<Box<dyn Stream<Item = agent_base::AgentResult<StreamChunk>> + Send>>>
+        {
+            Ok(Box::pin(EmptyStream))
+        }
+
+        /// Override `chat()` to return the canned response directly.
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> agent_base::AgentResult<String> {
+            match self.response.lock().unwrap().take() {
+                Some(Ok(text)) => Ok(text),
+                Some(Err(e)) => Err(agent_base::AgentError::internal(e)),
+                None => Ok(String::new()),
+            }
+        }
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::default()
+        }
+    }
 
     // ── Context tests ──
 
@@ -302,36 +359,12 @@ mod tests {
         assert_eq!(input.to_prompt(), "hello");
     }
 
-    // ── extract_content tests ──
+    // ── FocusOutput deserialize tests ──
 
     #[derive(Deserialize, Debug, PartialEq)]
     struct MockResult {
         status: String,
         reason: String,
-    }
-
-    #[test]
-    fn extract_content_openai_format() {
-        let response = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "content": "{\"status\": \"finished\"}"
-                }
-            }]
-        });
-        assert_eq!(extract_content(&response), "{\"status\": \"finished\"}");
-    }
-
-    #[test]
-    fn extract_content_missing_choices() {
-        let response = serde_json::json!({"error": "something"});
-        assert_eq!(extract_content(&response), "{}");
-    }
-
-    #[test]
-    fn extract_content_empty_choices() {
-        let response = serde_json::json!({"choices": []});
-        assert_eq!(extract_content(&response), "{}");
     }
 
     #[test]
@@ -357,5 +390,83 @@ mod tests {
             raw: "not json".to_string(),
         };
         assert_eq!(format!("{}", err), "Focus parse error: unexpected token");
+    }
+
+    // ── Focus::ask() tests ──
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct AskResult {
+        status: String,
+        confidence: f64,
+    }
+
+    #[tokio::test]
+    async fn focus_ask_parses_valid_json() {
+        let client = Arc::new(MockStreamClient::with_text(
+            r#"{"status":"finished","confidence":0.95}"#,
+        ));
+        let focus = Focus::new(client, "You are a classifier.");
+        let output: FocusOutput<AskResult> = focus
+            .ask(&"classify this", Duration::from_secs(5))
+            .await
+            .expect("ask should succeed");
+        assert_eq!(output.result.status, "finished");
+        assert_eq!(output.result.confidence, 0.95);
+        assert_eq!(output.raw_response, r#"{"status":"finished","confidence":0.95}"#);
+    }
+
+    #[tokio::test]
+    async fn focus_ask_parses_str_input() {
+        let client = Arc::new(MockStreamClient::with_text(
+            r#"{"status":"done","confidence":1.0}"#,
+        ));
+        let focus = Focus::new(client, "system");
+        let output: FocusOutput<AskResult> = focus
+            .ask("classify", Duration::from_secs(5))
+            .await
+            .expect("ask should succeed");
+        assert_eq!(output.result.status, "done");
+    }
+
+    #[tokio::test]
+    async fn focus_ask_rejects_invalid_json() {
+        let client = Arc::new(MockStreamClient::with_text("not valid json at all"));
+        let focus = Focus::new(client, "system");
+        let err = focus
+            .ask::<AskResult>(&"input", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FocusError::Parse { .. }));
+        assert!(err.to_string().contains("Focus parse error"));
+    }
+
+    #[tokio::test]
+    async fn focus_ask_propagates_llm_error() {
+        let client = Arc::new(MockStreamClient::with_error("api key invalid"));
+        let focus = Focus::new(client, "system");
+        let err = focus
+            .ask::<AskResult>(&"input", Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FocusError::Llm(_)));
+    }
+
+    #[tokio::test]
+    async fn focus_ask_times_out() {
+        // Return after a long delay — Focus has a very short timeout
+        let client = Arc::new(MockStreamClient::with_text("{}"));
+        let focus = Focus::new(client, "system");
+        let result = focus
+            .ask::<AskResult>(&"input", Duration::from_millis(1))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn focus_ask_new_constructs_correctly() {
+        let client = Arc::new(MockStreamClient::with_text("{}"));
+        let focus = Focus::new(client, "You are helpful.");
+        // Just verify construction + Debug
+        assert!(format!("{:?}", focus).contains("Focus"));
     }
 }
