@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agent_base::{AgentResult, AgentRuntime, LlmClient, Tool};
+use agent_base::{AgentResult, AgentRuntime, StreamClient, Tool};
 
 use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
 
@@ -54,7 +54,7 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    pub fn new(client: Arc<dyn LlmClient>) -> Self {
+    pub fn new(client: Arc<dyn StreamClient>) -> Self {
         Self {
             inner: agent_base::AgentBuilder::new(client),
             system_prompt: None,
@@ -680,7 +680,7 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::ToolControlFlow;
+    use agent_base::{LlmClient, ToolControlFlow};
     use std::pin::Pin;
 
     // ── Stub LLM client ──
@@ -729,8 +729,8 @@ mod tests {
         }
     }
 
-    fn make_client() -> Arc<dyn LlmClient> {
-        Arc::new(StubClient)
+    fn make_client() -> Arc<dyn StreamClient> {
+        agent_base::llm::adapt(Arc::new(StubClient))
     }
 
     // ── setup_multi_agent tests ──

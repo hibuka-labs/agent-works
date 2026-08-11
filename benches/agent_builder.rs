@@ -85,7 +85,7 @@ impl Tool for NoopTool {
 }
 
 fn bench_build_empty(c: &mut Criterion) {
-    let client: Arc<dyn LlmClient> = Arc::new(BenchLlmClient);
+    let client = agent_base::llm::adapt(Arc::new(BenchLlmClient));
 
     c.bench_function("agent_works/build_empty", |b| {
         b.iter(|| {
@@ -97,7 +97,7 @@ fn bench_build_empty(c: &mut Criterion) {
 }
 
 fn bench_build_with_prompt(c: &mut Criterion) {
-    let client: Arc<dyn LlmClient> = Arc::new(BenchLlmClient);
+    let client = agent_base::llm::adapt(Arc::new(BenchLlmClient));
     let prompt = "You are a helpful assistant.".repeat(50);
 
     c.bench_function("agent_works/build_with_prompt", |b| {
@@ -110,7 +110,7 @@ fn bench_build_with_prompt(c: &mut Criterion) {
 }
 
 fn bench_build_with_tools(c: &mut Criterion) {
-    let client: Arc<dyn LlmClient> = Arc::new(BenchLlmClient);
+    let client = agent_base::llm::adapt(Arc::new(BenchLlmClient));
 
     for n in [10, 50, 100] {
         let client = client.clone();

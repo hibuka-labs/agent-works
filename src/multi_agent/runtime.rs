@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_base::{
-    AgentBuilder, AgentResult, AgentRuntime, DenyAllApprovalHandler, Language, LlmClient,
-    RunOutcome, RuntimeEvent, SessionId, Tool, UserEvent,
+    AgentBuilder, AgentResult, AgentRuntime, DenyAllApprovalHandler, Language, RunOutcome,
+    RuntimeEvent, SessionId, StreamClient, Tool, UserEvent,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +36,7 @@ pub struct MultiAgentRuntime {
     mailbox: Arc<MailboxHub>,
 
     /// Shared LLM client (from parent agent).
-    client: Arc<dyn LlmClient>,
+    client: Arc<dyn StreamClient>,
 
     /// Business tools to register on child agents (NOT the 6 multi-agent tools).
     business_tools: Vec<Arc<dyn Tool>>,
@@ -69,7 +69,7 @@ impl MultiAgentRuntime {
     /// This is called internally by the builder. Tools receive an `Arc<Self>`.
     pub fn new(
         config: MultiAgentConfig,
-        client: Arc<dyn LlmClient>,
+        client: Arc<dyn StreamClient>,
         business_tools: Vec<Arc<dyn Tool>>,
         root_cancel: CancellationToken,
         error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
@@ -862,7 +862,7 @@ mod tests {
     ) -> (Arc<MultiAgentRuntime>, agent_base::SessionId) {
         use tokio_util::sync::CancellationToken;
 
-        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
         let parent_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build parent runtime");
@@ -881,7 +881,7 @@ mod tests {
 
         let ma_runtime = Arc::new(MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmClient),
+            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
             vec![],
             CancellationToken::new(),
             None,
@@ -1036,7 +1036,7 @@ mod tests {
 
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmClient),
+            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
             vec![],
             CancellationToken::new(),
             None,
@@ -1065,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_user_and_assistant() {
-        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1092,7 +1092,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmClient),
+            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
             vec![],
             CancellationToken::new(),
             None,
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_tool_call_only_skipped() {
-        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1143,7 +1143,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmClient),
+            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
             vec![],
             CancellationToken::new(),
             None,
@@ -1168,7 +1168,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_empty_vec_noop() {
-        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1177,7 +1177,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmClient),
+            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
             vec![],
             CancellationToken::new(),
             None,
