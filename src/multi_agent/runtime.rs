@@ -58,6 +58,9 @@ pub struct MultiAgentRuntime {
 
     /// Language preference.
     language: Language,
+
+    /// Parent session manager — for fork_history (child context inheritance).
+    session_manager: Mutex<Option<Arc<agent_base::engine::SessionManager>>>,
 }
 
 impl MultiAgentRuntime {
@@ -83,6 +86,7 @@ impl MultiAgentRuntime {
             child_cancels: Mutex::new(HashMap::new()),
             error_recovery,
             language,
+            session_manager: Mutex::new(None),
         }
     }
 
@@ -91,6 +95,13 @@ impl MultiAgentRuntime {
     /// Called by the builder after creating the bridge channel.
     pub fn set_event_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<RuntimeEvent>) {
         *self.event_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Set the parent session manager for fork_history support.
+    ///
+    /// Called by the builder after creating the runtime.
+    pub fn set_session_manager(&self, session_manager: Arc<agent_base::engine::SessionManager>) {
+        *self.session_manager.lock().unwrap() = Some(session_manager);
     }
 
     /// Spawn a child agent at the given path with a specific system prompt.
@@ -103,6 +114,9 @@ impl MultiAgentRuntime {
     /// 5. Spawns a tokio task for the child's event loop
     /// 6. Returns the AgentPath
     ///
+    /// `parent_messages` optionally provides context from the parent session
+    /// for fork_history support.
+    ///
     /// # Errors
     ///
     /// Returns a string error message if spawning fails (limits exceeded, etc.).
@@ -112,6 +126,7 @@ impl MultiAgentRuntime {
         system_prompt: String,
         depth: i32,
         tool_count: usize,
+        parent_messages: Vec<agent_base::ChatMessage>,
     ) -> Result<String, String> {
         let path = AgentPath::root().join(name);
 
@@ -131,14 +146,21 @@ impl MultiAgentRuntime {
             .ok_or_else(|| "mailbox already exists".to_string())?;
 
         // 3. Build child AgentRuntime (roll back registry+mailbox on failure)
-        let child_runtime = self.build_child_runtime(system_prompt).map_err(|e| {
+        let child_runtime = self.build_child_runtime(system_prompt).await.map_err(|e| {
             self.registry.lock().unwrap().close(&path);
             self.mailbox.unregister(&path);
             format!("failed to build child runtime: {}", e)
         })?;
 
-        // 4. Create session for child
+        // 4. Create session for child and pre-fill with parent context
         let session_id = child_runtime.create_session().await;
+        self.prefill_child_session(&child_runtime, &session_id, &parent_messages)
+            .await
+            .map_err(|e| {
+                self.registry.lock().unwrap().close(&path);
+                self.mailbox.unregister(&path);
+                format!("failed to prefill child session: {}", e)
+            })?;
 
         // 5. Create child cancellation token
         let child_cancel = self.root_cancel.child_token();
@@ -180,6 +202,97 @@ impl MultiAgentRuntime {
             .set_status(&registry_agent_path, AgentStatus::Idle);
 
         Ok(path.to_string())
+    }
+
+    /// Spawn a child agent with fork_history support.
+    ///
+    /// `fork_history`: "none" (default), "all", or a number N for last N turns.
+    /// `parent_session_id`: the parent agent's session ID.
+    pub async fn spawn_child_with_history(
+        &self,
+        name: &str,
+        system_prompt: String,
+        depth: i32,
+        tool_count: usize,
+        fork_history: Option<String>,
+        parent_session_id: &SessionId,
+    ) -> Result<String, String> {
+        let parent_messages = self
+            .resolve_fork_history(fork_history, parent_session_id)
+            .await;
+        self.spawn_child(name, system_prompt, depth, tool_count, parent_messages)
+            .await
+    }
+
+    /// Resolve fork_history parameter into a list of parent ChatMessages.
+    pub(crate) async fn resolve_fork_history(
+        &self,
+        fork_history: Option<String>,
+        parent_session_id: &SessionId,
+    ) -> Vec<agent_base::ChatMessage> {
+        use agent_base::ChatMessage;
+        let mode = match fork_history.as_deref() {
+            None | Some("none") => return vec![],
+            Some(s) => s,
+        };
+
+        let sm = match self.session_manager.lock().unwrap().as_ref() {
+            Some(sm) => sm.clone(),
+            None => {
+                tracing::warn!("fork_history requested but no session_manager set");
+                return vec![];
+            }
+        };
+
+        // Get all messages from parent session
+        let all_messages = match sm.session_or_err(parent_session_id).await {
+            Ok(session) => session.chat_messages().to_vec(),
+            Err(e) => {
+                tracing::warn!(session_id = parent_session_id.id, error = %e, "failed to load parent session for fork_history");
+                return vec![];
+            }
+        };
+
+        if all_messages.is_empty() {
+            return vec![];
+        }
+
+        // Filter out system messages (child has its own system prompt)
+        let non_system: Vec<ChatMessage> = all_messages
+            .into_iter()
+            .filter(|m| !matches!(m, ChatMessage::System { .. }))
+            .collect();
+
+        match mode {
+            "all" => non_system,
+            n_str => {
+                // Parse N: number of recent user/assistant message pairs (turns)
+                let n: usize = match n_str.parse() {
+                    Ok(n) if n > 0 => n,
+                    _ => {
+                        tracing::warn!(
+                            fork_history = n_str,
+                            "invalid fork_history value, treating as 'none'"
+                        );
+                        return vec![];
+                    }
+                };
+
+                // Count turns from the end (each turn = user message followed by response)
+                let mut turns = 0usize;
+                let mut cutoff = non_system.len();
+                for (i, msg) in non_system.iter().enumerate().rev() {
+                    if matches!(msg, ChatMessage::User { .. }) {
+                        turns += 1;
+                        if turns >= n {
+                            cutoff = i;
+                            break;
+                        }
+                    }
+                }
+                non_system[cutoff..].to_vec()
+            }
+        }
     }
 
     /// Send a message to a child agent (no execution trigger).
@@ -385,7 +498,7 @@ impl MultiAgentRuntime {
         AgentPath::parse(s).ok_or_else(|| format!("invalid agent path: '{}'", s))
     }
 
-    fn build_child_runtime(&self, system_prompt: String) -> AgentResult<AgentRuntime> {
+    async fn build_child_runtime(&self, system_prompt: String) -> AgentResult<AgentRuntime> {
         let mut builder = AgentBuilder::new(self.client.clone())
             .system_prompt(system_prompt)
             .approval_handler(Arc::new(DenyAllApprovalHandler))
@@ -401,6 +514,57 @@ impl MultiAgentRuntime {
         }
 
         builder.build()
+    }
+
+    /// Pre-fill a child session with parent conversation context (fork_history).
+    ///
+    /// Skips system messages and tool-call-only assistant messages. Assistant text
+    /// responses and tool results are stored as system messages with labels so the
+    /// child sees the context without confusing role semantics.
+    pub(crate) async fn prefill_child_session(
+        &self,
+        child_runtime: &AgentRuntime,
+        session_id: &SessionId,
+        parent_messages: &[agent_base::ChatMessage],
+    ) -> AgentResult<()> {
+        use agent_base::ChatMessage;
+
+        for msg in parent_messages {
+            match msg {
+                ChatMessage::User { content, .. } => {
+                    child_runtime.add_user_message(session_id, content).await?;
+                }
+                ChatMessage::Assistant {
+                    content: Some(text),
+                    ..
+                } => {
+                    child_runtime
+                        .add_system_message(
+                            session_id,
+                            format!("[Parent assistant response]: {}", text),
+                        )
+                        .await?;
+                }
+                ChatMessage::Assistant { tool_calls, .. } if tool_calls.is_some() => {
+                    // Skip tool-call-only messages — parent's tool decisions
+                    // don't make sense in the child's context.
+                }
+                ChatMessage::Tool {
+                    tool_call_id,
+                    content,
+                } => {
+                    child_runtime
+                        .add_system_message(
+                            session_id,
+                            format!("[Parent tool result ({}): {}]", tool_call_id, content),
+                        )
+                        .await?;
+                }
+                _ => {} // Skip system messages and empty assistant
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -642,5 +806,403 @@ mod tests {
         };
         let out = build_child_input(&task);
         assert_eq!(out, "[Message]: hint\n\n[Task]: final task");
+    }
+
+    // ── fork_history: resolve_fork_history ──
+
+    /// Mock LLM client for fork_history tests (minimal — never called).
+    #[derive(Clone)]
+    struct NoopLlmClient;
+
+    #[async_trait::async_trait]
+    impl agent_base::LlmClient for NoopLlmClient {
+        async fn chat(
+            &self,
+            _messages: &[agent_base::ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&agent_base::ResponseFormat>,
+        ) -> agent_base::AgentResult<serde_json::Value> {
+            unimplemented!()
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[agent_base::ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&agent_base::ResponseFormat>,
+        ) -> agent_base::AgentResult<
+            std::pin::Pin<
+                Box<
+                    dyn futures_core::Stream<
+                            Item = agent_base::AgentResult<agent_base::StreamChunk>,
+                        > + Send,
+                >,
+            >,
+        > {
+            unimplemented!()
+        }
+
+        fn capabilities(&self) -> agent_base::LlmCapabilities {
+            agent_base::LlmCapabilities {
+                supports_streaming: true,
+                supports_tools: false,
+                supports_vision: false,
+                supports_thinking: false,
+                max_context_tokens: None,
+                max_output_tokens: None,
+            }
+        }
+    }
+
+    /// Build a MultiAgentRuntime with a parent runtime that has a populated session.
+    async fn setup_fork_history_test(
+        parent_messages: Vec<agent_base::ChatMessage>,
+    ) -> (Arc<MultiAgentRuntime>, agent_base::SessionId) {
+        use tokio_util::sync::CancellationToken;
+
+        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let parent_runtime = agent_base::AgentBuilder::new(llm)
+            .build()
+            .expect("build parent runtime");
+        let parent_sid = parent_runtime.create_session().await;
+
+        // Push messages directly into the session's chat_messages vector so
+        // we can use proper Assistant/Tool variants (not just System).
+        parent_runtime
+            .with_session_mut(&parent_sid, |session| {
+                session.chat_messages_mut().extend(parent_messages.clone());
+            })
+            .await
+            .unwrap();
+
+        let session_manager = Arc::new(parent_runtime.session_manager().clone());
+
+        let ma_runtime = Arc::new(MultiAgentRuntime::new(
+            MultiAgentConfig::enabled(),
+            Arc::new(NoopLlmClient),
+            vec![],
+            CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+        ));
+        ma_runtime.set_session_manager(session_manager);
+
+        (ma_runtime, parent_sid)
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_none_returns_empty() {
+        let messages = vec![agent_base::ChatMessage::User {
+            content: "hello".into(),
+            images: vec![],
+            ephemeral: false,
+        }];
+        let (ma, parent_sid) = setup_fork_history_test(messages).await;
+
+        // None
+        let result = ma.resolve_fork_history(None, &parent_sid).await;
+        assert!(result.is_empty());
+
+        // Some("none")
+        let result = ma
+            .resolve_fork_history(Some("none".to_string()), &parent_sid)
+            .await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_all_returns_all_non_system() {
+        let messages = vec![
+            agent_base::ChatMessage::User {
+                content: "question 1".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("answer 1".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            agent_base::ChatMessage::User {
+                content: "question 2".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("answer 2".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+        ];
+        let (ma, parent_sid) = setup_fork_history_test(messages).await;
+
+        let result = ma
+            .resolve_fork_history(Some("all".to_string()), &parent_sid)
+            .await;
+
+        // Should have 4 messages (2 user + 2 assistant) — system messages are filtered out
+        assert_eq!(result.len(), 4);
+        assert!(matches!(result[0], agent_base::ChatMessage::User { .. }));
+        assert!(matches!(
+            result[1],
+            agent_base::ChatMessage::Assistant { .. }
+        ));
+        assert!(matches!(result[2], agent_base::ChatMessage::User { .. }));
+        assert!(matches!(
+            result[3],
+            agent_base::ChatMessage::Assistant { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_n_turns() {
+        // 3 turns: 3 user messages, 3 assistant responses
+        let messages = vec![
+            agent_base::ChatMessage::User {
+                content: "q1".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("a1".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            agent_base::ChatMessage::User {
+                content: "q2".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("a2".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            agent_base::ChatMessage::User {
+                content: "q3".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("a3".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+        ];
+        let (ma, parent_sid) = setup_fork_history_test(messages).await;
+
+        // Last 1 turn
+        let result = ma
+            .resolve_fork_history(Some("1".to_string()), &parent_sid)
+            .await;
+        assert_eq!(result.len(), 2, "1 turn = user q3 + assistant a3");
+        assert!(matches!(result[0], agent_base::ChatMessage::User { .. }));
+        assert_eq!(extract_user_content(&result[0]), "q3");
+
+        // Last 2 turns
+        let result = ma
+            .resolve_fork_history(Some("2".to_string()), &parent_sid)
+            .await;
+        assert_eq!(result.len(), 4, "2 turns = q2,a2,q3,a3");
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_invalid_number_treats_as_none() {
+        let messages = vec![agent_base::ChatMessage::User {
+            content: "hello".into(),
+            images: vec![],
+            ephemeral: false,
+        }];
+        let (ma, parent_sid) = setup_fork_history_test(messages).await;
+
+        // Invalid number → empty
+        let result = ma
+            .resolve_fork_history(Some("not-a-number".to_string()), &parent_sid)
+            .await;
+        assert!(result.is_empty());
+
+        // Zero → empty
+        let result = ma
+            .resolve_fork_history(Some("0".to_string()), &parent_sid)
+            .await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_no_session_manager_returns_empty() {
+        use tokio_util::sync::CancellationToken;
+
+        let ma_runtime = MultiAgentRuntime::new(
+            MultiAgentConfig::enabled(),
+            Arc::new(NoopLlmClient),
+            vec![],
+            CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+        );
+        // session_manager is NOT set
+
+        let sid = agent_base::SessionId::new(9999);
+        let result = ma_runtime
+            .resolve_fork_history(Some("all".to_string()), &sid)
+            .await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_fork_history_empty_session_returns_empty() {
+        let (ma, parent_sid) = setup_fork_history_test(vec![]).await;
+
+        let result = ma
+            .resolve_fork_history(Some("all".to_string()), &parent_sid)
+            .await;
+        assert!(result.is_empty());
+    }
+
+    // ── fork_history: prefill_child_session ──
+
+    #[tokio::test]
+    async fn prefill_child_session_user_and_assistant() {
+        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let child_runtime = agent_base::AgentBuilder::new(llm)
+            .build()
+            .expect("build child runtime");
+        let child_sid = child_runtime.create_session().await;
+
+        let parent_messages = vec![
+            agent_base::ChatMessage::User {
+                content: "user question".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: Some("assistant reply".into()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            agent_base::ChatMessage::Tool {
+                tool_call_id: "call_123".into(),
+                content: "tool output".into(),
+            },
+        ];
+
+        // Create a minimal MultiAgentRuntime just to call prefill_child_session
+        use tokio_util::sync::CancellationToken;
+        let ma_runtime = MultiAgentRuntime::new(
+            MultiAgentConfig::enabled(),
+            Arc::new(NoopLlmClient),
+            vec![],
+            CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+        );
+
+        ma_runtime
+            .prefill_child_session(&child_runtime, &child_sid, &parent_messages)
+            .await
+            .expect("prefill should succeed");
+
+        // Verify the child session contains the pre-filled messages
+        let session = child_runtime
+            .session(&child_sid)
+            .await
+            .expect("session exists");
+        let msgs = session.chat_messages().to_vec();
+
+        // Should have: user msg + system msg (assistant) + system msg (tool)
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(msgs[0], agent_base::ChatMessage::User { .. }));
+        assert!(matches!(msgs[1], agent_base::ChatMessage::System { .. }));
+        assert!(matches!(msgs[2], agent_base::ChatMessage::System { .. }));
+    }
+
+    #[tokio::test]
+    async fn prefill_child_session_tool_call_only_skipped() {
+        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let child_runtime = agent_base::AgentBuilder::new(llm)
+            .build()
+            .expect("build child runtime");
+        let child_sid = child_runtime.create_session().await;
+
+        // Assistant message with only tool_calls (no text content) should be skipped
+        let parent_messages = vec![
+            agent_base::ChatMessage::User {
+                content: "do something".into(),
+                images: vec![],
+                ephemeral: false,
+            },
+            agent_base::ChatMessage::Assistant {
+                content: None, // no text — tool call only
+                reasoning_content: None,
+                tool_calls: Some(vec![]),
+            },
+        ];
+
+        use tokio_util::sync::CancellationToken;
+        let ma_runtime = MultiAgentRuntime::new(
+            MultiAgentConfig::enabled(),
+            Arc::new(NoopLlmClient),
+            vec![],
+            CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+        );
+
+        ma_runtime
+            .prefill_child_session(&child_runtime, &child_sid, &parent_messages)
+            .await
+            .expect("prefill should succeed");
+
+        let session = child_runtime
+            .session(&child_sid)
+            .await
+            .expect("session exists");
+        let msgs = session.chat_messages().to_vec();
+
+        // Only the user message — tool-call-only assistant should be skipped
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0], agent_base::ChatMessage::User { .. }));
+    }
+
+    #[tokio::test]
+    async fn prefill_child_session_empty_vec_noop() {
+        let llm: Arc<dyn agent_base::LlmClient> = Arc::new(NoopLlmClient);
+        let child_runtime = agent_base::AgentBuilder::new(llm)
+            .build()
+            .expect("build child runtime");
+        let child_sid = child_runtime.create_session().await;
+
+        use tokio_util::sync::CancellationToken;
+        let ma_runtime = MultiAgentRuntime::new(
+            MultiAgentConfig::enabled(),
+            Arc::new(NoopLlmClient),
+            vec![],
+            CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+        );
+
+        ma_runtime
+            .prefill_child_session(&child_runtime, &child_sid, &[])
+            .await
+            .expect("prefill should succeed");
+
+        let session = child_runtime
+            .session(&child_sid)
+            .await
+            .expect("session exists");
+        let msgs = session.chat_messages().to_vec();
+
+        // System prompt is added but we don't assert exact count — just that no user/injected msgs
+        assert!(msgs.is_empty() || matches!(msgs[0], agent_base::ChatMessage::System { .. }));
+    }
+
+    fn extract_user_content(msg: &agent_base::ChatMessage) -> &str {
+        match msg {
+            agent_base::ChatMessage::User { content, .. } => content.as_str(),
+            _ => "",
+        }
     }
 }

@@ -549,6 +549,9 @@ pub fn setup_multi_agent(
         lang,
     ));
 
+    // Set parent session manager for fork_history support
+    ma_runtime.set_session_manager(Arc::new(runtime.session_manager().clone()));
+
     // Set up event bridge: child events → parent event bus
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<agent_base::RuntimeEvent>();
@@ -707,7 +710,9 @@ mod tests {
         > {
             let chunks: Vec<AgentResult<agent_base::StreamChunk>> = vec![
                 Ok(agent_base::StreamChunk::Text("ok".to_string())),
-                Ok(agent_base::StreamChunk::Stop),
+                Ok(agent_base::StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                }),
             ];
             Ok(Box::pin(futures_util::stream::iter(chunks)))
         }

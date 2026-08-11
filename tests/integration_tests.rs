@@ -120,7 +120,9 @@ impl Tool for EchoTool {
 async fn test_builder_forwarding_text_reply() {
     let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::Text("Hello, world!".to_string()),
-        StreamChunk::Stop,
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
     ]]));
 
     let runtime = AgentBuilder::new(llm.clone())
@@ -151,9 +153,16 @@ async fn test_builder_forwarding_with_tool() {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ],
-        vec![StreamChunk::Text("Done!".to_string()), StreamChunk::Stop],
+        vec![
+            StreamChunk::Text("Done!".to_string()),
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
+        ],
     ]));
 
     let runtime = AgentBuilder::new(llm.clone())
@@ -187,7 +196,9 @@ async fn test_builder_forwarding_middleware() {
 
     let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::Text("reply".to_string()),
-        StreamChunk::Stop,
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
     ]]));
 
     let runtime = AgentBuilder::new(llm)
@@ -225,7 +236,9 @@ async fn test_builder_forwarding_error_recovery() {
                 }]
             }
         })),
-        StreamChunk::Stop,
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
     ]]));
 
     let runtime = AgentBuilder::new(llm)
@@ -249,7 +262,9 @@ async fn test_builder_forwarding_error_recovery() {
 async fn test_tool_enforcement_available_via_works() {
     let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::Text("I will do it...".to_string()),
-        StreamChunk::Stop,
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
     ]]));
 
     let config = agent_base::ToolEnforcementConfig::default();
@@ -349,7 +364,9 @@ mod skill_tests {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let runtime = AgentBuilder::new(llm)
@@ -383,7 +400,9 @@ mod skill_tests {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let runtime = AgentBuilder::new(llm)
@@ -413,7 +432,9 @@ mod skill_tests {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let runtime = AgentBuilder::new(llm)
@@ -963,7 +984,9 @@ mod agent_handle_tests {
     async fn test_handle_basic_session() {
         let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("disk: 37% used".to_string()),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let runtime = AgentBuilder::new(llm)
@@ -1140,7 +1163,12 @@ mod agent_handle_tests {
             // First response: never stops (will be cancelled)
             vec![StreamChunk::Text("processing...".to_string())],
             // Second response: normal
-            vec![StreamChunk::Text("done!".to_string()), StreamChunk::Stop],
+            vec![
+                StreamChunk::Text("done!".to_string()),
+                StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                },
+            ],
         ]));
 
         let runtime = AgentBuilder::new(llm)
@@ -1218,7 +1246,9 @@ mod multi_agent_tests {
     async fn test_build_with_multi_agent_enabled() {
         let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("I'll analyze this in parallel.".to_string()),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let runtime = AgentBuilder::new(llm)
@@ -1242,7 +1272,9 @@ mod multi_agent_tests {
     async fn test_multi_agent_custom_limits() {
         let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("ok".to_string()),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let config = MultiAgentConfig {
@@ -1268,7 +1300,9 @@ mod multi_agent_tests {
 
         let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("child response".to_string()),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ]]));
 
         let cancel = CancellationToken::new();
@@ -1285,7 +1319,13 @@ mod multi_agent_tests {
 
         // Spawn a child
         let path = runtime
-            .spawn_child("test-worker", "You are a test worker.".to_string(), 1, 0)
+            .spawn_child(
+                "test-worker",
+                "You are a test worker.".to_string(),
+                1,
+                0,
+                vec![],
+            )
             .await
             .expect("spawn should succeed");
 
@@ -1342,17 +1382,17 @@ mod multi_agent_tests {
 
         // Should be able to spawn up to max
         runtime
-            .spawn_child("worker-1", "prompt".to_string(), 1, 0)
+            .spawn_child("worker-1", "prompt".to_string(), 1, 0, vec![])
             .await
             .expect("first spawn");
         runtime
-            .spawn_child("worker-2", "prompt".to_string(), 1, 0)
+            .spawn_child("worker-2", "prompt".to_string(), 1, 0, vec![])
             .await
             .expect("second spawn");
 
         // Third spawn should fail
         let err = runtime
-            .spawn_child("worker-3", "prompt".to_string(), 1, 0)
+            .spawn_child("worker-3", "prompt".to_string(), 1, 0, vec![])
             .await;
         assert!(err.is_err(), "third spawn should fail: {:?}", err);
         let msg = err.unwrap_err();
@@ -1386,13 +1426,13 @@ mod multi_agent_tests {
 
         // depth=1: allowed
         runtime
-            .spawn_child("level1", "prompt".to_string(), 1, 0)
+            .spawn_child("level1", "prompt".to_string(), 1, 0, vec![])
             .await
             .expect("depth 1 should be allowed");
 
         // depth=2: should fail
         let err = runtime
-            .spawn_child("level2", "prompt".to_string(), 2, 0)
+            .spawn_child("level2", "prompt".to_string(), 2, 0, vec![])
             .await;
         assert!(err.is_err(), "depth 2 should fail: {:?}", err);
         let msg = err.unwrap_err();
