@@ -296,8 +296,9 @@ mod tests {
             _tools: &[serde_json::Value],
             _reasoning: Option<&agent_base::ReasoningConfig>,
             _response_format: Option<&ResponseFormat>,
-        ) -> agent_base::AgentResult<Pin<Box<dyn Stream<Item = agent_base::AgentResult<StreamChunk>> + Send>>>
-        {
+        ) -> agent_base::AgentResult<
+            Pin<Box<dyn Stream<Item = agent_base::AgentResult<StreamChunk>> + Send>>,
+        > {
             Ok(Box::pin(EmptyStream))
         }
 
@@ -412,7 +413,10 @@ mod tests {
             .expect("ask should succeed");
         assert_eq!(output.result.status, "finished");
         assert_eq!(output.result.confidence, 0.95);
-        assert_eq!(output.raw_response, r#"{"status":"finished","confidence":0.95}"#);
+        assert_eq!(
+            output.raw_response,
+            r#"{"status":"finished","confidence":0.95}"#
+        );
     }
 
     #[tokio::test]

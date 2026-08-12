@@ -4,9 +4,9 @@
 [![Documentation](https://docs.rs/agent-works/badge.svg)](https://docs.rs/agent-works)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Batteries-included Agent toolbox built on [agent-base](https://github.com/chenkangzeng1/agent-base).**
+**Batteries-included Agent toolbox built on [agent-base](https://github.com/hibuka-labs/agent-base).**
 
-`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: MCP multi-server management, Skills with progressive disclosure, built-in file tools, tool enforcement middleware, and a CLI REPL loop — all behind feature flags. Pick what you need.
+`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: MCP multi-server management, Skills with progressive disclosure, a Focus module for structured LLM extraction, multi-agent orchestration with fork_history, built-in file tools, a CLI REPL loop — all behind feature flags. Pick what you need.
 
 ## Relationship with agent-base
 
@@ -17,20 +17,20 @@ agent-works        Batteries-included toolbox (wraps agent-base + enhancements)
 ```
 
 - **Use `agent-base` alone** when you only need the runtime (LLM + tools + middleware).
-- **Use `agent-works`** when you want MCP, Skills, built-in tools, CLI — and still get everything from agent-base through re-exports.
+- **Use `agent-works`** when you want MCP, Skills, Focus, multi-agent, built-in tools, CLI — and still get everything from agent-base through re-exports.
 - Switching from `agent-base` to `agent-works` is a one-line import change.
 
 ## Installation
 
 ```toml
 [dependencies]
-agent-works = { version = "0.1.1", features = ["full"] }
+agent-works = { version = "0.1.7", features = ["full"] }
 ```
 
 Or pick specific features:
 
 ```toml
-agent-works = { version = "0.1.1", features = ["mcp", "skill"] }
+agent-works = { version = "0.1.7", features = ["mcp", "skill"] }
 ```
 
 ## Feature Flags
@@ -39,6 +39,9 @@ agent-works = { version = "0.1.1", features = ["mcp", "skill"] }
 |---------|-------------|------------|
 | `mcp` | `McpHUb` — multi-server MCP with HTTP + stdio transport | — |
 | `skill` | `Skill` trait + `LazySkillPrompter` / `FullDetailPrompter` + `SkillDetailTool` + `SkillLoader` | — |
+| `prompt_skill` | `PromptSkill` — skill definitions from prompt files | `serde_yaml` |
+| `yaml_skill` | `YamlSkill` — skill definitions from YAML files | `serde_yaml` |
+| `hot-reload` | Hot-reload skill definitions on file change | `notify`, `prompt_skill` |
 | `builtin-tools` | `ReadFileTool`, `WriteFileTool`, `ListDirectoryTool`, `FileExistsTool`, `SearchReplaceTool` | `walkdir` |
 | `cli` | `CliRepl` (generic REPL loop) + `CliEventPrinter` (terminal event output) | — |
 | `full` | All of the above | — |
@@ -122,6 +125,66 @@ The builder automatically:
 - Injects skill brief descriptions into the system prompt (via `LazySkillPrompter`)
 - Registers `SkillDetailTool` for on-demand detailed prompt loading
 
+### Focus — Structured LLM Extraction
+
+`Focus` provides a clean API for extracting structured data from LLM responses:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use agent_works::focus::Focus;
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug)]
+struct TaskStatus { status: String, priority: u8 }
+
+let focus = Focus::new(
+    client,  // Arc<dyn StreamClient>
+    "You are a task classifier. Output valid JSON matching the schema.",
+);
+
+let output = focus
+    .ask::<TaskStatus>("Classify: 'deploy hotfix to production'", Duration::from_secs(5))
+    .await?;
+
+println!("Status: {}, Priority: {}", output.result.status, output.result.priority);
+```
+
+### Multi-Agent with fork_history
+
+Spawn child agents that inherit conversation context:
+
+```rust
+use agent_works::{MultiAgentRuntime, MultiAgentConfig};
+
+let mut runtime = MultiAgentRuntime::new(client, MultiAgentConfig::enabled());
+
+// Spawn a child agent with full parent history
+let child_id = runtime
+    .spawn_child_with_history(
+        "math-expert",
+        "gpt-4o",
+        "You are a math expert.",
+        "all",  // fork_history: "none" | "all" | N (last N turns)
+        None,   // reasoning_effort
+        None,   // agent_type
+    )
+    .await?;
+
+// Send a message and collect the result
+let events = runtime.send_input(child_id, "What is 2+2?").await?;
+```
+
+`AgentHandle` provides a higher-level wrapper for agent lifecycle management:
+
+```rust
+use agent_works::AgentHandle;
+
+let handle = AgentHandle::spawn(runtime, "researcher", "gpt-4o", "You are a researcher.")?;
+handle.send("Research the history of Rust.").await?;
+// Events stream from handle.events()
+```
+
 ### MCP Multi-Server
 
 ```rust
@@ -162,6 +225,12 @@ let runtime = AgentBuilder::new(llm)
 
 ```rust
 use agent_works::cli::{CliRepl, CliEventPrinter};
+
+// Default (stdout)
+let mut printer = CliEventPrinter::new();
+
+// Or capture output for testing
+let mut printer = CliEventPrinter::with_writer(Vec::new());
 
 let mut repl = CliRepl::new(runtime);
 
@@ -211,10 +280,13 @@ cargo run --example cli_demo --features cli
 src/
 ├── lib.rs              # Re-exports agent-base + feature-gated modules
 ├── builder.rs          # AgentBuilder wrapper with skill integration
+├── handle.rs           # AgentHandle — high-level agent lifecycle
 ├── mcp/                # McpHUb + McpClient (HTTP + stdio transport)
 ├── skill/              # Skill trait + prompter strategies + detail tool
+├── focus/              # Focus — structured LLM extraction
+├── multi_agent/        # MultiAgentRuntime + fork_history support
 ├── builtin/            # ReadFile / WriteFile / ListDirectory / FileExists / SearchReplace
-└── cli/                # CliRepl + CliEventPrinter
+└── cli/                # CliRepl + CliEventPrinter<W>
 ```
 
 ## License
