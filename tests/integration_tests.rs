@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ResponseFormat, RunOutcome, StreamChunk,
-    Tool, ToolContext, ToolControlFlow, ToolOutput,
+    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ResponseFormat, RunOutcome,
+    StreamChunk, Tool, ToolContext,
 };
 use agent_works::AgentBuilder;
 use async_trait::async_trait;
@@ -84,31 +84,23 @@ impl Tool for EchoTool {
         "echo"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "echo back the message"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "echo",
-                "description": "echo back the message",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string" }
-                    },
-                    "required": ["message"]
-                }
-            }
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let msg = args["message"].as_str().unwrap_or("");
-        Ok(ToolOutput {
-            summary: format!("echo: {msg}"),
-            raw: Some(json!({ "echo": msg })),
-            control_flow: ToolControlFlow::Continue,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!("echo: {msg}"))])
     }
 }
 
@@ -302,33 +294,25 @@ mod skill_tests {
             "add"
         }
 
-        fn definition(&self) -> Value {
+        fn description(&self) -> &'static str {
+            "Calculate the sum of two integers"
+        }
+
+        fn schema(&self) -> Value {
             json!({
-                "type": "function",
-                "function": {
-                    "name": "add",
-                    "description": "Calculate the sum of two integers",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": { "type": "integer", "description": "First addend" },
-                            "b": { "type": "integer", "description": "Second addend" }
-                        },
-                        "required": ["a", "b"]
-                    }
-                }
+                "type": "object",
+                "properties": {
+                    "a": { "type": "integer", "description": "First addend" },
+                    "b": { "type": "integer", "description": "Second addend" }
+                },
+                "required": ["a", "b"]
             })
         }
 
-        async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+        async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
             let a = args["a"].as_i64().unwrap_or(0);
             let b = args["b"].as_i64().unwrap_or(0);
-            Ok(ToolOutput {
-                summary: format!("{a} + {b} = {}", a + b),
-                raw: Some(json!({ "result": a + b })),
-                control_flow: ToolControlFlow::Break,
-                truncation: None,
-            })
+            Ok(vec![Content::text(format!("{a} + {b} = {}", a + b))])
         }
     }
 
@@ -490,8 +474,8 @@ mod skill_tests {
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(prompt.contains("math"), "Prompt should contain skill name");
         assert!(
-            prompt.contains("get_skill_detail"),
-            "Prompt should contain instruction"
+            prompt.contains("read_file"),
+            "Prompt should mention read_file (prompt-injection mode)"
         );
     }
 
@@ -500,11 +484,11 @@ mod skill_tests {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
         let prompter = LazySkillPrompter::new()
             .title("## My Skills")
-            .instruction("> Use {tool} to see details")
+            .instruction("> Use read_file to see details")
             .item_prefix("+ ");
         let prompt = prompter.build_prompt(&skills, "my_get_detail");
         assert!(prompt.contains("## My Skills"));
-        assert!(prompt.contains("my_get_detail"));
+        assert!(prompt.contains("> Use read_file to see details"));
         assert!(prompt.contains("+ "));
     }
 
@@ -544,10 +528,8 @@ mod builtin_tests {
             workspace: PathBuf::from("."),
         };
         assert_eq!(tool.name(), "read_file");
-
-        let def = tool.definition();
-        let func = def.get("function").unwrap();
-        assert_eq!(func.get("name").unwrap().as_str().unwrap(), "read_file");
+        assert_eq!(tool.description(), "Read the contents of a file");
+        assert_eq!(tool.schema()["type"], "object");
     }
 
     #[tokio::test]
@@ -643,20 +625,13 @@ mod mcp_tests {
 
 #[cfg(feature = "builtin-tools")]
 mod path_traversal_tests {
-    use agent_base::{Language, SessionId, Tool, ToolContext, UserEvent};
+    use agent_base::tool::content_text;
+    use agent_base::{Tool, ToolContext};
     use agent_works::builtin::*;
     use serde_json::json;
 
     fn make_ctx() -> ToolContext {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<UserEvent>();
-        ToolContext {
-            session_id: SessionId::new(1),
-            user_event_tx: tx,
-            llm_client: None,
-            session_store: None,
-            language: Language::En,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-        }
+        ToolContext::for_test()
     }
 
     /// Set up a real temp workspace with a test file in it.
@@ -715,7 +690,7 @@ mod path_traversal_tests {
             "read_file should allow valid path: {:?}",
             result.err()
         );
-        assert!(result.unwrap().summary.contains("top secret"));
+        assert!(content_text(&result.unwrap()).contains("top secret"));
     }
 
     #[tokio::test]
@@ -732,7 +707,7 @@ mod path_traversal_tests {
             "read_file should allow subdir path: {:?}",
             result.err()
         );
-        assert!(result.unwrap().summary.contains("nested content"));
+        assert!(content_text(&result.unwrap()).contains("nested content"));
     }
 
     // -- write_file traversal --
@@ -826,9 +801,9 @@ mod path_traversal_tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(
-            output.summary.contains("No changes needed"),
+            content_text(&output).contains("No changes needed"),
             "should short-circuit when old==new: {}",
-            output.summary
+            content_text(&output)
         );
     }
 
@@ -847,7 +822,7 @@ mod path_traversal_tests {
             &ctx,
         ).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().summary.contains("not found"));
+        assert!(content_text(&result.unwrap()).contains("not found"));
     }
 
     // -- search_replace successful replacement --
@@ -867,7 +842,7 @@ mod path_traversal_tests {
             )
             .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().summary.contains("Successfully"));
+        assert!(content_text(&result.unwrap()).contains("Successfully"));
 
         // Verify the replacement
         let read_tool = ReadFileTool {
@@ -877,8 +852,8 @@ mod path_traversal_tests {
             .call(&json!({"path": "secret.txt"}), &ctx)
             .await
             .unwrap();
-        assert!(content.summary.contains("declassified"));
-        assert!(!content.summary.contains("top secret"));
+        assert!(content_text(&content).contains("declassified"));
+        assert!(!content_text(&content).contains("top secret"));
     }
 }
 
@@ -909,41 +884,42 @@ mod prompter_tests {
     }
 
     #[test]
-    fn test_lazy_prompter_default_tool_name() {
+    fn test_lazy_prompter_default_read_file_instruction() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "get_skill_detail");
         assert!(
-            prompt.contains("get_skill_detail"),
-            "default prompt should mention the tool name"
+            prompt.contains("read_file"),
+            "default prompt should use read_file mode"
         );
         assert!(prompt.contains("test_skill"));
     }
 
     #[test]
-    fn test_lazy_prompter_custom_tool_name() {
+    fn test_lazy_prompter_ignores_tool_name() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
         let prompter = LazySkillPrompter::new();
         let prompt = prompter.build_prompt(&skills, "my_custom_detail");
         assert!(
-            prompt.contains("my_custom_detail"),
-            "should use custom tool name"
+            !prompt.contains("my_custom_detail"),
+            "read_file mode should not mention the detail tool name"
         );
         assert!(
             !prompt.contains("get_skill_detail"),
             "should NOT contain default name"
         );
+        assert!(prompt.contains("read_file"));
     }
 
     #[test]
-    fn test_lazy_prompter_custom_instruction_with_placeholder() {
+    fn test_lazy_prompter_custom_instruction_verbatim() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
         let prompter =
-            LazySkillPrompter::new().instruction("Use `{tool}` to learn more about skills.");
+            LazySkillPrompter::new().instruction("Use `read_file` with the skill path.");
         let prompt = prompter.build_prompt(&skills, "detail_query");
         assert!(
-            prompt.contains("Use `detail_query` to learn more"),
-            "placeholder should be replaced: {}",
+            prompt.contains("Use `read_file` with the skill path."),
+            "custom instruction should be emitted verbatim: {}",
             prompt
         );
     }

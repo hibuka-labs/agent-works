@@ -1,26 +1,12 @@
-use agent_base::{AgentError, AgentResult, Language, SessionId, Tool, ToolContext};
+use agent_base::{AgentError, AgentResult, Tool, ToolContext};
 use agent_works::builtin::{
     FileExistsTool, ListDirectoryTool, ReadFileTool, SearchReplaceTool, WriteFileTool,
 };
 use serde_json::json;
 
-fn make_tool_context() -> ToolContext {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    ToolContext {
-        session_id: SessionId::new(1),
-        user_event_tx: tx,
-        llm_client: None,
-        session_store: None,
-        language: Language::En,
-        cancel_token: tokio_util::sync::CancellationToken::new(),
-    }
-}
-
 fn print_definition(tool: &dyn Tool) {
-    let def = tool.definition();
-    let desc = def["function"]["description"].as_str().unwrap_or("N/A");
     println!("  Tool: {}", tool.name());
-    println!("    Description: {desc}");
+    println!("    Description: {}", tool.description());
 }
 
 #[tokio::main]
@@ -56,7 +42,7 @@ async fn main() -> AgentResult<()> {
     print_definition(&search_replace_tool);
     println!();
 
-    let ctx = make_tool_context();
+    let ctx = ToolContext::for_test();
 
     let test_file = "hello.txt";
     let test_content = "Hello, World!\nThis is a test file.\nLine three.";
@@ -64,14 +50,22 @@ async fn main() -> AgentResult<()> {
     let result = write_tool
         .call(&json!({"path": test_file, "content": test_content}), &ctx)
         .await?;
-    println!("[2] WriteFileTool -> {}: {}", test_file, result.summary);
+    println!(
+        "[2] WriteFileTool -> {}: {}",
+        test_file,
+        agent_base::tool::content_text(&result)
+    );
 
     let result = exists_tool.call(&json!({"path": test_file}), &ctx).await?;
-    println!("[3] FileExistsTool -> {}: {}", test_file, result.summary);
+    println!(
+        "[3] FileExistsTool -> {}: {}",
+        test_file,
+        agent_base::tool::content_text(&result)
+    );
 
     let result = read_tool.call(&json!({"path": test_file}), &ctx).await?;
     println!("[4] ReadFileTool -> {}:", test_file);
-    for line in result.summary.lines() {
+    for line in agent_base::tool::content_text(&result).lines() {
         println!("    {line}");
     }
 
@@ -86,13 +80,13 @@ async fn main() -> AgentResult<()> {
 
     let result = list_tool.call(&json!({"path": "."}), &ctx).await?;
     println!("[5] ListDirectoryTool -> root:");
-    for line in result.summary.lines() {
+    for line in agent_base::tool::content_text(&result).lines() {
         println!("    {line}");
     }
 
     let result = list_tool.call(&json!({"path": sub_dir}), &ctx).await?;
     println!("[6] ListDirectoryTool -> {sub_dir}:");
-    for line in result.summary.lines() {
+    for line in agent_base::tool::content_text(&result).lines() {
         println!("    {line}");
     }
 
@@ -106,11 +100,15 @@ async fn main() -> AgentResult<()> {
             &ctx,
         )
         .await?;
-    println!("[7] SearchReplaceTool -> {}: {}", test_file, result.summary);
+    println!(
+        "[7] SearchReplaceTool -> {}: {}",
+        test_file,
+        agent_base::tool::content_text(&result)
+    );
 
     let result = read_tool.call(&json!({"path": test_file}), &ctx).await?;
     println!("[8] Verified replacement in {}:", test_file);
-    for line in result.summary.lines() {
+    for line in agent_base::tool::content_text(&result).lines() {
         println!("    {line}");
     }
 

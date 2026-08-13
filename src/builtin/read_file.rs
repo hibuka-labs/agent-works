@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::path_util::validate_path;
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use agent_base::{AgentError, AgentResult, Content, Tool, ToolContext};
 
 pub struct ReadFileTool {
     pub workspace: PathBuf,
@@ -16,27 +16,24 @@ impl Tool for ReadFileTool {
         "read_file"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Read the contents of a file"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read the contents of a file",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file to read"
-                        }
-                    },
-                    "required": ["path"]
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read"
                 }
-            }
+            },
+            "required": ["path"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| AgentError::internal("missing 'path' argument"))?;
@@ -50,11 +47,6 @@ impl Tool for ReadFileTool {
         })?;
 
         tracing::info!(path = %path, size = content.len(), "read file success");
-        Ok(ToolOutput {
-            summary: content.clone(),
-            raw: Some(json!({"path": path, "content": content})),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(content)])
     }
 }

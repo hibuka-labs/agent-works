@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use agent_base::{AgentError, AgentResult, Content, Tool, ToolContext};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -216,7 +216,7 @@ pub struct McpToolAdapter {
     name: &'static str,
     /// Original tool name used when calling the MCP server
     original_name: String,
-    description: String,
+    description: &'static str,
     input_schema: Value,
     mcp_client: Arc<McpClient>,
 }
@@ -226,10 +226,11 @@ impl McpToolAdapter {
         let original_name = info.name;
         let canonical = format!("mcp.{}.{}", server_name, original_name);
         let static_name: &'static str = Box::leak(canonical.into_boxed_str());
+        let static_description: &'static str = Box::leak(info.description.into_boxed_str());
         Self {
             name: static_name,
             original_name,
-            description: info.description,
+            description: static_description,
             input_schema: info.input_schema,
             mcp_client,
         }
@@ -242,18 +243,15 @@ impl Tool for McpToolAdapter {
         self.name
     }
 
-    fn definition(&self) -> Value {
-        json!({
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.input_schema,
-            }
-        })
+    fn description(&self) -> &'static str {
+        self.description
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    fn schema(&self) -> Value {
+        self.input_schema.clone()
+    }
+
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let result = self.mcp_client.call_tool(&self.original_name, args).await?;
         let content = result
             .get("content")
@@ -267,11 +265,6 @@ impl Tool for McpToolAdapter {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| result.to_string());
 
-        Ok(ToolOutput {
-            summary: content,
-            raw: Some(result),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(content)])
     }
 }

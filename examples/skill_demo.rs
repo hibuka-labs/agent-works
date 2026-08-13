@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
-    RuntimeEvent, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
+    RuntimeEvent, StreamChunk, Tool, ToolContext,
 };
 use agent_works::{
     AgentBuilder,
@@ -79,33 +79,25 @@ impl Tool for AddTool {
         "add"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Calculate the sum of two integers"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "add",
-                "description": "Calculate the sum of two integers",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "a": { "type": "integer", "description": "First addend" },
-                        "b": { "type": "integer", "description": "Second addend" }
-                    },
-                    "required": ["a", "b"]
-                }
-            }
+            "type": "object",
+            "properties": {
+                "a": { "type": "integer", "description": "First addend" },
+                "b": { "type": "integer", "description": "Second addend" }
+            },
+            "required": ["a", "b"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let a = args["a"].as_i64().unwrap_or(0);
         let b = args["b"].as_i64().unwrap_or(0);
-        Ok(ToolOutput {
-            summary: format!("{a} + {b} = {}", a + b),
-            raw: Some(json!({ "result": a + b })),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!("{a} + {b} = {}", a + b))])
     }
 }
 
@@ -117,33 +109,25 @@ impl Tool for SubtractTool {
         "subtract"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Calculate the difference of two integers (a - b)"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "subtract",
-                "description": "Calculate the difference of two integers (a - b)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "a": { "type": "integer", "description": "Minuend" },
-                        "b": { "type": "integer", "description": "Subtrahend" }
-                    },
-                    "required": ["a", "b"]
-                }
-            }
+            "type": "object",
+            "properties": {
+                "a": { "type": "integer", "description": "Minuend" },
+                "b": { "type": "integer", "description": "Subtrahend" }
+            },
+            "required": ["a", "b"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let a = args["a"].as_i64().unwrap_or(0);
         let b = args["b"].as_i64().unwrap_or(0);
-        Ok(ToolOutput {
-            summary: format!("{a} - {b} = {}", a - b),
-            raw: Some(json!({ "result": a - b })),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!("{a} - {b} = {}", a - b))])
     }
 }
 
@@ -173,7 +157,7 @@ impl Skill for MathSkill {
 async fn main() -> AgentResult<()> {
     println!("=== agent-works Skill Demo ===\n");
 
-    let llm = Arc::new(MockLlmClient::new(vec![
+    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![
         vec![
             StreamChunk::ToolCall(json!({
                 "delta": {
@@ -186,7 +170,9 @@ async fn main() -> AgentResult<()> {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ],
         vec![
             StreamChunk::ToolCall(json!({
@@ -200,13 +186,17 @@ async fn main() -> AgentResult<()> {
                     }]
                 }
             })),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ],
         vec![
             StreamChunk::Text("123 + 456 = 579".to_string()),
-            StreamChunk::Stop,
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
         ],
-    ]));
+    ])));
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant. Use skills when needed.")

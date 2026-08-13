@@ -1,8 +1,8 @@
 //! Benchmarks: AgentBuilder construction in agent-works.
 
 use agent_base::{
-    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
-    StreamChunk, Tool, ToolContext, ToolControlFlow, ToolMetadata, ToolOutput,
+    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
+    StreamChunk, Tool, ToolContext, ToolMetadata,
 };
 use agent_works::AgentBuilder;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -62,16 +62,14 @@ impl Tool for NoopTool {
     fn name(&self) -> &'static str {
         "noop"
     }
-    fn definition(&self) -> serde_json::Value {
-        serde_json::json!({"function": {"name": "noop", "description": "no-op", "parameters": {}}})
+    fn description(&self) -> &'static str {
+        "no-op"
     }
-    async fn call(&self, _: &serde_json::Value, _: &ToolContext) -> AgentResult<ToolOutput> {
-        Ok(ToolOutput {
-            summary: "ok".into(),
-            raw: None,
-            control_flow: ToolControlFlow::Continue,
-            truncation: None,
-        })
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn call(&self, _: &serde_json::Value, _: &ToolContext) -> AgentResult<Vec<Content>> {
+        Ok(vec![Content::text("ok")])
     }
     fn metadata(&self) -> ToolMetadata {
         ToolMetadata {

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use agent_base::{
-    AgentResult, ChatMessage, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
-    RuntimeEvent, SessionId, StreamChunk, Tool, ToolContext, ToolControlFlow, ToolOutput,
+    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
+    RuntimeEvent, SessionId, StreamChunk, Tool, ToolContext,
 };
 use agent_works::{
     AgentBuilder,
@@ -79,31 +79,23 @@ impl Tool for EchoTool {
         "echo"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Echo back the message"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "echo",
-                "description": "Echo back the message",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string" }
-                    },
-                    "required": ["message"]
-                }
-            }
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let msg = args["message"].as_str().unwrap_or("");
-        Ok(ToolOutput {
-            summary: format!("echo: {msg}"),
-            raw: Some(json!({"echo": msg})),
-            control_flow: ToolControlFlow::Continue,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!("echo: {msg}"))])
     }
 }
 
@@ -111,7 +103,7 @@ impl Tool for EchoTool {
 async fn main() -> AgentResult<()> {
     println!("=== agent-works CLI Demo ===\n");
 
-    let llm = Arc::new(MockLlmClient::new(vec![]));
+    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![])));
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant.")
@@ -161,6 +153,8 @@ async fn main() -> AgentResult<()> {
     println!("[6] Demo: CliEventPrinter handling events manually");
     printer.handle(RuntimeEvent::TextDelta {
         session_id: SessionId::new(0),
+        agent_id: None,
+        trace_id: None,
         text: "Hello, world!".to_string(),
     })?;
     println!();
@@ -169,12 +163,16 @@ async fn main() -> AgentResult<()> {
         session_id: SessionId::new(0),
         tool_name: "echo".to_string(),
         args_json: r#"{"message": "hello"}"#.to_string(),
+        agent_id: None,
+        trace_id: None,
     })?;
 
     printer.handle(RuntimeEvent::ToolCallFinished {
         session_id: SessionId::new(0),
         tool_name: "echo".to_string(),
         summary: "echo: hello".to_string(),
+        agent_id: None,
+        trace_id: None,
     })?;
     println!();
 

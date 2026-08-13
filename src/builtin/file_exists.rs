@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::path_util::validate_path;
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use agent_base::{AgentError, AgentResult, Content, Tool, ToolContext};
 
 pub struct FileExistsTool {
     pub workspace: PathBuf,
@@ -16,27 +16,24 @@ impl Tool for FileExistsTool {
         "file_exists"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Check if a file exists"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "file_exists",
-                "description": "Check if a file exists",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file or directory to check"
-                        }
-                    },
-                    "required": ["path"]
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file or directory to check"
                 }
-            }
+            },
+            "required": ["path"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| AgentError::internal("missing 'path' argument"))?;
@@ -46,21 +43,12 @@ impl Tool for FileExistsTool {
         let metadata = tokio::fs::metadata(&full_path).await;
 
         let exists = metadata.is_ok();
-        let is_file = metadata.as_ref().is_ok_and(|m| m.is_file());
-        let is_dir = metadata.as_ref().is_ok_and(|m| m.is_dir());
 
         tracing::trace!(path = %path, exists = exists, "file exists check");
-        Ok(ToolOutput {
-            summary: if exists {
-                format!("{} exists", path)
-            } else {
-                format!("{} does not exist", path)
-            },
-            raw: Some(
-                json!({"path": path, "exists": exists, "is_file": is_file, "is_dir": is_dir}),
-            ),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(if exists {
+            format!("{} exists", path)
+        } else {
+            format!("{} does not exist", path)
+        })])
     }
 }

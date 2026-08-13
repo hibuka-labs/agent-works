@@ -680,7 +680,7 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::{LlmClient, ToolControlFlow};
+    use agent_base::{Content, LlmClient};
     use std::pin::Pin;
 
     // ── Stub LLM client ──
@@ -775,20 +775,18 @@ mod tests {
                 fn name(&self) -> &'static str {
                     "fake_tool"
                 }
-                fn definition(&self) -> serde_json::Value {
-                    serde_json::json!({"type": "function", "function": {"name": "fake_tool"}})
+                fn description(&self) -> &'static str {
+                    ""
+                }
+                fn schema(&self) -> serde_json::Value {
+                    serde_json::json!({})
                 }
                 async fn call(
                     &self,
                     _args: &serde_json::Value,
                     _ctx: &agent_base::ToolContext,
-                ) -> AgentResult<agent_base::ToolOutput> {
-                    Ok(agent_base::ToolOutput {
-                        summary: "ok".into(),
-                        raw: None,
-                        control_flow: ToolControlFlow::Continue,
-                        truncation: None,
-                    })
+                ) -> AgentResult<Vec<Content>> {
+                    Ok(vec![Content::text("ok")])
                 }
             }
             vec![Arc::new(FakeTool)]
@@ -828,20 +826,18 @@ mod tests {
             fn name(&self) -> &'static str {
                 "dup_tool"
             }
-            fn definition(&self) -> serde_json::Value {
-                serde_json::json!({"type": "function", "function": {"name": "dup_tool"}})
+            fn description(&self) -> &'static str {
+                ""
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({})
             }
             async fn call(
                 &self,
                 _args: &serde_json::Value,
                 _ctx: &agent_base::ToolContext,
-            ) -> AgentResult<agent_base::ToolOutput> {
-                Ok(agent_base::ToolOutput {
-                    summary: "ok".into(),
-                    raw: None,
-                    control_flow: ToolControlFlow::Continue,
-                    truncation: None,
-                })
+            ) -> AgentResult<Vec<Content>> {
+                Ok(vec![Content::text("ok")])
             }
         }
         {
@@ -857,20 +853,18 @@ mod tests {
                 fn name(&self) -> &'static str {
                     "dup_tool"
                 }
-                fn definition(&self) -> serde_json::Value {
-                    serde_json::json!({"type": "function", "function": {"name": "dup_tool"}})
+                fn description(&self) -> &'static str {
+                    ""
+                }
+                fn schema(&self) -> serde_json::Value {
+                    serde_json::json!({})
                 }
                 async fn call(
                     &self,
                     _args: &serde_json::Value,
                     _ctx: &agent_base::ToolContext,
-                ) -> AgentResult<agent_base::ToolOutput> {
-                    Ok(agent_base::ToolOutput {
-                        summary: "ok".into(),
-                        raw: None,
-                        control_flow: ToolControlFlow::Continue,
-                        truncation: None,
-                    })
+                ) -> AgentResult<Vec<Content>> {
+                    Ok(vec![Content::text("ok")])
                 }
             }
             vec![Arc::new(FakeTool)]
@@ -937,20 +931,18 @@ mod tests {
                 fn name(&self) -> &'static str {
                     "factory_test_tool"
                 }
-                fn definition(&self) -> serde_json::Value {
-                    serde_json::json!({"type": "function", "function": {"name": "factory_test_tool"}})
+                fn description(&self) -> &'static str {
+                    ""
+                }
+                fn schema(&self) -> serde_json::Value {
+                    serde_json::json!({})
                 }
                 async fn call(
                     &self,
                     _args: &serde_json::Value,
                     _ctx: &agent_base::ToolContext,
-                ) -> AgentResult<agent_base::ToolOutput> {
-                    Ok(agent_base::ToolOutput {
-                        summary: "ok".into(),
-                        raw: None,
-                        control_flow: ToolControlFlow::Continue,
-                        truncation: None,
-                    })
+                ) -> AgentResult<Vec<Content>> {
+                    Ok(vec![Content::text("ok")])
                 }
             }
             vec![Arc::new(TestTool)]

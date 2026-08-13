@@ -30,8 +30,11 @@ impl LazySkillPrompter {
         self
     }
 
-    /// Set a custom instruction template. Use `{tool}` as a placeholder for
-    /// the detail tool name, e.g. `"> Use {tool} to learn more"`.
+    /// Set a custom instruction line, emitted verbatim at the end of the prompt.
+    ///
+    /// In read_file (prompt-injection) mode the default tells the LLM to read
+    /// the skill's `SKILL.md` via `read_file`. The instruction is not
+    /// placeholder-expanded.
     pub fn instruction(mut self, instruction: impl Into<String>) -> Self {
         self.instruction_template = instruction.into();
         self

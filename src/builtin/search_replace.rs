@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::path_util::validate_path;
-use agent_base::{AgentError, AgentResult, Tool, ToolContext, ToolControlFlow, ToolOutput};
+use agent_base::{AgentError, AgentResult, Content, Tool, ToolContext};
 
 pub struct SearchReplaceTool {
     pub workspace: PathBuf,
@@ -16,35 +16,32 @@ impl Tool for SearchReplaceTool {
         "search_replace"
     }
 
-    fn definition(&self) -> Value {
+    fn description(&self) -> &'static str {
+        "Search and replace text in a file"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "search_replace",
-                "description": "Search and replace text in a file",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Path to the file"
-                        },
-                        "old_str": {
-                            "type": "string",
-                            "description": "Text to search for (first occurrence will be replaced)"
-                        },
-                        "new_str": {
-                            "type": "string",
-                            "description": "Text to replace with"
-                        }
-                    },
-                    "required": ["path", "old_str", "new_str"]
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file"
+                },
+                "old_str": {
+                    "type": "string",
+                    "description": "Text to search for (first occurrence will be replaced)"
+                },
+                "new_str": {
+                    "type": "string",
+                    "description": "Text to replace with"
                 }
-            }
+            },
+            "required": ["path", "old_str", "new_str"]
         })
     }
 
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| AgentError::internal("missing 'path' argument"))?;
@@ -59,14 +56,10 @@ impl Tool for SearchReplaceTool {
 
         // Short-circuit when old and new are identical — no I/O needed
         if old_str == new_str {
-            return Ok(ToolOutput {
-                summary: format!("No changes needed in {} (old_str == new_str)", path),
-                raw: Some(
-                    json!({"path": path, "found": true, "replaced": false, "reason": "identical strings"}),
-                ),
-                control_flow: ToolControlFlow::Break,
-                truncation: None,
-            });
+            return Ok(vec![Content::text(format!(
+                "No changes needed in {} (old_str == new_str)",
+                path
+            ))]);
         }
 
         let full_path = validate_path(&self.workspace, path)?;
@@ -80,23 +73,16 @@ impl Tool for SearchReplaceTool {
         let replaced = content.replacen(old_str, new_str, 1);
 
         if replaced == content {
-            return Ok(ToolOutput {
-                summary: format!("Text not found in {}", path),
-                raw: Some(json!({"path": path, "found": false})),
-                control_flow: ToolControlFlow::Break,
-                truncation: None,
-            });
+            return Ok(vec![Content::text(format!("Text not found in {}", path))]);
         }
 
         tokio::fs::write(&full_path, &replaced).await.map_err(|e| {
             AgentError::internal(format!("failed to write {}: {e}", full_path.display()))
         })?;
 
-        Ok(ToolOutput {
-            summary: format!("Successfully replaced text in {}", path),
-            raw: Some(json!({"path": path, "found": true, "replaced": true})),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!(
+            "Successfully replaced text in {}",
+            path
+        ))])
     }
 }
