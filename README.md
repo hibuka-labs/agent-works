@@ -56,10 +56,10 @@ Skills package tools + descriptions into reusable units with progressive disclos
 
 ```rust
 use std::sync::Arc;
+use agent_base::{AgentResult, Content, Tool, ToolContext};
 use agent_works::{
-    AgentBuilder, AgentEvent, AgentResult,
+    AgentBuilder,
     skill::{Skill, LazySkillPrompter},
-    Tool, ToolContext, ToolControlFlow, ToolOutput,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -69,32 +69,26 @@ struct AddTool;
 #[async_trait]
 impl Tool for AddTool {
     fn name(&self) -> &'static str { "add" }
-    fn definition(&self) -> Value {
+
+    fn description(&self) -> &'static str {
+        "Calculate the sum of two integers"
+    }
+
+    fn schema(&self) -> Value {
         json!({
-            "type": "function",
-            "function": {
-                "name": "add",
-                "description": "Calculate the sum of two integers",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "a": { "type": "integer" },
-                        "b": { "type": "integer" }
-                    },
-                    "required": ["a", "b"]
-                }
-            }
+            "type": "object",
+            "properties": {
+                "a": { "type": "integer" },
+                "b": { "type": "integer" }
+            },
+            "required": ["a", "b"]
         })
     }
-    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<ToolOutput> {
+
+    async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
         let a = args["a"].as_i64().unwrap_or(0);
         let b = args["b"].as_i64().unwrap_or(0);
-        Ok(ToolOutput {
-            summary: format!("{a} + {b} = {}", a + b),
-            raw: Some(json!({ "result": a + b })),
-            control_flow: ToolControlFlow::Break,
-            truncation: None,
-        })
+        Ok(vec![Content::text(format!("{a} + {b} = {}", a + b))])
     }
 }
 
