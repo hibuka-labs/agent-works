@@ -86,3 +86,93 @@ impl Tool for SearchReplaceTool {
         ))])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_base::tool::content_text;
+
+    fn dummy_ctx() -> ToolContext {
+        ToolContext::for_test()
+    }
+
+    #[test]
+    fn test_name_and_schema() {
+        let tool = SearchReplaceTool {
+            workspace: PathBuf::from("/tmp"),
+        };
+        assert_eq!(tool.name(), "search_replace");
+        assert!(
+            tool.schema()["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("old_str"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_replaces_first_occurrence() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "foo foo").unwrap();
+        let tool = SearchReplaceTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(
+                &json!({"path": "a.txt", "old_str": "foo", "new_str": "bar"}),
+                &dummy_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("Successfully replaced"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "bar foo"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_old_equals_new_short_circuit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = SearchReplaceTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(
+                &json!({"path": "a.txt", "old_str": "same", "new_str": "same"}),
+                &dummy_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("No changes needed"));
+    }
+
+    #[tokio::test]
+    async fn test_call_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let tool = SearchReplaceTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(
+                &json!({"path": "a.txt", "old_str": "zzz", "new_str": "yyy"}),
+                &dummy_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("Text not found"));
+    }
+
+    #[tokio::test]
+    async fn test_call_missing_old_str() {
+        let tool = SearchReplaceTool {
+            workspace: PathBuf::from("/tmp"),
+        };
+        let err = tool
+            .call(&json!({"path": "a.txt", "new_str": "x"}), &dummy_ctx())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("missing 'old_str'"));
+    }
+}

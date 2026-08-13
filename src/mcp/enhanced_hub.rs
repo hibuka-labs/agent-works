@@ -150,6 +150,12 @@ pub struct EnhancedMcpHub {
     status_tx: broadcast::Sender<(String, ConnectionState)>,
 }
 
+impl Default for EnhancedMcpHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnhancedMcpHub {
     pub fn new() -> Self {
         let (status_tx, _) = broadcast::channel(100);
@@ -349,12 +355,10 @@ impl EnhancedMcpHub {
 
                     if !is_healthy
                         && matches!(*entry.state.read().await, ConnectionState::Unhealthy(_))
+                        && entry.config.auto_reconnect
+                        && let Err(e) = entry.reconnect().await
                     {
-                        if entry.config.auto_reconnect {
-                            if let Err(e) = entry.reconnect().await {
-                                error!("Failed to reconnect to {}: {e}", name);
-                            }
-                        }
+                        error!("Failed to reconnect to {}: {e}", name);
                     }
                 }
             }
@@ -478,5 +482,200 @@ impl Drop for EnhancedMcpHub {
     fn drop(&mut self) {
         // Signal the health check loop to stop when the hub is dropped
         self.shutdown.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::McpTransport;
+    use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn http_config(name: &str, url: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Http {
+                url: url.to_string(),
+            },
+            auto_reconnect: false,
+        }
+    }
+
+    fn stdio_bad_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Stdio {
+                command: "definitely-not-a-real-command-xyz".to_string(),
+                args: vec![],
+            },
+            auto_reconnect: false,
+        }
+    }
+
+    #[test]
+    fn test_new_and_interval_builder() {
+        let hub = EnhancedMcpHub::new();
+        assert_eq!(hub.health_check_interval, Duration::from_secs(30));
+        let hub = hub.with_health_check_interval(Duration::from_secs(5));
+        assert_eq!(hub.health_check_interval, Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn test_add_server_and_get_state() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.add_server(http_config("b", "http://localhost:2"));
+
+        let states = hub.get_all_states().await;
+        assert_eq!(states.len(), 2);
+        assert!(matches!(
+            hub.get_connection_state("a").await,
+            Some(ConnectionState::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_connection_state_unknown() {
+        let hub = EnhancedMcpHub::new();
+        assert!(hub.get_connection_state("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_connect_one_unknown_server() {
+        let hub = EnhancedMcpHub::new();
+        let err = hub.connect_one("nope").await.unwrap_err();
+        assert!(format!("{err}").contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_one_http() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.connect_one("a").await.unwrap();
+        assert!(matches!(
+            hub.get_connection_state("a").await,
+            Some(ConnectionState::Connected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_connect_all_success() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.add_server(http_config("b", "http://localhost:2"));
+        hub.connect_all().await.unwrap();
+        assert!(matches!(
+            hub.get_connection_state("a").await,
+            Some(ConnectionState::Connected)
+        ));
+        assert!(matches!(
+            hub.get_connection_state("b").await,
+            Some(ConnectionState::Connected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_connect_all_all_fail() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(stdio_bad_config("a"));
+        hub.add_server(stdio_bad_config("b"));
+        let err = hub.connect_all().await.unwrap_err();
+        assert!(format!("{err}").contains("All MCP servers failed"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_all_and_register() {
+        let server = MockServer::start().await;
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("brave", &format!("{}/mcp", server.uri())));
+        hub.connect_all().await.unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"tools": [{"name": "search", "description": "d", "inputSchema": {}}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let results = hub.discover_all().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1[0].name, "search");
+
+        let mut registry = ToolRegistry::default();
+        hub.register_all(&mut registry).await;
+        assert!(registry.get("mcp.brave.search").is_some());
+
+        let mut registry2 = ToolRegistry::default();
+        hub.register_server(&mut registry2, "brave").await;
+        assert!(registry2.get("mcp.brave.search").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_one() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.connect_one("a").await.unwrap();
+        hub.disconnect_one("a").await;
+        assert!(matches!(
+            hub.get_connection_state("a").await,
+            Some(ConnectionState::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_all() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.add_server(http_config("b", "http://localhost:2"));
+        hub.connect_all().await.unwrap();
+        hub.disconnect_all().await;
+
+        for name in ["a", "b"] {
+            assert!(matches!(
+                hub.get_connection_state(name).await,
+                Some(ConnectionState::Disconnected)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_server() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        assert!(hub.remove_server("a").await);
+        assert!(!hub.remove_server("a").await);
+        assert!(hub.get_connection_state("a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_server() {
+        let hub = EnhancedMcpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.update_server(http_config("a", "http://localhost:9999"))
+            .await;
+        // Still present, still disconnected after replacement.
+        assert!(matches!(
+            hub.get_connection_state("a").await,
+            Some(ConnectionState::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_status_receives_connect_event() {
+        let hub = EnhancedMcpHub::new();
+        let mut rx = hub.subscribe_status();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.connect_one("a").await.unwrap();
+
+        // connect_one broadcasts the (name, state) tuple.
+        let (name, state) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("no status broadcast")
+            .expect("channel closed");
+        assert_eq!(name, "a");
+        assert!(matches!(state, ConnectionState::Connected));
     }
 }

@@ -161,16 +161,17 @@ impl YamlSkill {
             }
         }
         // Check for unresolved placeholders
-        if let Some(pos) = result.find("{{") {
-            if let Some(end) = result[pos..].find("}}") {
-                let unresolved = &result[pos..pos + end + 2];
-                return Err(format!("Unresolved template variable: {}", unresolved));
-            }
+        if let Some(pos) = result.find("{{")
+            && let Some(end) = result[pos..].find("}}")
+        {
+            let unresolved = &result[pos..pos + end + 2];
+            return Err(format!("Unresolved template variable: {}", unresolved));
         }
         Ok(result)
     }
 
     /// Substitute template variables in a JSON Value (recursively).
+    #[allow(dead_code)] // not yet wired into plan_steps tool_call args
     fn substitute_json(
         &self,
         value: &serde_json::Value,
@@ -363,5 +364,37 @@ description: A knowledge skill
     fn test_empty_name() {
         let yaml = "name: ''\ndescription: test";
         assert!(YamlSkill::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn test_substitute_json_recursive() {
+        let skill = YamlSkill::from_yaml(TEST_SKILL).unwrap();
+        let mut params = HashMap::new();
+        params.insert("target_host".to_string(), "prod-1".to_string());
+        params.insert("service_name".to_string(), "nginx".to_string());
+
+        let value = serde_json::json!({
+            "command": "ps aux | grep {{service_name}}",
+            "target_host": "{{target_host}}",
+            "nested": {"x": "{{service_name}}", "n": 42},
+            "list": ["{{target_host}}", null, true],
+        });
+
+        let out = skill.substitute_json(&value, &params).unwrap();
+        assert_eq!(out["command"], "ps aux | grep nginx");
+        assert_eq!(out["target_host"], "prod-1");
+        assert_eq!(out["nested"]["x"], "nginx");
+        assert_eq!(out["nested"]["n"], 42);
+        assert_eq!(out["list"][0], "prod-1");
+        assert_eq!(out["list"][1], serde_json::Value::Null);
+        assert_eq!(out["list"][2], true);
+    }
+
+    #[test]
+    fn test_substitute_json_unresolved() {
+        let skill = YamlSkill::from_yaml(TEST_SKILL).unwrap();
+        let value = serde_json::json!({"command": "ps {{missing_var}}"});
+        let err = skill.substitute_json(&value, &HashMap::new()).unwrap_err();
+        assert!(err.contains("Unresolved template variable"));
     }
 }

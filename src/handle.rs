@@ -205,9 +205,102 @@ impl AgentHandle {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_agent_handle_creation() {
-        // This test requires a full AgentRuntime, skipped for now
-        // Actual testing is done in integration tests
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use agent_base::{
+        AgentBuilder, AgentResult, ChatMessage, LlmCapabilities, ReasoningConfig, ResponseFormat,
+        StreamChunk, StreamClient,
+    };
+    use futures_core::Stream;
+    use serde_json::Value;
+
+    struct StubClient;
+
+    #[async_trait::async_trait]
+    impl StreamClient for StubClient {
+        async fn stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[Value],
+            _reasoning: Option<&ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(StreamChunk::Text("hello".to_string())),
+                Ok(StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                }),
+            ])))
+        }
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::default()
+        }
+    }
+
+    fn runtime() -> AgentRuntime {
+        AgentBuilder::new(Arc::new(StubClient)).build().unwrap()
+    }
+
+    async fn wait_for_terminal(handle: &mut AgentHandle) -> Option<RuntimeEvent> {
+        let mut terminal = None;
+        for _ in 0..100 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), handle.recv_event()).await;
+            match ev {
+                Ok(Some(e @ RuntimeEvent::RunFinished { .. }))
+                | Ok(Some(e @ RuntimeEvent::RunCancelled { .. })) => {
+                    terminal = Some(e);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        terminal
+    }
+
+    #[tokio::test]
+    async fn test_send_input_and_recv_terminal() {
+        let mut handle = AgentHandle::new(runtime());
+        handle.send_input("hello").await.unwrap();
+        let terminal = wait_for_terminal(&mut handle).await;
+        assert!(
+            terminal.is_some(),
+            "expected a terminal event, got {terminal:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_input_with_session() {
+        let rt = runtime();
+        let session_id = rt.create_session().await;
+        let mut handle = AgentHandle::with_session(rt, session_id.clone());
+        handle
+            .send_input_with_session("hello", session_id)
+            .await
+            .unwrap();
+        let terminal = wait_for_terminal(&mut handle).await;
+        assert!(terminal.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_accessor_and_cancel() {
+        let rt = runtime();
+        let handle = AgentHandle::new(rt.clone());
+        // Accessor returns a runtime that shares the same session store.
+        let session_id = handle.runtime().create_session().await;
+        assert!(rt.session(&session_id).await.is_some());
+        // Cancel is a no-op when nothing is running, but must not panic.
+        handle.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_try_recv_event_initially_empty() {
+        let mut handle = AgentHandle::new(runtime());
+        assert!(handle.try_recv_event().is_none());
     }
 }

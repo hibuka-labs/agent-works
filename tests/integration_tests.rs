@@ -914,8 +914,7 @@ mod prompter_tests {
     #[test]
     fn test_lazy_prompter_custom_instruction_verbatim() {
         let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(TestSkill)];
-        let prompter =
-            LazySkillPrompter::new().instruction("Use `read_file` with the skill path.");
+        let prompter = LazySkillPrompter::new().instruction("Use `read_file` with the skill path.");
         let prompt = prompter.build_prompt(&skills, "detail_query");
         assert!(
             prompt.contains("Use `read_file` with the skill path."),

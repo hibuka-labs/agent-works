@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use agent_base::{AgentResult, RuntimeEvent};
 
+#[allow(clippy::type_complexity)]
 pub struct CliEventPrinter<W: Write = io::Stdout> {
     pub assistant_prefix_printed: bool,
     pub custom_handlers: Vec<Box<dyn Fn(&RuntimeEvent) -> Option<String> + Send>>,
@@ -117,7 +118,7 @@ impl<W: Write> CliEventPrinter<W> {
 
     pub fn finish(&mut self) {
         if self.assistant_prefix_printed {
-            let _ = writeln!(self.write, "");
+            let _ = writeln!(self.write);
             self.assistant_prefix_printed = false;
         }
     }
@@ -240,7 +241,7 @@ mod tests {
         let mut cep = CliEventPrinter::with_writer(Vec::new());
         cep.assistant_prefix_printed = true;
         cep.finish();
-        assert_eq!(cep.assistant_prefix_printed, false);
+        assert!(!cep.assistant_prefix_printed);
         assert_eq!(String::from_utf8(cep.write).unwrap(), "\n");
     }
 
@@ -261,5 +262,61 @@ mod tests {
         assert!(agent_result.is_ok());
         let output = String::from_utf8(cep.write).unwrap();
         assert_eq!(output, "Custom handler mock string");
+    }
+
+    #[test]
+    fn test_new_and_default() {
+        let default = CliEventPrinter::default();
+        assert!(!default.assistant_prefix_printed);
+        assert!(default.custom_handlers.is_empty());
+
+        let new = CliEventPrinter::new();
+        assert!(!new.assistant_prefix_printed);
+    }
+
+    #[test]
+    fn test_custom_handler_none_falls_through() {
+        let mut cep = CliEventPrinter::with_writer(Vec::new());
+        cep.custom_handlers = vec![Box::new(|_event| None)];
+        let event = RuntimeEvent::TextDelta {
+            session_id: SessionId::new(0),
+            text: "falls through".to_string(),
+            agent_id: None,
+            trace_id: None,
+        };
+        assert!(cep.handle(event).is_ok());
+        assert_eq!(
+            String::from_utf8(cep.write).unwrap(),
+            "Assistant > falls through"
+        );
+    }
+
+    #[test]
+    fn test_awaiting_approval_and_run_finished() {
+        let mut cep = CliEventPrinter::with_writer(Vec::new());
+        cep.assistant_prefix_printed = true;
+
+        let awaiting = RuntimeEvent::AwaitingApproval {
+            session_id: SessionId::new(0),
+            request: agent_base::ApprovalRequest {
+                title: "t".to_string(),
+                message: "m".to_string(),
+                action_key: None,
+                risk_level: agent_base::RiskLevel::Safe,
+                raw: None,
+            },
+            agent_id: None,
+            trace_id: None,
+        };
+        assert!(cep.handle(awaiting).is_ok());
+        assert!(!cep.assistant_prefix_printed);
+
+        // RunFinished with no prefix printed is a no-op.
+        let finished = RuntimeEvent::RunFinished {
+            session_id: SessionId::new(0),
+            agent_id: None,
+            trace_id: None,
+        };
+        assert!(cep.handle(finished).is_ok());
     }
 }

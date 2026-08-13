@@ -139,3 +139,67 @@ pub trait SkillPrompter: Send + Sync {
     /// detailed skill descriptions (used by `LazySkillPrompter`).
     fn build_prompt(&self, skills: &[Arc<dyn Skill>], detail_tool_name: &str) -> String;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestSkill;
+
+    impl Skill for TestSkill {
+        fn name(&self) -> &'static str {
+            "test_skill"
+        }
+
+        fn brief_description(&self) -> String {
+            "brief".to_string()
+        }
+
+        fn detailed_description(&self) -> String {
+            "detailed".to_string()
+        }
+
+        fn tools(&self) -> Vec<Arc<dyn Tool>> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn test_default_trait_methods() {
+        let skill = TestSkill;
+        let params: HashMap<String, String> = HashMap::new();
+        assert!(skill.plan_steps(&params).is_none());
+        assert!(skill.parameters().is_empty());
+        assert_eq!(skill.version(), "0.1.0");
+        assert!(skill.tags().is_empty());
+        assert_eq!(skill.author(), "");
+        assert_eq!(skill.category(), "");
+        assert!(skill.allowed_tools().is_empty());
+        assert!(skill.disallowed_tools().is_empty());
+        assert_eq!(skill.model_override(), None);
+        assert!(skill.is_user_invocable());
+        assert!(!skill.disable_model_invocation());
+        assert_eq!(skill.context_mode(), None);
+        assert!(skill.path_patterns().is_empty());
+        assert_eq!(skill.skill_dir(), None);
+        assert_eq!(skill.source_path(), None);
+        assert!(skill.read_reference("x").is_err());
+    }
+
+    #[test]
+    fn test_skill_param_types() {
+        assert_eq!(SkillParamType::String, SkillParamType::String);
+        assert_ne!(SkillParamType::Number, SkillParamType::HostRef);
+
+        let p = SkillParam {
+            name: "x".to_string(),
+            description: "d".to_string(),
+            param_type: SkillParamType::String,
+            required: true,
+            default: None,
+        };
+        assert_eq!(p.name, "x");
+        assert!(p.required);
+        assert_eq!(p.default, None);
+    }
+}

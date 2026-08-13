@@ -1073,4 +1073,198 @@ mod tests {
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("write_file"));
     }
+
+    // ── Named tool for register_tool / skill tests ──
+
+    struct NamedTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn description(&self) -> &'static str {
+            ""
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        async fn call(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &agent_base::ToolContext,
+        ) -> AgentResult<Vec<Content>> {
+            Ok(vec![Content::text("ok")])
+        }
+    }
+
+    fn runtime_tool_names(runtime: &AgentRuntime) -> Vec<String> {
+        tokio::task::block_in_place(|| {
+            let tools = runtime.tools_mut();
+            let guard = tools.blocking_read();
+            guard.metadatas().into_iter().map(|m| m.name).collect()
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_scalar_passthrough_methods() {
+        let client = make_client();
+        let runtime = AgentBuilder::new(client)
+            .enable_thought(true)
+            .reasoning(agent_base::ReasoningConfig::default())
+            .enable_thinking(false)
+            .thinking_budget(1000)
+            .tool_timeout(5000)
+            .max_tool_output_chars(4000)
+            .max_sessions(16)
+            .max_turns_per_session(20)
+            .execution_max_turns(10)
+            .max_message_tokens(8000)
+            .context_window(64_000)
+            .context_window_manager(agent_base::ContextWindowManager::new(64_000))
+            .response_format(agent_base::ResponseFormat::JsonObject)
+            .llm_retry(agent_base::RetryConfig::default())
+            .tool_error_retry_prompt("please retry")
+            .language(agent_base::Language::En)
+            .event_bus_capacity(256)
+            .build()
+            .unwrap();
+
+        assert!(runtime.client().capabilities().supports_streaming);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_register_tool_variants() {
+        let client = make_client();
+        let runtime = AgentBuilder::new(client)
+            .register_tool(NamedTool("tool_by_value"))
+            .register_tool_arc(Arc::new(NamedTool("tool_by_arc")))
+            .build()
+            .unwrap();
+
+        let names = runtime_tool_names(&runtime);
+        assert!(names.contains(&"tool_by_value".to_string()));
+        assert!(names.contains(&"tool_by_arc".to_string()));
+    }
+
+    #[cfg(feature = "skill")]
+    mod skill_tests {
+        use super::*;
+        use crate::skill::Skill;
+
+        struct TestSkill;
+
+        impl Skill for TestSkill {
+            fn name(&self) -> &'static str {
+                "test_skill"
+            }
+
+            fn brief_description(&self) -> String {
+                "a test skill".to_string()
+            }
+
+            fn detailed_description(&self) -> String {
+                "detailed test skill".to_string()
+            }
+
+            fn tools(&self) -> Vec<Arc<dyn Tool>> {
+                vec![]
+            }
+        }
+
+        struct ToolSkill;
+
+        impl Skill for ToolSkill {
+            fn name(&self) -> &'static str {
+                "tool_skill"
+            }
+
+            fn brief_description(&self) -> String {
+                "skill with a tool".to_string()
+            }
+
+            fn detailed_description(&self) -> String {
+                "skill that provides a tool".to_string()
+            }
+
+            fn tools(&self) -> Vec<Arc<dyn Tool>> {
+                vec![Arc::new(NamedTool("skill_provided_tool"))]
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_register_skill_builds_ok() {
+            let client = make_client();
+            let runtime = AgentBuilder::new(client)
+                .register_skill(TestSkill)
+                .build()
+                .unwrap();
+            // Prompt injection is applied during build; no tools provided.
+            assert!(runtime_tool_names(&runtime).is_empty());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_register_skill_with_tool_registers_tool() {
+            let client = make_client();
+            let runtime = AgentBuilder::new(client)
+                .register_skill(ToolSkill)
+                .build()
+                .unwrap();
+            assert!(runtime_tool_names(&runtime).contains(&"skill_provided_tool".to_string()));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_register_skill_tool_name_conflict() {
+            let client = make_client();
+            let result = AgentBuilder::new(client)
+                .register_tool(NamedTool("skill_provided_tool"))
+                .register_skill(ToolSkill)
+                .build();
+            let err = result.err().unwrap();
+            assert!(format!("{err}").contains("Tool name conflict"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_skill_detail_tool_factory_registers_tool() {
+            let client = make_client();
+            let factory: SkillDetailToolFactory = Arc::new(|_skills, name| {
+                assert_eq!(name, "get_skill_detail");
+                Arc::new(NamedTool("detail_tool"))
+            });
+            let runtime = AgentBuilder::new(client)
+                .register_skill(TestSkill)
+                .with_skill_detail_tool_factory(factory)
+                .build()
+                .unwrap();
+            assert!(runtime_tool_names(&runtime).contains(&"detail_tool".to_string()));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_list_skills_tool_factory_registers_tool() {
+            let client = make_client();
+            let factory: ListSkillsToolFactory =
+                Arc::new(|_registry| Arc::new(NamedTool("list_skills_tool")));
+            let runtime = AgentBuilder::new(client)
+                .register_skill(TestSkill)
+                .with_list_skills_tool_factory(factory)
+                .build()
+                .unwrap();
+            assert!(runtime_tool_names(&runtime).contains(&"list_skills_tool".to_string()));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_disable_skill_prompt_injection_builds() {
+            let client = make_client();
+            let runtime = AgentBuilder::new(client)
+                .register_skill(ToolSkill)
+                .disable_skill_prompt_injection()
+                .build()
+                .unwrap();
+            // Tool still registered; prompt injection skipped.
+            assert!(runtime_tool_names(&runtime).contains(&"skill_provided_tool".to_string()));
+        }
+    }
 }

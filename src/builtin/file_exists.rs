@@ -52,3 +52,66 @@ impl Tool for FileExistsTool {
         })])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_base::tool::content_text;
+
+    fn dummy_ctx() -> ToolContext {
+        ToolContext::for_test()
+    }
+
+    #[test]
+    fn test_name_and_schema() {
+        let tool = FileExistsTool {
+            workspace: PathBuf::from("/tmp"),
+        };
+        assert_eq!(tool.name(), "file_exists");
+        assert!(tool.description().contains("exists"));
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("path"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_call_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        let tool = FileExistsTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(&json!({"path": "a.txt"}), &dummy_ctx())
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("a.txt exists"));
+    }
+
+    #[tokio::test]
+    async fn test_call_not_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = FileExistsTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(&json!({"path": "missing.txt"}), &dummy_ctx())
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("missing.txt does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_call_missing_path() {
+        let tool = FileExistsTool {
+            workspace: PathBuf::from("/tmp"),
+        };
+        let err = tool.call(&json!({}), &dummy_ctx()).await.unwrap_err();
+        assert!(format!("{err}").contains("missing 'path'"));
+    }
+}

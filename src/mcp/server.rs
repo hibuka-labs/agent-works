@@ -543,6 +543,55 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use agent_base::{
+        AgentBuilder, AgentResult, ChatMessage, LlmCapabilities, ReasoningConfig, ResponseFormat,
+        StreamChunk, StreamClient,
+    };
+    use futures_core::Stream;
+
+    struct StubClient;
+
+    #[async_trait::async_trait]
+    impl StreamClient for StubClient {
+        async fn stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[Value],
+            _reasoning: Option<&ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(StreamChunk::Text("hello".to_string())),
+                Ok(StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                }),
+            ])))
+        }
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::default()
+        }
+    }
+
+    fn runtime() -> AgentRuntime {
+        AgentBuilder::new(Arc::new(StubClient)).build().unwrap()
+    }
+
+    fn server() -> McpServer {
+        McpServer::new(runtime(), McpServeConfig::default())
+    }
+
+    fn req(method: &str, params: Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(1.into())),
+            method: method.to_string(),
+            params: Some(params),
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -606,36 +655,118 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_initialize() {
-        let config = McpServeConfig::default();
-        // We can't easily construct a runtime without an LLM client, so test the handler
-        // logic indirectly via JSON structure verification
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(Value::Number(1.into())),
-            method: "initialize".to_string(),
-            params: Some(serde_json::json!({})),
-        };
+        let resp = server().handle_initialize(&req("initialize", serde_json::json!({})));
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "phi-agent");
+        assert!(!result["serverInfo"]["version"].as_str().unwrap().is_empty());
+        assert!(result["capabilities"]["tools"].is_object());
+    }
 
-        // Verify initialize response structure manually
-        let expected_result = serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "serverInfo": {
-                "name": &config.name,
-                "version": &config.version,
-            },
-            "capabilities": {
-                "tools": {},
-            },
-        });
-
-        assert_eq!(expected_result["protocolVersion"], "2024-11-05");
-        assert_eq!(expected_result["serverInfo"]["name"], "phi-agent");
+    #[tokio::test]
+    async fn test_handle_tools_list() {
+        let resp = server().handle_tools_list(&req("tools/list", serde_json::json!({})));
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "run");
         assert!(
-            !expected_result["serverInfo"]["version"]
-                .as_str()
+            tools[0]["inputSchema"]["required"]
+                .as_array()
                 .unwrap()
-                .is_empty()
+                .contains(&serde_json::json!("prompt"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_unknown_method() {
+        let resp = server()
+            .handle_request(&req("foo/bar", serde_json::json!({})), None)
+            .await
+            .unwrap();
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32601);
+        assert!(err.message.contains("Method not found"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_request_notifications_return_none() {
+        let server = server();
+        assert!(
+            server
+                .handle_request(&req("initialized", serde_json::json!({})), None)
+                .await
+                .is_none()
+        );
+        assert!(
+            server
+                .handle_request(
+                    &req("notifications/initialized", serde_json::json!({})),
+                    None
+                )
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_missing_arguments() {
+        let resp = server()
+            .handle_tools_call(&req("tools/call", serde_json::json!({"name": "run"})), None)
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("Missing arguments"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_unknown_tool() {
+        let resp = server()
+            .handle_tools_call(
+                &req(
+                    "tools/call",
+                    serde_json::json!({"name": "nope", "arguments": {"prompt": "x"}}),
+                ),
+                None,
+            )
+            .await;
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_missing_prompt() {
+        let resp = server()
+            .handle_tools_call(
+                &req(
+                    "tools/call",
+                    serde_json::json!({"name": "run", "arguments": {}}),
+                ),
+                None,
+            )
+            .await;
+        let err = resp.error.unwrap();
+        assert!(err.message.contains("Missing required parameter: prompt"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_success() {
+        let resp = server()
+            .handle_tools_call(
+                &req(
+                    "tools/call",
+                    serde_json::json!({"name": "run", "arguments": {"prompt": "hi"}}),
+                ),
+                None,
+            )
+            .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let result = resp.result.unwrap();
+        let content = result["content"][0]["text"].as_str().unwrap();
+        assert!(content.contains("hello"), "content: {content}");
     }
 
     // ── tools/call validation (Phase 4.1 — tool name check) ──

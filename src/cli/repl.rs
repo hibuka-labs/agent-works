@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 use agent_base::{AgentError, AgentResult, AgentRuntime, SessionId};
 
+#[allow(clippy::type_complexity)]
 pub struct CliRepl {
     runtime: AgentRuntime,
     session_id: Option<SessionId>,
@@ -66,10 +67,10 @@ impl CliRepl {
                     }
                     _ => {
                         let (prefix, _) = cmd.split_once(' ').unwrap_or((cmd, ""));
-                        if let Some(handler) = self.shell_commands.get(prefix) {
-                            if handler(cmd) {
-                                continue;
-                            }
+                        if let Some(handler) = self.shell_commands.get(prefix)
+                            && handler(cmd)
+                        {
+                            continue;
                         }
                         println!(">>> Unknown command: .{cmd}");
                         continue;

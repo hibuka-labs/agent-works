@@ -64,3 +64,66 @@ impl Tool for ListDirectoryTool {
         Ok(vec![Content::text(summary)])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_base::tool::content_text;
+
+    fn dummy_ctx() -> ToolContext {
+        ToolContext::for_test()
+    }
+
+    #[test]
+    fn test_name_and_schema() {
+        let tool = ListDirectoryTool {
+            workspace: PathBuf::from("/tmp"),
+        };
+        assert_eq!(tool.name(), "list_directory");
+        assert!(tool.description().contains("directory"));
+        assert_eq!(tool.schema()["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn test_call_lists_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "y").unwrap();
+        let tool = ListDirectoryTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(&json!({"path": "."}), &dummy_ctx())
+            .await
+            .unwrap();
+        let text = content_text(&out);
+        assert!(text.contains("a.txt"));
+        assert!(text.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_call_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = ListDirectoryTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let out = tool
+            .call(&json!({"path": "."}), &dummy_ctx())
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("is empty"));
+    }
+
+    #[tokio::test]
+    async fn test_call_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = ListDirectoryTool {
+            workspace: dir.path().to_path_buf(),
+        };
+        let err = tool
+            .call(&json!({"path": "nope"}), &dummy_ctx())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("failed to read dir"));
+    }
+}

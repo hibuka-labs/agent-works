@@ -99,3 +99,106 @@ impl SkillPrompter for FullDetailPrompter {
         prompt
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use agent_base::Tool;
+
+    struct TestSkill {
+        name: &'static str,
+        source: Option<PathBuf>,
+    }
+
+    impl TestSkill {
+        fn new(name: &'static str) -> Self {
+            Self { name, source: None }
+        }
+
+        fn with_source(mut self, path: &str) -> Self {
+            self.source = Some(PathBuf::from(path));
+            self
+        }
+    }
+
+    impl Skill for TestSkill {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn brief_description(&self) -> String {
+            format!("{} brief", self.name)
+        }
+
+        fn detailed_description(&self) -> String {
+            format!("{} detailed", self.name)
+        }
+
+        fn tools(&self) -> Vec<Arc<dyn Tool>> {
+            vec![]
+        }
+
+        fn source_path(&self) -> Option<&std::path::Path> {
+            self.source.as_deref()
+        }
+    }
+
+    fn skill(name: &'static str) -> Arc<dyn Skill> {
+        Arc::new(TestSkill::new(name))
+    }
+
+    #[test]
+    fn test_lazy_prompter_empty() {
+        let p = LazySkillPrompter::new();
+        assert_eq!(p.build_prompt(&[], "read_file"), "");
+    }
+
+    #[test]
+    fn test_lazy_prompter_builds_items() {
+        let p = LazySkillPrompter::new();
+        let skills: Vec<Arc<dyn Skill>> = vec![skill("deploy"), skill("commit")];
+        let out = p.build_prompt(&skills, "read_file");
+        assert!(out.contains("## Available Skills"));
+        assert!(out.contains("**deploy**"));
+        assert!(out.contains("**commit**"));
+        assert!(out.contains("read_file"));
+    }
+
+    #[test]
+    fn test_lazy_prompter_source_path_hint() {
+        let p = LazySkillPrompter::new();
+        let s: Arc<dyn Skill> = Arc::new(TestSkill::new("deploy").with_source("deploy/SKILL.md"));
+        let out = p.build_prompt(&[s], "read_file");
+        assert!(out.contains("deploy/SKILL.md"));
+    }
+
+    #[test]
+    fn test_lazy_prompter_builders() {
+        let p = LazySkillPrompter::new()
+            .title("## Custom")
+            .instruction("read custom")
+            .item_prefix("* ");
+        let out = p.build_prompt(&[skill("x")], "read_file");
+        assert!(out.contains("## Custom"));
+        assert!(out.contains("* **x**"));
+        assert!(out.contains("read custom"));
+    }
+
+    #[test]
+    fn test_full_detail_prompter_empty() {
+        let p = FullDetailPrompter;
+        assert_eq!(p.build_prompt(&[], "x"), "");
+    }
+
+    #[test]
+    fn test_full_detail_prompter_builds() {
+        let p = FullDetailPrompter;
+        let skills: Vec<Arc<dyn Skill>> = vec![skill("deploy")];
+        let out = p.build_prompt(&skills, "x");
+        assert!(out.contains("### deploy"));
+        assert!(out.contains("deploy brief"));
+        assert!(out.contains("deploy detailed"));
+    }
+}

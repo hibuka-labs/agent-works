@@ -18,6 +18,12 @@ pub struct McpHub {
     servers: Vec<ServerEntry>,
 }
 
+impl Default for McpHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpHub {
     pub fn new() -> Self {
         Self {
@@ -112,5 +118,124 @@ impl McpHub {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::McpTransport;
+    use agent_base::ToolRegistry;
+    use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn http_config(name: &str, url: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Http {
+                url: url.to_string(),
+            },
+            auto_reconnect: false,
+        }
+    }
+
+    #[test]
+    fn test_new_empty() {
+        let hub = McpHub::new();
+        assert!(hub.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_and_connect_all() {
+        let mut hub = McpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.add_server(http_config("b", "http://localhost:2"));
+        hub.connect_all().await.unwrap();
+
+        assert_eq!(hub.servers.len(), 2);
+        assert!(hub.servers[0].client.is_some());
+        assert!(hub.servers[1].client.is_some());
+        assert!(matches!(hub.servers[0].state, ConnectionState::Connected));
+    }
+
+    #[tokio::test]
+    async fn test_discover_all_and_register_all() {
+        let server = MockServer::start().await;
+        let mut hub = McpHub::new();
+        hub.add_server(http_config("brave", &format!("{}/mcp", server.uri())));
+        // Never connected — exercises the "not connected" warn branch.
+        hub.add_server(http_config("unconnected", "http://localhost:1"));
+        hub.connect_all().await.unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"tools": [{"name": "search", "description": "d", "inputSchema": {}}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let results = hub.discover_all().await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "brave");
+        assert_eq!(results[0].1.len(), 1);
+        assert_eq!(results[0].1[0].name, "search");
+
+        let mut registry = ToolRegistry::default();
+        hub.register_all(&mut registry);
+        assert!(registry.get("mcp.brave.search").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_all() {
+        let mut hub = McpHub::new();
+        hub.add_server(http_config("a", "http://localhost:1"));
+        hub.connect_all().await.unwrap();
+        hub.disconnect_all().await;
+
+        assert!(hub.servers[0].client.is_none());
+        assert!(matches!(
+            hub.servers[0].state,
+            ConnectionState::Disconnected
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let server = MockServer::start().await;
+        let mut hub = McpHub::new();
+        hub.add_server(http_config("ok", &format!("{}/mcp", server.uri())));
+        hub.add_server(http_config("noconn", "http://localhost:1"));
+        hub.connect_all().await.unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1, "result": {"tools": []}
+            })))
+            .mount(&server)
+            .await;
+
+        // Should not error even when one server is not connected / one responds.
+        hub.health_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_discover_all_with_connection_error() {
+        // A connected client whose list_tools fails (server returns error) should
+        // be marked Failed and skipped in results, without bubbling the error.
+        let server = MockServer::start().await;
+        let mut hub = McpHub::new();
+        hub.add_server(http_config("bad", &format!("{}/mcp", server.uri())));
+        hub.connect_all().await.unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let results = hub.discover_all().await.unwrap();
+        assert!(results.is_empty());
+        assert!(matches!(hub.servers[0].state, ConnectionState::Failed(_)));
     }
 }

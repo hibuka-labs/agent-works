@@ -17,6 +17,7 @@ struct StdioProcess {
     stdout: BufReader<ChildStdout>,
 }
 
+#[allow(clippy::large_enum_variant)] // Http carries reqwest::Client; Stdio carries a child process
 enum TransportInner {
     Http {
         url: String,
@@ -266,5 +267,232 @@ impl Tool for McpToolAdapter {
             .unwrap_or_else(|| result.to_string());
 
         Ok(vec![Content::text(content)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_base::tool::content_text;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn tool_info() -> McpToolInfo {
+        McpToolInfo {
+            name: "search".to_string(),
+            description: "search the web".to_string(),
+            input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        }
+    }
+
+    async fn http_client(server: &MockServer) -> McpClient {
+        McpClient::new(McpTransport::Http {
+            url: format!("{}/mcp", server.uri()),
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_new_http_transport() {
+        let server = MockServer::start().await;
+        let client = http_client(&server).await;
+        assert!(matches!(client.transport, TransportInner::Http { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_new_stdio_spawn_error() {
+        let err = McpClient::new(McpTransport::Stdio {
+            command: "definitely-not-a-real-command-xyz".to_string(),
+            args: vec![],
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(format!("{err}").contains("spawn MCP process"));
+    }
+
+    #[tokio::test]
+    async fn test_send_request_http_returns_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"tools": [{"name": "run"}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = http_client(&server).await;
+        let res = client.send_request("tools/list", json!({})).await.unwrap();
+        assert_eq!(res["tools"][0]["name"], "run");
+    }
+
+    #[tokio::test]
+    async fn test_send_request_http_error_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -32601, "message": "Method not found"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = http_client(&server).await;
+        let err = client.send_request("nope", json!({})).await.unwrap_err();
+        assert!(format!("{err}").contains("MCP error"));
+    }
+
+    #[tokio::test]
+    async fn test_send_request_http_network_error() {
+        // No mock mounted + pointing at an unbound port should fail at send().
+        let client = McpClient::new(McpTransport::Http {
+            url: "http://127.0.0.1:1/mcp".to_string(),
+        })
+        .await
+        .unwrap();
+        let err = client
+            .send_request("tools/list", json!({}))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("MCP request failed"));
+    }
+
+    #[tokio::test]
+    async fn test_send_request_stdio_returns_result() {
+        // A shell that reads one line and echoes a fixed JSON-RPC response.
+        let client = McpClient::new(McpTransport::Stdio {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                r#"read _; echo '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'"#.to_string(),
+            ],
+        })
+        .await
+        .unwrap();
+
+        let res = client.send_request("tools/list", json!({})).await.unwrap();
+        assert!(res["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_list_tools_parses_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {
+                    "tools": [
+                        {"name": "search", "description": "search the web",
+                         "inputSchema": {"type": "object"}},
+                        {"name": "run", "description": ""}
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = http_client(&server).await;
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "search");
+        assert_eq!(tools[0].description, "search the web");
+        // Missing inputSchema falls back to {"type": "object"}
+        assert_eq!(tools[1].input_schema, json!({"type": "object"}));
+    }
+
+    #[tokio::test]
+    async fn test_list_tools_invalid_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1, "result": {"not_tools": []}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = http_client(&server).await;
+        let err = client.list_tools().await.unwrap_err();
+        assert!(format!("{err}").contains("invalid tools/list response"));
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"content": [{"type": "text", "text": "done"}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = http_client(&server).await;
+        let result = client
+            .call_tool("search", &json!({"q": "rust"}))
+            .await
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "done");
+    }
+
+    #[tokio::test]
+    async fn test_adapter_new_and_metadata() {
+        let server = MockServer::start().await;
+        let client = Arc::new(http_client(&server).await);
+        let adapter = McpToolAdapter::new(tool_info(), client, "brave");
+
+        assert_eq!(adapter.name(), "mcp.brave.search");
+        assert_eq!(adapter.description(), "search the web");
+        assert_eq!(adapter.schema()["properties"]["q"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn test_adapter_call_returns_text_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"content": [{"type": "text", "text": "alpha"},
+                                       {"type": "text", "text": "beta"}]}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(http_client(&server).await);
+        let adapter = McpToolAdapter::new(tool_info(), client, "brave");
+        let out = adapter
+            .call(&json!({"q": "rust"}), &ToolContext::for_test())
+            .await
+            .unwrap();
+        // Text items are joined by newline.
+        assert_eq!(content_text(&out), "alpha\nbeta");
+    }
+
+    #[tokio::test]
+    async fn test_adapter_call_without_content_falls_back_to_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": {"plain": "no content field"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(http_client(&server).await);
+        let adapter = McpToolAdapter::new(tool_info(), client, "brave");
+        let out = adapter
+            .call(&json!({"q": "rust"}), &ToolContext::for_test())
+            .await
+            .unwrap();
+        assert!(content_text(&out).contains("no content field"));
     }
 }
