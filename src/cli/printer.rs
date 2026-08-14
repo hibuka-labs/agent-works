@@ -191,6 +191,7 @@ mod tests {
             summary: "tool call finished\nthis is a test\n".to_string(),
             agent_id: None,
             trace_id: None,
+            denied: false,
         };
         let agent_result = cep.handle(event);
         assert!(agent_result.is_ok());

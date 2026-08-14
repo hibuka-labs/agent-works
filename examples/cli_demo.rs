@@ -173,6 +173,7 @@ async fn main() -> AgentResult<()> {
         summary: "echo: hello".to_string(),
         agent_id: None,
         trace_id: None,
+        denied: false,
     })?;
     println!();
 
