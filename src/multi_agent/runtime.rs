@@ -633,10 +633,13 @@ async fn run_child_loop(
                     event = child_events.recv() => {
                         match event {
                             Ok(event) => {
-                                if matches!(event, RuntimeEvent::RunFinished { .. } | RuntimeEvent::RunCancelled { .. }) {
+                                if matches!(event,
+                                    RuntimeEvent::RunFinished { .. }
+                                    | RuntimeEvent::RunCancelled { .. }
+                                    | RuntimeEvent::AwaitingApproval { .. }) {
                                     continue;
                                 }
-                                let _ = tx.send(event.with_agent_id(bridge_path.clone()));
+                                let _ = tx.send(event.with_agent_id(bridge_path.as_str()));
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(
