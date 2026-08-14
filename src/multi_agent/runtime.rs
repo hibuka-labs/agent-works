@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_base::{
-    AgentBuilder, AgentResult, AgentRuntime, DenyAllApprovalHandler, Language, RunOutcome,
-    RuntimeEvent, SessionId, StreamClient, Tool,
+    AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
+    DenyAllApprovalHandler, Language, RunOutcome, RuntimeEvent, SessionId, StreamClient, Tool,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -126,6 +126,7 @@ impl MultiAgentRuntime {
         system_prompt: String,
         depth: i32,
         tool_count: usize,
+        full_permission: bool,
         parent_messages: Vec<agent_base::ChatMessage>,
     ) -> Result<String, String> {
         let path = AgentPath::root().join(name);
@@ -146,11 +147,14 @@ impl MultiAgentRuntime {
             .ok_or_else(|| "mailbox already exists".to_string())?;
 
         // 3. Build child AgentRuntime (roll back registry+mailbox on failure)
-        let child_runtime = self.build_child_runtime(system_prompt).await.map_err(|e| {
-            self.registry.lock().unwrap().close(&path);
-            self.mailbox.unregister(&path);
-            format!("failed to build child runtime: {}", e)
-        })?;
+        let child_runtime = self
+            .build_child_runtime(system_prompt, full_permission)
+            .await
+            .map_err(|e| {
+                self.registry.lock().unwrap().close(&path);
+                self.mailbox.unregister(&path);
+                format!("failed to build child runtime: {}", e)
+            })?;
 
         // 4. Create session for child and pre-fill with parent context
         let session_id = child_runtime.create_session().await;
@@ -208,20 +212,29 @@ impl MultiAgentRuntime {
     ///
     /// `fork_history`: "none" (default), "all", or a number N for last N turns.
     /// `parent_session_id`: the parent agent's session ID.
+    #[allow(clippy::too_many_arguments)] // spawn config is naturally positional
     pub async fn spawn_child_with_history(
         &self,
         name: &str,
         system_prompt: String,
         depth: i32,
         tool_count: usize,
+        full_permission: bool,
         fork_history: Option<String>,
         parent_session_id: &SessionId,
     ) -> Result<String, String> {
         let parent_messages = self
             .resolve_fork_history(fork_history, parent_session_id)
             .await;
-        self.spawn_child(name, system_prompt, depth, tool_count, parent_messages)
-            .await
+        self.spawn_child(
+            name,
+            system_prompt,
+            depth,
+            tool_count,
+            full_permission,
+            parent_messages,
+        )
+        .await
     }
 
     /// Resolve fork_history parameter into a list of parent ChatMessages.
@@ -498,10 +511,24 @@ impl MultiAgentRuntime {
         AgentPath::parse(s).ok_or_else(|| format!("invalid agent path: '{}'", s))
     }
 
-    async fn build_child_runtime(&self, system_prompt: String) -> AgentResult<AgentRuntime> {
+    async fn build_child_runtime(
+        &self,
+        system_prompt: String,
+        full_permission: bool,
+    ) -> AgentResult<AgentRuntime> {
+        let (prompt, approval): (String, Arc<dyn ApprovalHandler>) = if full_permission {
+            (system_prompt, Arc::new(AllowAllApprovalHandler))
+        } else {
+            let note = "If a tool call is rejected for lack of permission, explain in your final answer that you lacked permission for that action.";
+            (
+                format!("{}\n\n{}", system_prompt, note),
+                Arc::new(DenyAllApprovalHandler),
+            )
+        };
+
         let mut builder = AgentBuilder::new(self.client.clone())
-            .system_prompt(system_prompt)
-            .approval_handler(Arc::new(DenyAllApprovalHandler))
+            .system_prompt(prompt)
+            .approval_handler(approval)
             .language(self.language.clone());
 
         // Register business tools (NOT multi-agent tools)
@@ -672,12 +699,12 @@ async fn run_child_loop(
                         ).await;
 
                         match result {
-                            Ok((_events, outcome)) => {
-                                let summary = summarize_outcome(&outcome);
+                            Ok((events, outcome)) => {
+                                let result_text = build_child_result(&outcome, &events);
                                 mailbox.post_result(MailboxResult {
                                     agent_path: agent_path.clone(),
                                     status: MailboxStatus::Ok,
-                                    result: Some(summary),
+                                    result: Some(result_text),
                                 });
                             }
                             Err(e) => {
@@ -722,6 +749,45 @@ fn summarize_outcome(outcome: &RunOutcome) -> String {
     }
 }
 
+/// Extract the child agent's own assistant text from its collected events.
+///
+/// Excludes sub-sub-agent text (events tagged with an `agent_id`), so the parent
+/// only sees this child's direct answer.
+fn extract_assistant_text(events: &[RuntimeEvent]) -> String {
+    let mut text = String::new();
+    for event in events {
+        if let RuntimeEvent::TextDelta {
+            text: delta,
+            agent_id,
+            ..
+        } = event
+            && agent_id.is_none()
+        {
+            text.push_str(delta);
+        }
+    }
+    text
+}
+
+/// Build the result string posted back to the parent via the mailbox.
+///
+/// For a completed task this returns the child's actual final answer (so the
+/// parent learns what the child concluded — e.g. "no permission" reports) rather
+/// than a coarse "task completed". Other outcomes keep the coarse summary.
+fn build_child_result(outcome: &RunOutcome, events: &[RuntimeEvent]) -> String {
+    match outcome {
+        RunOutcome::Completed => {
+            let text = extract_assistant_text(events);
+            if text.trim().is_empty() {
+                summarize_outcome(outcome)
+            } else {
+                text
+            }
+        }
+        _ => summarize_outcome(outcome),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -760,6 +826,51 @@ mod tests {
     fn test_summarize_cancelled() {
         let s = summarize_outcome(&RunOutcome::Cancelled);
         assert_eq!(s, "cancelled");
+    }
+
+    // ── build_child_result / extract_assistant_text ──
+
+    fn text_delta(text: &str, agent_id: Option<&str>) -> agent_base::RuntimeEvent {
+        agent_base::RuntimeEvent::TextDelta {
+            session_id: agent_base::SessionId::new(1),
+            text: text.to_string(),
+            agent_id: agent_id.map(|s| s.to_string()),
+            trace_id: None,
+        }
+    }
+
+    #[test]
+    fn test_build_child_result_completed_returns_final_text() {
+        let events = vec![text_delta("I couldn't ", None), text_delta("delete.", None)];
+        assert_eq!(
+            build_child_result(&RunOutcome::Completed, &events),
+            "I couldn't delete."
+        );
+    }
+
+    #[test]
+    fn test_build_child_result_completed_falls_back_when_no_text() {
+        assert_eq!(
+            build_child_result(&RunOutcome::Completed, &[]),
+            "task completed"
+        );
+    }
+
+    #[test]
+    fn test_extract_assistant_text_ignores_subagent_text() {
+        let events = vec![
+            text_delta("root answer", None),
+            text_delta("grandchild", Some("root/child/grandchild")),
+        ];
+        assert_eq!(extract_assistant_text(&events), "root answer");
+    }
+
+    #[test]
+    fn test_build_child_result_failed_keeps_error() {
+        let outcome = RunOutcome::Failed {
+            error: "boom".to_string(),
+        };
+        assert_eq!(build_child_result(&outcome, &[]), "task failed: boom");
     }
 
     // ── build_child_input ──
@@ -1252,7 +1363,14 @@ mod tests {
         let ma = make_ma_runtime();
 
         let path = ma
-            .spawn_child("worker", "child system prompt".to_string(), 0, 0, vec![])
+            .spawn_child(
+                "worker",
+                "child system prompt".to_string(),
+                0,
+                0,
+                false,
+                vec![],
+            )
             .await
             .expect("spawn child");
         assert_eq!(path, "root/worker");
@@ -1275,7 +1393,7 @@ mod tests {
 
         let result = ma.wait_for_result(Some("root/worker"), 2000).await;
         assert_eq!(result.status, "ok");
-        assert_eq!(result.result.as_deref(), Some("task completed"));
+        assert_eq!(result.result.as_deref(), Some("child ok"));
 
         let close = ma.close_agent("root/worker").unwrap();
         assert!(close.closed);
@@ -1297,6 +1415,7 @@ mod tests {
                 "prompt".to_string(),
                 0,
                 0,
+                false,
                 None,
                 &agent_base::SessionId::new(0),
             )

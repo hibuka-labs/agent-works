@@ -1010,6 +1010,7 @@ mod multi_agent_tests {
                 "You are a test worker.".to_string(),
                 1,
                 0,
+                false,
                 vec![],
             )
             .await
@@ -1068,17 +1069,17 @@ mod multi_agent_tests {
 
         // Should be able to spawn up to max
         runtime
-            .spawn_child("worker-1", "prompt".to_string(), 1, 0, vec![])
+            .spawn_child("worker-1", "prompt".to_string(), 1, 0, false, vec![])
             .await
             .expect("first spawn");
         runtime
-            .spawn_child("worker-2", "prompt".to_string(), 1, 0, vec![])
+            .spawn_child("worker-2", "prompt".to_string(), 1, 0, false, vec![])
             .await
             .expect("second spawn");
 
         // Third spawn should fail
         let err = runtime
-            .spawn_child("worker-3", "prompt".to_string(), 1, 0, vec![])
+            .spawn_child("worker-3", "prompt".to_string(), 1, 0, false, vec![])
             .await;
         assert!(err.is_err(), "third spawn should fail: {:?}", err);
         let msg = err.unwrap_err();
@@ -1112,13 +1113,13 @@ mod multi_agent_tests {
 
         // depth=1: allowed
         runtime
-            .spawn_child("level1", "prompt".to_string(), 1, 0, vec![])
+            .spawn_child("level1", "prompt".to_string(), 1, 0, false, vec![])
             .await
             .expect("depth 1 should be allowed");
 
         // depth=2: should fail
         let err = runtime
-            .spawn_child("level2", "prompt".to_string(), 2, 0, vec![])
+            .spawn_child("level2", "prompt".to_string(), 2, 0, false, vec![])
             .await;
         assert!(err.is_err(), "depth 2 should fail: {:?}", err);
         let msg = err.unwrap_err();
