@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, DenyAllApprovalHandler, Language, RunOutcome,
-    RuntimeEvent, SessionId, StreamClient, Tool, UserEvent,
+    RuntimeEvent, SessionId, StreamClient, Tool,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -620,7 +620,7 @@ async fn run_child_loop(
 ) {
     let mut task_rx = child_mailbox.task_rx;
 
-    // Spawn event bridging: forward child events to parent as SubAgentEvent
+    // Spawn event bridging: forward child events to parent, tagging agent_id
     if let Some(tx) = event_tx {
         let mut child_events = child_runtime.subscribe_runtime_events();
         let bridge_path = agent_path.to_string();
@@ -636,15 +636,7 @@ async fn run_child_loop(
                                 if matches!(event, RuntimeEvent::RunFinished { .. } | RuntimeEvent::RunCancelled { .. }) {
                                     continue;
                                 }
-                                let _ = tx.send(RuntimeEvent::UserEvent {
-                                    session_id: SessionId::new(0),
-                                    event: UserEvent::SubAgentEvent {
-                                        subagent: bridge_path.clone(),
-                                        event: Box::new(event),
-                                    },
-                                    agent_id: None,
-                                    trace_id: None,
-                                });
+                                let _ = tx.send(event.with_agent_id(bridge_path.clone()));
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                                 tracing::warn!(
