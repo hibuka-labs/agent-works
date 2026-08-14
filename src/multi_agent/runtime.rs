@@ -1650,4 +1650,135 @@ mod tests {
         let child_policy = child.tool_policy().expect("child should carry a policy");
         assert!(Arc::ptr_eq(&parent_policy, child_policy));
     }
+
+    // ── end-to-end: denied_tools flows child → parent ──
+
+    struct NoopReadFileTool;
+
+    #[async_trait::async_trait]
+    impl Tool for NoopReadFileTool {
+        fn name(&self) -> &'static str {
+            "read_file"
+        }
+
+        fn description(&self) -> &'static str {
+            "Read a file's contents"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } }
+            })
+        }
+
+        async fn call(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &agent_base::ToolContext,
+        ) -> agent_base::AgentResult<Vec<agent_base::Content>> {
+            Ok(vec![agent_base::Content::text("contents")])
+        }
+    }
+
+    /// Scripted client: the first turn requests the `read_file` tool (which the
+    /// child is denied); any later turn emits a plain text answer.
+    struct DenialScriptedClient {
+        turn: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl agent_base::StreamClient for DenialScriptedClient {
+        async fn stream(
+            &self,
+            _messages: &[agent_base::ChatMessage],
+            _tools: &[serde_json::Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&agent_base::ResponseFormat>,
+        ) -> agent_base::AgentResult<
+            std::pin::Pin<
+                Box<
+                    dyn futures_core::Stream<
+                            Item = agent_base::AgentResult<agent_base::StreamChunk>,
+                        > + Send,
+                >,
+            >,
+        > {
+            let n = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let chunks: Vec<agent_base::AgentResult<agent_base::StreamChunk>> = if n == 0 {
+                vec![
+                    Ok(agent_base::StreamChunk::ToolCall(serde_json::json!({
+                        "delta": {
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"/etc/passwd\"}"
+                                }
+                            }]
+                        }
+                    }))),
+                    Ok(agent_base::StreamChunk::Stop {
+                        finish_reason: Some("tool_calls".to_string()),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(agent_base::StreamChunk::Text(
+                        "I lack permission.".to_string(),
+                    )),
+                    Ok(agent_base::StreamChunk::Stop {
+                        finish_reason: Some("stop".to_string()),
+                    }),
+                ]
+            };
+            Ok(Box::pin(futures_util::stream::iter(chunks)))
+        }
+
+        fn capabilities(&self) -> agent_base::LlmCapabilities {
+            agent_base::LlmCapabilities::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_child_denied_tool_reaches_parent_via_wait() {
+        // `None` mode + no parent policy → child carries DenyAllToolPolicy, so
+        // every tool it attempts is denied. Assert the denied tool name flows
+        // end-to-end: collect_denied_tools → mailbox → wait_for_result.
+        let config = MultiAgentConfig {
+            child_permission_mode: ChildPermissionMode::None,
+            ..MultiAgentConfig::enabled()
+        };
+        let ma = Arc::new(MultiAgentRuntime::new(
+            config,
+            Arc::new(DenialScriptedClient {
+                turn: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            vec![Arc::new(NoopReadFileTool) as Arc<dyn Tool>],
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+            None,
+        ));
+
+        let path = ma
+            .spawn_child(
+                "worker",
+                "child system prompt".to_string(),
+                0,
+                1,
+                false,
+                vec![],
+            )
+            .await
+            .expect("spawn child");
+        assert_eq!(path, "root/worker");
+
+        ma.send_task("root/worker", "read the file".to_string(), false)
+            .unwrap();
+
+        let result = ma.wait_for_result(Some("root/worker"), 3000).await;
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.denied_tools, vec!["read_file".to_string()]);
+    }
 }
