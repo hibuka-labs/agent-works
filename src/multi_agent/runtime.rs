@@ -208,6 +208,7 @@ impl MultiAgentRuntime {
                 agent_path,
                 status: MailboxStatus::Closed,
                 result: None,
+                denied_tools: vec![],
             });
         });
 
@@ -363,6 +364,7 @@ impl MultiAgentRuntime {
                         result: Some(format!("invalid agent path: {}", s)),
                         agent_path: None,
                         has_more: false,
+                        denied_tools: vec![],
                     };
                 }
             },
@@ -391,6 +393,7 @@ impl MultiAgentRuntime {
                     result: result_text,
                     agent_path: Some(r.agent_path.to_string()),
                     has_more,
+                    denied_tools: r.denied_tools,
                 };
             }
 
@@ -402,6 +405,7 @@ impl MultiAgentRuntime {
                     result: None,
                     agent_path: None,
                     has_more: false,
+                    denied_tools: vec![],
                 };
             }
 
@@ -417,6 +421,7 @@ impl MultiAgentRuntime {
                         result: None,
                         agent_path: None,
                         has_more: false,
+                        denied_tools: vec![],
                     };
                 }
             }
@@ -643,6 +648,8 @@ pub struct WaitResult {
     pub result: Option<String>,
     pub agent_path: Option<String>,
     pub has_more: bool,
+    /// Tools the child attempted but was denied permission to call.
+    pub denied_tools: Vec<String>,
 }
 
 /// Result from `close_agent()`.
@@ -738,10 +745,12 @@ async fn run_child_loop(
                         match result {
                             Ok((events, outcome)) => {
                                 let result_text = build_child_result(&outcome, &events);
+                                let denied_tools = collect_denied_tools(&events);
                                 mailbox.post_result(MailboxResult {
                                     agent_path: agent_path.clone(),
                                     status: MailboxStatus::Ok,
                                     result: Some(result_text),
+                                    denied_tools,
                                 });
                             }
                             Err(e) => {
@@ -749,6 +758,7 @@ async fn run_child_loop(
                                     agent_path: agent_path.clone(),
                                     status: MailboxStatus::Error,
                                     result: Some(e.to_string()),
+                                    denied_tools: vec![],
                                 });
                             }
                         }
@@ -804,6 +814,26 @@ fn extract_assistant_text(events: &[RuntimeEvent]) -> String {
         }
     }
     text
+}
+
+/// Collect the names of tools the child attempted but was denied permission to
+/// call, from a run's collected events.
+///
+/// `run_turn_collect` returns the child's own events (`agent_id == None`), so this
+/// sees the child's denials, not grandchild denials — exactly what the parent
+/// needs to report back.
+fn collect_denied_tools(events: &[RuntimeEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            RuntimeEvent::ToolCallFinished {
+                tool_name,
+                denied: true,
+                ..
+            } => Some(tool_name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Build the result string posted back to the parent via the mailbox.
@@ -908,6 +938,41 @@ mod tests {
             error: "boom".to_string(),
         };
         assert_eq!(build_child_result(&outcome, &[]), "task failed: boom");
+    }
+
+    // ── collect_denied_tools ──
+
+    fn tool_finished(tool_name: &str, denied: bool) -> agent_base::RuntimeEvent {
+        agent_base::RuntimeEvent::ToolCallFinished {
+            session_id: agent_base::SessionId::new(1),
+            tool_name: tool_name.to_string(),
+            summary: "summary".to_string(),
+            agent_id: None,
+            trace_id: None,
+            denied,
+        }
+    }
+
+    #[test]
+    fn test_collect_denied_tools_filters_denied_only() {
+        let events = vec![
+            tool_finished("read_file", false),
+            tool_finished("delete_file", true),
+            tool_finished("shell", true),
+        ];
+        assert_eq!(
+            collect_denied_tools(&events),
+            vec!["delete_file".to_string(), "shell".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_collect_denied_tools_empty_when_no_denials() {
+        let events = vec![
+            tool_finished("read_file", false),
+            text_delta("all good", None),
+        ];
+        assert!(collect_denied_tools(&events).is_empty());
     }
 
     // ── build_child_input ──

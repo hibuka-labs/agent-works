@@ -63,6 +63,8 @@ pub struct MailboxResult {
     pub status: MailboxStatus,
     /// The result text (if any).
     pub result: Option<String>,
+    /// Tools the child attempted to call but were denied (permission wall).
+    pub denied_tools: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +373,7 @@ mod tests {
             agent_path: path.clone(),
             status: MailboxStatus::Ok,
             result: Some("done!".into()),
+            denied_tools: vec![],
         });
 
         assert!(hub.has_results(&path));
@@ -398,11 +401,13 @@ mod tests {
             agent_path: a.clone(),
             status: MailboxStatus::Ok,
             result: Some("first".into()),
+            denied_tools: vec![],
         });
         hub.post_result(MailboxResult {
             agent_path: b.clone(),
             status: MailboxStatus::Error,
             result: Some("second".into()),
+            denied_tools: vec![],
         });
 
         // HashMap iteration order is non-deterministic, so just check we get both
@@ -428,6 +433,7 @@ mod tests {
             agent_path: path.clone(),
             status: MailboxStatus::Ok,
             result: None,
+            denied_tools: vec![],
         });
 
         assert!(seq.has_changed().unwrap());
@@ -472,6 +478,7 @@ mod tests {
             agent_path: a.clone(),
             status: MailboxStatus::Ok,
             result: None,
+            denied_tools: vec![],
         });
         assert_eq!(hub.total_pending_results(), 1);
 
@@ -479,6 +486,7 @@ mod tests {
             agent_path: a.clone(),
             status: MailboxStatus::Ok,
             result: None,
+            denied_tools: vec![],
         });
         assert_eq!(hub.total_pending_results(), 2);
 
@@ -502,6 +510,7 @@ mod tests {
                 agent_path: path_clone,
                 status: MailboxStatus::Ok,
                 result: Some("async result".into()),
+                denied_tools: vec![],
             });
         });
 
