@@ -819,9 +819,9 @@ fn extract_assistant_text(events: &[RuntimeEvent]) -> String {
 /// Collect the names of tools the child attempted but was denied permission to
 /// call, from a run's collected events.
 ///
-/// `run_turn_collect` returns the child's own events (`agent_id == None`), so this
-/// sees the child's denials, not grandchild denials — exactly what the parent
-/// needs to report back.
+/// Filters to the child's own events (`agent_id == None`) so grandchild denials
+/// — if children ever gain multi-agent tools — are not mis-attributed to the
+/// child. Only the child's direct denials matter to the parent.
 fn collect_denied_tools(events: &[RuntimeEvent]) -> Vec<String> {
     events
         .iter()
@@ -829,6 +829,7 @@ fn collect_denied_tools(events: &[RuntimeEvent]) -> Vec<String> {
             RuntimeEvent::ToolCallFinished {
                 tool_name,
                 denied: true,
+                agent_id: None,
                 ..
             } => Some(tool_name.clone()),
             _ => None,
@@ -973,6 +974,27 @@ mod tests {
             text_delta("all good", None),
         ];
         assert!(collect_denied_tools(&events).is_empty());
+    }
+
+    #[test]
+    fn test_collect_denied_tools_excludes_grandchild_denials() {
+        // A grandchild's denial carries an agent_id and must not be attributed to
+        // the child.
+        let events = vec![
+            agent_base::RuntimeEvent::ToolCallFinished {
+                session_id: agent_base::SessionId::new(1),
+                tool_name: "grandchild_tool".to_string(),
+                summary: "summary".to_string(),
+                agent_id: Some("root/child/grandchild".to_string()),
+                trace_id: None,
+                denied: true,
+            },
+            tool_finished("child_tool", true),
+        ];
+        assert_eq!(
+            collect_denied_tools(&events),
+            vec!["child_tool".to_string()]
+        );
     }
 
     // ── build_child_input ──
