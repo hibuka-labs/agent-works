@@ -6,7 +6,7 @@
 
 **Batteries-included Agent toolbox built on [agent-base](https://github.com/hibuka-labs/agent-base).**
 
-`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: MCP multi-server management, Skills with progressive disclosure, a Focus module for structured LLM extraction, multi-agent orchestration with fork_history, built-in file tools, a CLI REPL loop — all behind feature flags. Pick what you need.
+`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: MCP multi-server management, Skills with progressive disclosure, a Focus module for structured LLM extraction, multi-agent orchestration with fork_history, and a CLI REPL loop — all behind feature flags. Pick what you need.
 
 ## Relationship with agent-base
 
@@ -17,7 +17,7 @@ agent-works        Batteries-included toolbox (wraps agent-base + enhancements)
 ```
 
 - **Use `agent-base` alone** when you only need the runtime (LLM + tools + middleware).
-- **Use `agent-works`** when you want MCP, Skills, Focus, multi-agent, built-in tools, CLI — and still get everything from agent-base through re-exports.
+- **Use `agent-works`** when you want MCP, Skills, Focus, multi-agent, and CLI — and still get everything from agent-base through re-exports.
 - Switching from `agent-base` to `agent-works` is a one-line import change.
 
 ## Installation
@@ -42,7 +42,6 @@ agent-works = { version = "0.1.7", features = ["mcp", "skill"] }
 | `prompt_skill` | `PromptSkill` — skill definitions from prompt files | `serde_yaml` |
 | `yaml_skill` | `YamlSkill` — skill definitions from YAML files | `serde_yaml` |
 | `hot-reload` | Hot-reload skill definitions on file change | `notify`, `prompt_skill` |
-| `builtin-tools` | `ReadFileTool`, `WriteFileTool`, `ListDirectoryTool`, `FileExistsTool`, `SearchReplaceTool` | `walkdir` |
 | `cli` | `CliRepl` (generic REPL loop) + `CliEventPrinter` (terminal event output) | — |
 | `full` | All of the above | — |
 
@@ -203,18 +202,6 @@ let mut tools = runtime.tools_mut();
 hub.register_all(&mut tools);
 ```
 
-### Built-in File Tools
-
-```rust
-use agent_works::builtin::{ReadFileTool, WriteFileTool};
-use std::path::PathBuf;
-
-let runtime = AgentBuilder::new(llm)
-    .register_tool(ReadFileTool { workspace: PathBuf::from(".") })
-    .register_tool(WriteFileTool { workspace: PathBuf::from(".") })
-    .build()?;
-```
-
 ### CLI REPL
 
 ```rust
@@ -261,9 +248,6 @@ cargo run --example skill_demo --features skill
 # MCP multi-server connection
 cargo run --example mcp_demo --features mcp
 
-# Built-in file tools
-cargo run --example builtin_demo --features builtin-tools
-
 # CLI REPL + event printer
 cargo run --example cli_demo --features cli
 ```
@@ -279,7 +263,6 @@ src/
 ├── skill/              # Skill trait + prompter strategies + detail tool
 ├── focus/              # Focus — structured LLM extraction
 ├── multi_agent/        # MultiAgentRuntime + fork_history support
-├── builtin/            # ReadFile / WriteFile / ListDirectory / FileExists / SearchReplace
 └── cli/                # CliRepl + CliEventPrinter<W>
 ```
 
