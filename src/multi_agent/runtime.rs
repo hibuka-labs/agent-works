@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex};
 
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
-    DenyAllApprovalHandler, Language, RunOutcome, RuntimeEvent, SessionId, StreamClient, Tool,
+    DenyAllApprovalHandler, DenyAllToolPolicy, Language, RunOutcome, RuntimeEvent, SessionId,
+    StreamClient, Tool, ToolPolicy,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::config::MultiAgentConfig;
+use super::config::{ChildPermissionMode, MultiAgentConfig};
 use super::mailbox::{ChildMailbox, MailboxHub, MailboxResult, MailboxStatus, MailboxTask};
 use super::path::AgentPath;
 use super::registry::{AgentRegistry, AgentStatus};
@@ -59,6 +60,12 @@ pub struct MultiAgentRuntime {
     /// Language preference.
     language: Language,
 
+    /// Permission mode for spawned child agents (resolved per spawn).
+    child_permission_mode: ChildPermissionMode,
+
+    /// Parent's tool policy, inherited by "no permission" children.
+    tool_policy: Option<Arc<dyn ToolPolicy>>,
+
     /// Parent session manager — for fork_history (child context inheritance).
     session_manager: Mutex<Option<Arc<agent_base::engine::SessionManager>>>,
 }
@@ -74,7 +81,9 @@ impl MultiAgentRuntime {
         root_cancel: CancellationToken,
         error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
         language: Language,
+        tool_policy: Option<Arc<dyn ToolPolicy>>,
     ) -> Self {
+        let child_permission_mode = config.child_permission_mode;
         Self {
             registry: Mutex::new(AgentRegistry::new(config)),
             mailbox: Arc::new(MailboxHub::new()),
@@ -86,6 +95,8 @@ impl MultiAgentRuntime {
             child_cancels: Mutex::new(HashMap::new()),
             error_recovery,
             language,
+            child_permission_mode,
+            tool_policy,
             session_manager: Mutex::new(None),
         }
     }
@@ -148,7 +159,7 @@ impl MultiAgentRuntime {
 
         // 3. Build child AgentRuntime (roll back registry+mailbox on failure)
         let child_runtime = self
-            .build_child_runtime(system_prompt, full_permission)
+            .build_child_runtime(system_prompt, self.effective_permission(full_permission))
             .await
             .map_err(|e| {
                 self.registry.lock().unwrap().close(&path);
@@ -516,12 +527,23 @@ impl MultiAgentRuntime {
         system_prompt: String,
         full_permission: bool,
     ) -> AgentResult<AgentRuntime> {
-        let (prompt, approval): (String, Arc<dyn ApprovalHandler>) = if full_permission {
-            (system_prompt, Arc::new(AllowAllApprovalHandler))
+        let (prompt, policy, approval): (
+            String,
+            Option<Arc<dyn ToolPolicy>>,
+            Arc<dyn ApprovalHandler>,
+        ) = if full_permission {
+            // Full: no tool policy → every tool auto-approves (= current behaviour).
+            (system_prompt, None, Arc::new(AllowAllApprovalHandler))
         } else {
+            // None: policy = parent's (if any) or DenyAllToolPolicy fallback.
             let note = "If a tool call is rejected for lack of permission, explain in your final answer that you lacked permission for that action.";
+            let policy: Arc<dyn ToolPolicy> = match &self.tool_policy {
+                Some(p) => p.clone(),
+                None => Arc::new(DenyAllToolPolicy),
+            };
             (
                 format!("{}\n\n{}", system_prompt, note),
+                Some(policy),
                 Arc::new(DenyAllApprovalHandler),
             )
         };
@@ -530,6 +552,10 @@ impl MultiAgentRuntime {
             .system_prompt(prompt)
             .approval_handler(approval)
             .language(self.language.clone());
+
+        if let Some(p) = policy {
+            builder = builder.tool_policy(p);
+        }
 
         // Register business tools (NOT multi-agent tools)
         for tool in &self.business_tools {
@@ -541,6 +567,17 @@ impl MultiAgentRuntime {
         }
 
         builder.build()
+    }
+
+    /// Resolve the effective full-permission flag for a spawn, applying the
+    /// configured [`ChildPermissionMode`]. `Full`/`None` override the LLM-supplied
+    /// flag; `PerSpawn` lets the LLM decide.
+    fn effective_permission(&self, full_permission: bool) -> bool {
+        match self.child_permission_mode {
+            ChildPermissionMode::Full => true,
+            ChildPermissionMode::None => false,
+            ChildPermissionMode::PerSpawn => full_permission,
+        }
     }
 
     /// Pre-fill a child session with parent conversation context (fork_history).
@@ -992,6 +1029,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         ));
         ma_runtime.set_session_manager(session_manager);
 
@@ -1147,6 +1185,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         );
         // session_manager is NOT set
 
@@ -1203,6 +1242,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         );
 
         ma_runtime
@@ -1254,6 +1294,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         );
 
         ma_runtime
@@ -1288,6 +1329,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         );
 
         ma_runtime
@@ -1355,6 +1397,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
         ))
     }
 
@@ -1449,5 +1492,75 @@ mod tests {
 
         // cancel_all is a no-op when no children are running.
         ma.cancel_all();
+    }
+
+    // ── child permission mode ──
+
+    fn make_runtime_full(
+        mode: ChildPermissionMode,
+        policy: Option<Arc<dyn ToolPolicy>>,
+    ) -> Arc<MultiAgentRuntime> {
+        let config = MultiAgentConfig {
+            child_permission_mode: mode,
+            ..MultiAgentConfig::enabled()
+        };
+        Arc::new(MultiAgentRuntime::new(
+            config,
+            Arc::new(StreamingStub),
+            vec![],
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+            policy,
+        ))
+    }
+
+    #[test]
+    fn effective_permission_respects_mode() {
+        let full = make_runtime_full(ChildPermissionMode::Full, None);
+        assert!(full.effective_permission(false));
+        assert!(full.effective_permission(true));
+
+        let none = make_runtime_full(ChildPermissionMode::None, None);
+        assert!(!none.effective_permission(false));
+        assert!(!none.effective_permission(true));
+
+        let per_spawn = make_runtime_full(ChildPermissionMode::PerSpawn, None);
+        assert!(per_spawn.effective_permission(true));
+        assert!(!per_spawn.effective_permission(false));
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_full_carries_no_policy() {
+        let ma = make_ma_runtime();
+        let child = ma
+            .build_child_runtime("prompt".to_string(), true)
+            .await
+            .expect("build child");
+        assert!(child.tool_policy().is_none());
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_none_falls_back_to_deny_all() {
+        // Parent has no tool policy → child falls back to DenyAllToolPolicy.
+        let ma = make_ma_runtime();
+        let child = ma
+            .build_child_runtime("prompt".to_string(), false)
+            .await
+            .expect("build child");
+        assert!(child.tool_policy().is_some());
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_none_inherits_parent_policy() {
+        // Parent has a tool policy → child inherits the same allocation.
+        let parent_policy: Arc<dyn ToolPolicy> = Arc::new(DenyAllToolPolicy);
+        let ma = make_runtime_full(ChildPermissionMode::None, Some(parent_policy.clone()));
+        let child = ma
+            .build_child_runtime("prompt".to_string(), false)
+            .await
+            .expect("build child");
+        let child_policy = child.tool_policy().expect("child should carry a policy");
+        assert!(Arc::ptr_eq(&parent_policy, child_policy));
     }
 }

@@ -898,7 +898,9 @@ mod agent_handle_tests {
 
 mod multi_agent_tests {
     use super::*;
-    use agent_works::multi_agent::{AgentPath, MultiAgentConfig, MultiAgentRuntime};
+    use agent_works::multi_agent::{
+        AgentPath, ChildPermissionMode, MultiAgentConfig, MultiAgentRuntime,
+    };
 
     /// Test that AgentPath parsing and navigation work correctly.
     #[test]
@@ -967,6 +969,7 @@ mod multi_agent_tests {
             enabled: true,
             max_sub_agents: 4,
             max_agent_depth: 2,
+            child_permission_mode: ChildPermissionMode::Full,
         };
 
         let runtime = AgentBuilder::new(llm)
@@ -1001,6 +1004,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
         ));
 
         // Spawn a child
@@ -1056,6 +1060,7 @@ mod multi_agent_tests {
             enabled: true,
             max_sub_agents: 2,
             max_agent_depth: 1,
+            child_permission_mode: ChildPermissionMode::Full,
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(
@@ -1065,6 +1070,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
         ));
 
         // Should be able to spawn up to max
@@ -1100,6 +1106,7 @@ mod multi_agent_tests {
             enabled: true,
             max_sub_agents: 10,
             max_agent_depth: 1,
+            child_permission_mode: ChildPermissionMode::Full,
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(
@@ -1109,6 +1116,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
         ));
 
         // depth=1: allowed
@@ -1142,6 +1150,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
         ));
 
         let result = runtime.close_agent("root/ghost");

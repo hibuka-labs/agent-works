@@ -22,6 +22,6 @@ pub mod path;
 pub mod registry;
 pub mod runtime;
 
-pub use config::MultiAgentConfig;
+pub use config::{ChildPermissionMode, MultiAgentConfig};
 pub use path::AgentPath;
 pub use runtime::MultiAgentRuntime;
