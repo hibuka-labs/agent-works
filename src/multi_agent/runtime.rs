@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
-    DenyAllApprovalHandler, DenyAllToolPolicy, Language, RunOutcome, RuntimeEvent, SessionId,
-    StreamClient, Tool, ToolPolicy,
+    DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RunOutcome,
+    RuntimeEvent, SessionId, StreamClient, Tool, ToolPolicy,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -42,6 +42,18 @@ pub struct MultiAgentRuntime {
     /// Business tools to register on child agents (NOT the 6 multi-agent tools).
     business_tools: Vec<Arc<dyn Tool>>,
 
+    /// Business tool names to exclude from child agents (root-level orchestration
+    /// tools like `decompose`/`merge` that a leaf agent cannot actually use).
+    child_excluded_tools: Vec<String>,
+
+    /// Optional reasoning-effort override applied to every child agent (see
+    /// [`MultiAgentConfig::child_reasoning_effort`]).
+    child_reasoning_effort: Option<ReasoningEffort>,
+
+    /// Whether to nudge children toward read-only behaviour (see
+    /// [`MultiAgentConfig::child_read_only`]).
+    child_read_only: bool,
+
     /// Channel to the bridge task that emits events on parent's event bus.
     event_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>>,
 
@@ -66,6 +78,14 @@ pub struct MultiAgentRuntime {
     /// Parent's tool policy, inherited by "no permission" children.
     tool_policy: Option<Arc<dyn ToolPolicy>>,
 
+    /// Parent's approval handler, delegated to by "no permission" children.
+    ///
+    /// This is the codex-style behaviour (see `build_child_runtime`): a
+    /// restricted sub-agent does not hard-deny its own approval requests — it
+    /// routes the decision up to the parent's handler (human-in-the-loop or
+    /// auto), so `ask`/`deny` semantics stay coherent across the agent tree.
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
+
     /// Parent session manager — for fork_history (child context inheritance).
     session_manager: Mutex<Option<Arc<agent_base::engine::SessionManager>>>,
 }
@@ -82,13 +102,20 @@ impl MultiAgentRuntime {
         error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
         language: Language,
         tool_policy: Option<Arc<dyn ToolPolicy>>,
+        approval_handler: Option<Arc<dyn ApprovalHandler>>,
     ) -> Self {
         let child_permission_mode = config.child_permission_mode;
+        let child_excluded_tools = config.child_excluded_tools.clone();
+        let child_reasoning_effort = config.child_reasoning_effort.clone();
+        let child_read_only = config.child_read_only;
         Self {
             registry: Mutex::new(AgentRegistry::new(config)),
             mailbox: Arc::new(MailboxHub::new()),
             client,
             business_tools,
+            child_excluded_tools,
+            child_reasoning_effort,
+            child_read_only,
             event_tx: Mutex::new(None),
             root_cancel,
             join_set: Mutex::new(JoinSet::new()),
@@ -97,6 +124,7 @@ impl MultiAgentRuntime {
             language,
             child_permission_mode,
             tool_policy,
+            approval_handler,
             session_manager: Mutex::new(None),
         }
     }
@@ -532,6 +560,21 @@ impl MultiAgentRuntime {
         system_prompt: String,
         full_permission: bool,
     ) -> AgentResult<AgentRuntime> {
+        // Read-only nudge (framework layer). The framework cannot classify which
+        // business tools mutate state, so this is a *suggestion* only — it does
+        // not gate any tool. The business layer hard-gates mutating tools via
+        // `child_excluded_tools` when it needs a guarantee. This is orthogonal to
+        // `full_permission` (approval vs. deny): even a full-permission child is
+        // nudged not to write when `child_read_only` is set.
+        let system_prompt = if self.child_read_only {
+            format!(
+                "{}\n\nYou are a read-only sub-agent: investigate, analyze, and report your findings in your final answer. Do not modify the workspace, mutate state, or run side-effecting commands — the parent agent owns all changes and will apply them based on your report.",
+                system_prompt
+            )
+        } else {
+            system_prompt
+        };
+
         let (prompt, policy, approval): (
             String,
             Option<Arc<dyn ToolPolicy>>,
@@ -546,10 +589,19 @@ impl MultiAgentRuntime {
                 Some(p) => p.clone(),
                 None => Arc::new(DenyAllToolPolicy),
             };
+            // Codex-style delegation: rather than hard-denying the child's own
+            // approval requests, route the decision up to the parent's approval
+            // handler (human-in-the-loop / auto). Falls back to DenyAll only when
+            // the parent itself carries no handler — which keeps the "no policy,
+            // no handler → read-only" invariant intact.
+            let approval: Arc<dyn ApprovalHandler> = match &self.approval_handler {
+                Some(h) => h.clone(),
+                None => Arc::new(DenyAllApprovalHandler),
+            };
             (
                 format!("{}\n\n{}", system_prompt, note),
                 Some(policy),
-                Arc::new(DenyAllApprovalHandler),
+                approval,
             )
         };
 
@@ -562,8 +614,18 @@ impl MultiAgentRuntime {
             builder = builder.tool_policy(p);
         }
 
-        // Register business tools (NOT multi-agent tools)
+        // Register business tools (NOT multi-agent tools), skipping any
+        // root-level orchestration tools the child should not inherit (e.g.
+        // `decompose`/`merge` — a leaf agent that can't spawn sub-agents would
+        // plan work it cannot execute).
         for tool in &self.business_tools {
+            if self.child_excluded_tools.contains(&tool.name().to_string()) {
+                tracing::debug!(
+                    tool = tool.name(),
+                    "skipping excluded business tool for child runtime"
+                );
+                continue;
+            }
             builder = builder.register_tool_arc(tool.clone());
         }
 
@@ -571,7 +633,11 @@ impl MultiAgentRuntime {
             builder = builder.error_recovery(recovery.clone());
         }
 
-        builder.build()
+        let child = builder.build()?;
+        if let Some(effort) = self.child_reasoning_effort.clone() {
+            child.set_reasoning_effort(effort).await;
+        }
+        Ok(child)
     }
 
     /// Resolve the effective full-permission flag for a spawn, applying the
@@ -1117,6 +1183,7 @@ mod tests {
             None,
             agent_base::Language::En,
             None,
+            None,
         ));
         ma_runtime.set_session_manager(session_manager);
 
@@ -1273,6 +1340,7 @@ mod tests {
             None,
             agent_base::Language::En,
             None,
+            None,
         );
         // session_manager is NOT set
 
@@ -1330,6 +1398,7 @@ mod tests {
             None,
             agent_base::Language::En,
             None,
+            None,
         );
 
         ma_runtime
@@ -1382,6 +1451,7 @@ mod tests {
             None,
             agent_base::Language::En,
             None,
+            None,
         );
 
         ma_runtime
@@ -1416,6 +1486,7 @@ mod tests {
             CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
             None,
         );
 
@@ -1484,6 +1555,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
             None,
         ))
     }
@@ -1587,6 +1659,14 @@ mod tests {
         mode: ChildPermissionMode,
         policy: Option<Arc<dyn ToolPolicy>>,
     ) -> Arc<MultiAgentRuntime> {
+        make_runtime_full_with_approval(mode, policy, None)
+    }
+
+    fn make_runtime_full_with_approval(
+        mode: ChildPermissionMode,
+        policy: Option<Arc<dyn ToolPolicy>>,
+        approval: Option<Arc<dyn ApprovalHandler>>,
+    ) -> Arc<MultiAgentRuntime> {
         let config = MultiAgentConfig {
             child_permission_mode: mode,
             ..MultiAgentConfig::enabled()
@@ -1599,6 +1679,7 @@ mod tests {
             None,
             agent_base::Language::En,
             policy,
+            approval,
         ))
     }
 
@@ -1649,6 +1730,113 @@ mod tests {
             .expect("build child");
         let child_policy = child.tool_policy().expect("child should carry a policy");
         assert!(Arc::ptr_eq(&parent_policy, child_policy));
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
+        // Codex-style: a restricted child routes the approval decision up to the
+        // parent's handler (human-in-the-loop / auto) rather than hard-denying
+        // locally. This is what makes `ask` mode coherent for sub-agents.
+        let parent_handler: Arc<dyn ApprovalHandler> = Arc::new(AllowAllApprovalHandler);
+        let ma = make_runtime_full_with_approval(
+            ChildPermissionMode::None,
+            None,
+            Some(parent_handler.clone()),
+        );
+        let child = ma
+            .build_child_runtime("prompt".to_string(), false)
+            .await
+            .expect("build child");
+        let child_handler = child
+            .approval_handler()
+            .expect("child should carry an approval handler");
+        assert!(Arc::ptr_eq(child_handler, &parent_handler));
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_none_denies_when_parent_has_no_handler() {
+        // Parent carries no handler → the child must remain read-only (DenyAll),
+        // preserving the "no policy, no handler → nothing can happen" invariant.
+        let ma = make_runtime_full(ChildPermissionMode::None, None);
+        let child = ma
+            .build_child_runtime("prompt".to_string(), false)
+            .await
+            .expect("build child");
+        let child_handler = child
+            .approval_handler()
+            .expect("child should carry a fallback DenyAll handler");
+        let decision = child_handler
+            .approve(
+                agent_base::ApprovalRequest {
+                    title: "x".into(),
+                    message: "x".into(),
+                    action_key: None,
+                    risk_level: agent_base::RiskLevel::Sensitive,
+                    raw: None,
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("DenyAll approves without error");
+        assert_eq!(decision, agent_base::ApprovalDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn build_child_runtime_excludes_root_level_tools() {
+        struct NoopDecomposeTool;
+        #[async_trait::async_trait]
+        impl Tool for NoopDecomposeTool {
+            fn name(&self) -> &'static str {
+                "decompose"
+            }
+
+            fn description(&self) -> &'static str {
+                "split a task into parallel slices"
+            }
+
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({ "type": "object", "properties": {} })
+            }
+
+            async fn call(
+                &self,
+                _args: &serde_json::Value,
+                _ctx: &agent_base::ToolContext,
+            ) -> agent_base::AgentResult<Vec<agent_base::Content>> {
+                Ok(vec![agent_base::Content::text("serial")])
+            }
+        }
+
+        let config = MultiAgentConfig {
+            child_excluded_tools: vec!["decompose".to_string()],
+            ..MultiAgentConfig::default()
+        };
+        let ma = Arc::new(MultiAgentRuntime::new(
+            config,
+            Arc::new(StreamingStub),
+            vec![Arc::new(NoopDecomposeTool), Arc::new(NoopReadFileTool)],
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            agent_base::Language::En,
+            None,
+            None,
+        ));
+
+        let child = ma
+            .build_child_runtime("prompt".to_string(), true)
+            .await
+            .expect("build child");
+
+        let registry = child.tools_mut();
+        let registry = registry.read().await;
+        assert!(
+            registry.get("decompose").is_none(),
+            "decompose must be excluded from child runtimes"
+        );
+        assert!(
+            registry.get("read_file").is_some(),
+            "non-excluded tools must still be inherited"
+        );
     }
 
     // ── end-to-end: denied_tools flows child → parent ──
@@ -1758,6 +1946,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             None,
             agent_base::Language::En,
+            None,
             None,
         ));
 

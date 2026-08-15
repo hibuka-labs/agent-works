@@ -540,6 +540,7 @@ pub fn setup_multi_agent(
     let client = runtime.client();
     let cancel_token = runtime.cancel_token();
     let tool_policy = runtime.tool_policy().cloned();
+    let approval_handler = runtime.approval_handler().cloned();
 
     let ma_runtime = Arc::new(MultiAgentRuntime::new(
         config.clone(),
@@ -549,6 +550,7 @@ pub fn setup_multi_agent(
         error_recovery,
         lang,
         tool_policy,
+        approval_handler,
     ));
 
     // Set parent session manager for fork_history support

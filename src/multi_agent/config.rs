@@ -4,6 +4,8 @@
 //! Multi-agent is enabled by default — users who don't need it can disable via
 //! `.without_multi_agent()` or feature gate.
 
+use agent_base::ReasoningEffort;
+
 /// Permission mode for spawned child agents.
 ///
 /// Controls whether sub-agents run with full tool access or are restricted by
@@ -69,6 +71,40 @@ pub struct MultiAgentConfig {
     ///
     /// Default: [`ChildPermissionMode::Full`].
     pub child_permission_mode: ChildPermissionMode,
+
+    /// Business tool names to EXCLUDE from child agents.
+    ///
+    /// By default children inherit every business tool registered on the parent.
+    /// Some tools are inherently root-level (e.g. `decompose`/`merge` orchestration):
+    /// a leaf agent that lacks `spawn_agent` should not be handed a "split this into
+    /// parallel sub-agents" tool — it would plan work it cannot execute. Mark such
+    /// tools here so `build_child_runtime` skips them, and children do the work
+    /// inline instead of trying to orchestrate further.
+    pub child_excluded_tools: Vec<String>,
+
+    /// Optional reasoning-effort override applied to every child agent.
+    ///
+    /// Child agents do narrow, focused slices, so they rarely need the parent's
+    /// full reasoning depth — and on reasoning-heavy models (deepseek-v4-pro) an
+    /// unbounded child can "think" itself into a runaway (30KB+ of reasoning with
+    /// no tool call or answer). Setting e.g. [`ReasoningEffort::Low`] caps that
+    /// cost. `None` (default) leaves the child on the framework default.
+    pub child_reasoning_effort: Option<ReasoningEffort>,
+
+    /// Whether child agents are *recommended* to be read-only.
+    ///
+    /// The framework is domain-agnostic: it cannot classify which business tools
+    /// mutate state and which merely read, so this is a **prompt-level suggestion
+    /// only** — it does not remove or gate any tool. When `true` (default),
+    /// [`MultiAgentRuntime::build_child_runtime`] appends a read-only nudge to
+    /// every child's system prompt, telling it to investigate and report rather
+    /// than mutate.
+    ///
+    /// For a *hard* guarantee, exclude mutating tools at the business layer via
+    /// [`MultiAgentConfig::child_excluded_tools`]; the framework only *suggests*
+    /// read-only, it cannot enforce it. Set this to `false` when children are
+    /// meant to write (the codex-style symmetric model).
+    pub child_read_only: bool,
 }
 
 impl Default for MultiAgentConfig {
@@ -78,6 +114,9 @@ impl Default for MultiAgentConfig {
             max_sub_agents: 8,
             max_agent_depth: 1,
             child_permission_mode: ChildPermissionMode::Full,
+            child_excluded_tools: Vec::new(),
+            child_reasoning_effort: None,
+            child_read_only: true,
         }
     }
 }
@@ -98,6 +137,9 @@ impl MultiAgentConfig {
             max_sub_agents,
             max_agent_depth,
             child_permission_mode: ChildPermissionMode::Full,
+            child_excluded_tools: Vec::new(),
+            child_reasoning_effort: None,
+            child_read_only: true,
         }
     }
 }
@@ -112,6 +154,13 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.max_sub_agents, 8);
         assert_eq!(config.max_agent_depth, 1);
+    }
+
+    #[test]
+    fn default_children_are_read_only() {
+        assert!(MultiAgentConfig::default().child_read_only);
+        assert!(MultiAgentConfig::enabled().child_read_only);
+        assert!(MultiAgentConfig::with_limits(4, 2).child_read_only);
     }
 
     #[test]

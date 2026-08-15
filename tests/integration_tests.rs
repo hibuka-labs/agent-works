@@ -970,6 +970,9 @@ mod multi_agent_tests {
             max_sub_agents: 4,
             max_agent_depth: 2,
             child_permission_mode: ChildPermissionMode::Full,
+            child_excluded_tools: Vec::new(),
+            child_reasoning_effort: None,
+            child_read_only: true,
         };
 
         let runtime = AgentBuilder::new(llm)
@@ -1004,6 +1007,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
             None,
         ));
 
@@ -1061,6 +1065,9 @@ mod multi_agent_tests {
             max_sub_agents: 2,
             max_agent_depth: 1,
             child_permission_mode: ChildPermissionMode::Full,
+            child_excluded_tools: Vec::new(),
+            child_reasoning_effort: None,
+            child_read_only: true,
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(
@@ -1070,6 +1077,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
             None,
         ));
 
@@ -1107,6 +1115,9 @@ mod multi_agent_tests {
             max_sub_agents: 10,
             max_agent_depth: 1,
             child_permission_mode: ChildPermissionMode::Full,
+            child_excluded_tools: Vec::new(),
+            child_reasoning_effort: None,
+            child_read_only: true,
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(
@@ -1116,6 +1127,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
             None,
         ));
 
@@ -1150,6 +1162,7 @@ mod multi_agent_tests {
             cancel,
             None,
             agent_base::Language::En,
+            None,
             None,
         ));
 
