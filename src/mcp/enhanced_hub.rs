@@ -283,7 +283,7 @@ impl EnhancedMcpHub {
 
     /// Register tools from a single MCP server into the given registry.
     ///
-    /// Unlike [`register_all`], this only registers tools from the
+    /// Unlike [`EnhancedMcpHub::register_all`], this only registers tools from the
     /// specified server, avoiding O(total-servers) re-registration.
     /// This is the preferred method for runtime `attach_mcp` calls.
     pub async fn register_server(&self, registry: &mut ToolRegistry, server_name: &str) {

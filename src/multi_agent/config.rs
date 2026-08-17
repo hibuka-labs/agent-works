@@ -96,7 +96,7 @@ pub struct MultiAgentConfig {
     /// The framework is domain-agnostic: it cannot classify which business tools
     /// mutate state and which merely read, so this is a **prompt-level suggestion
     /// only** — it does not remove or gate any tool. When `true` (default),
-    /// [`MultiAgentRuntime::build_child_runtime`] appends a read-only nudge to
+    /// `build_child_runtime` appends a read-only nudge to
     /// every child's system prompt, telling it to investigate and report rather
     /// than mutate.
     ///
