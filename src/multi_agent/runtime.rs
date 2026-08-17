@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
-    DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RunOutcome,
-    RuntimeEvent, SessionId, StreamClient, Tool, ToolPolicy,
+    DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RunOutcome, RuntimeEvent,
+    SessionId, StreamClient, Tool, ToolPolicy,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -94,6 +94,7 @@ impl MultiAgentRuntime {
     /// Create a new multi-agent runtime.
     ///
     /// This is called internally by the builder. Tools receive an `Arc<Self>`.
+    #[allow(clippy::too_many_arguments)] // runtime fields are naturally positional
     pub fn new(
         config: MultiAgentConfig,
         client: Arc<dyn StreamClient>,
