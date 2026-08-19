@@ -18,6 +18,7 @@ use agent_base::{AgentResult, ChatMessage, ContextWindowManager, StreamClient};
 
 use crate::compression::config::CompressionConfig;
 use crate::compression::filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
+use crate::compression::summarizer::summarize;
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -193,57 +194,6 @@ impl ContextCompactor {
             cache.clear();
         }
     }
-}
-
-// ── Summarisation ────────────────────────────────────────────────────────────
-
-/// Summarise a transcript block via the LLM.
-///
-/// Phase 3 will enhance the prompt with language detection and richer
-/// instructions.  This minimal version is sufficient for Phase 2 tests.
-async fn summarize(
-    client: &dyn StreamClient,
-    transcript: &str,
-    original_goal: &str,
-    max_chars: usize,
-) -> AgentResult<String> {
-    let system = ChatMessage::system(
-        "You are a conversation summarizer for an AI agent that can call tools \
-         (browser, shell, search, etc.).",
-    );
-    let user = ChatMessage::user(format!(
-        "The original goal of this session was: {original_goal}\n\n\
-         Compress the earlier portion of this agent conversation. Preserve:\n\
-         - the user's original goal and any constraints they stated;\n\
-         - every important fact, decision and intermediate result;\n\
-         - which tools were used and their key findings/returned data;\n\
-         - blockers, errors, and anything the agent still needs to remember to continue.\n\
-         Detect the conversation language and write the summary in that same language.\n\
-         Output ONLY the summary text, no preamble, about {max_chars} characters max.\n\n\
-         === CONVERSATION ===\n{transcript}",
-    ));
-
-    let text = client.chat(&[system, user], &[], None, None).await?;
-    Ok(truncate_summary_output(&text, max_chars))
-}
-
-/// Truncate a summary to `max_chars` (front 80 % + rear 20 %).
-fn truncate_summary_output(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let front = (max_chars as f64 * 0.8) as usize;
-    let rear = max_chars.saturating_sub(front);
-    let front_s: String = text.chars().take(front).collect();
-    let rear_s: String = text
-        .chars()
-        .rev()
-        .take(rear)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{front_s}…{rear_s}")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -885,22 +835,5 @@ mod tests {
             summary_count, 1,
             "old summary in recent block must be filtered"
         );
-    }
-
-    // ── truncate_summary_output ───────────────────────────────────────────
-
-    #[test]
-    fn test_truncate_summary_short_text() {
-        let result = super::truncate_summary_output("short", 100);
-        assert_eq!(result, "short");
-    }
-
-    #[test]
-    fn test_truncate_summary_long_text_preserves_ends() {
-        let text = "a".repeat(500) + "TAIL";
-        let result = super::truncate_summary_output(&text, 100);
-        assert!(result.len() <= 200); // bytes (CJK may differ, but ≤100 chars + separator)
-        assert!(result.starts_with("aaa"));
-        assert!(result.contains("TAIL"));
     }
 }

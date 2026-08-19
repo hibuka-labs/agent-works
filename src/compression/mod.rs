@@ -42,7 +42,9 @@
 mod compactor;
 mod config;
 mod filter;
+mod summarizer;
 
 pub use compactor::{ContextCompactor, safe_cut_index, serialize_block, truncate_str};
 pub use config::CompressionConfig;
 pub use filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
+pub use summarizer::{language_instruction, summarize, truncate_summary_output};
