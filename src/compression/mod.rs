@@ -2,8 +2,8 @@
 //!
 //! Long tool-heavy conversations balloon the message list sent to the LLM on
 //! every turn, slowing each call down and eventually exceeding the context
-//! window. This module provides a `CompressionMiddleware` (coming in Phase 4) that
-//! observes the per-LLM-call message list via
+//! window. This module provides a [`CompressionMiddleware`] that observes the
+//! per-LLM-call message list via
 //! [`Middleware::on_pre_llm`](agent_base::Middleware::on_pre_llm) and, once
 //! estimated tokens exceed a configurable threshold, summarises the *earlier*
 //! portion into a compact handoff message.
@@ -42,9 +42,11 @@
 mod compactor;
 mod config;
 mod filter;
+mod middleware;
 mod summarizer;
 
 pub use compactor::{ContextCompactor, safe_cut_index, serialize_block, truncate_str};
 pub use config::CompressionConfig;
 pub use filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
+pub use middleware::CompressionMiddleware;
 pub use summarizer::{language_instruction, summarize, truncate_summary_output};

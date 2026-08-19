@@ -271,7 +271,7 @@ fn estimate_message_tokens(msg: &ChatMessage) -> usize {
 }
 
 /// Estimate total tokens across a message list.
-#[allow(dead_code)] // Used by the middleware (Phase 4).
+#[allow(dead_code)]
 fn estimate_total_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
@@ -694,6 +694,52 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    // ── compact cache length guard ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_compact_cache_length_guard_re_summarises_on_growth() {
+        // Construct old block > 4096 chars (CACHE_PREFIX_CHARS) so the prefix
+        // hash stays stable when we grow the tail.  The length guard
+        // (cl == transcript.len()) should detect the growth and re-summarise.
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4)
+            .with_max_transcript_chars(60_000); // High cap so we don't hit the freeze guard.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(CountingClient {
+            response: "summary",
+            calls: calls.clone(),
+        });
+        let compactor = ContextCompactor::new(client, config);
+
+        // Each pair "question NNNN\nanswer NNNN" serialises to ~30 chars.
+        // 200 pairs → ~6000 chars transcript (> 4096 prefix).
+        let mut msgs = vec![ChatMessage::system("sys")];
+        for i in 0..200 {
+            msgs.push(ChatMessage::user(format!("question {i:04}")));
+            msgs.push(ChatMessage::assistant(format!("answer {i:04}")));
+        }
+
+        // First call — cache miss, LLM called once.
+        let _ = compactor.compact(1, &msgs).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call, identical — cache hit (same prefix + same length).
+        let _ = compactor.compact(1, &msgs).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Grow the tail: prefix hash unchanged (first 4096 chars identical),
+        // but transcript length increased → length guard should reject cache.
+        msgs.push(ChatMessage::user("extra question"));
+        msgs.push(ChatMessage::assistant("extra answer"));
+        let _ = compactor.compact(1, &msgs).await.unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "length guard should have triggered re-summarisation"
+        );
+    }
+
     // ── compact orphan Tool assertion ─────────────────────────────────────
 
     #[tokio::test]
@@ -718,13 +764,28 @@ mod tests {
 
         let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
 
-        // No orphan Tool: every Tool must be preceded by its assistant.
+        // No orphan Tool: every Tool must be preceded by an Assistant whose
+        // tool_calls reference the same tool_call_id.
         for (i, msg) in result.iter().enumerate() {
-            if let ChatMessage::Tool { .. } = msg {
-                // The preceding message should reference this tool_call_id.
-                // (Either the assistant that called it, or it's in the recent
-                // block where the full pair is preserved.)
+            if let ChatMessage::Tool { tool_call_id, .. } = msg {
                 assert!(i > 0, "Tool message at index 0 has no preceding assistant");
+                let prev = &result[i - 1];
+                match prev {
+                    ChatMessage::Assistant {
+                        tool_calls: Some(calls),
+                        ..
+                    } => {
+                        let ids: Vec<&str> = calls.iter().map(|c| c.id.as_str()).collect();
+                        assert!(
+                            ids.contains(&tool_call_id.as_str()),
+                            "Tool {tool_call_id} not referenced by preceding assistant: {ids:?}"
+                        );
+                    }
+                    other => panic!(
+                        "Tool {tool_call_id} at index {i} not preceded by \
+                         Assistant{{tool_calls}}, got: {other:?}"
+                    ),
+                }
             }
         }
     }
