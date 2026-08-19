@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use agent_base::{AgentResult, Middleware, PreLlmCtx, StreamClient, UserEvent};
 
-use crate::compression::compactor::ContextCompactor;
+use crate::compression::compactor::{ContextCompactor, estimate_message_tokens};
 use crate::compression::config::CompressionConfig;
 
 /// Middleware that compresses conversation history before each LLM call.
@@ -77,27 +77,59 @@ impl CompressionMiddleware {
 #[async_trait::async_trait]
 impl Middleware for CompressionMiddleware {
     async fn on_pre_llm(&self, ctx: &mut PreLlmCtx) -> AgentResult<()> {
+        let emit = |data: serde_json::Value| {
+            if let Some(ref f) = ctx.user_event_fn {
+                f(UserEvent::Structured {
+                    event_type: "compression".into(),
+                    data,
+                });
+            }
+        };
+
+        let msg_count_before = ctx.messages.len();
+        let tokens_before: usize = ctx
+            .messages
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
+
+        // Phase 1: emit "start" before the LLM call.
+        emit(serde_json::json!({
+            "phase": "start",
+            "tokens_before": tokens_before,
+            "msg_count": msg_count_before,
+        }));
+
         match self
             .compactor
             .compact(ctx.session_id.id, &ctx.messages)
             .await?
         {
             Some(compressed) => {
-                let msg_count = ctx.messages.len();
                 ctx.messages = compressed;
-                if let Some(ref emit) = ctx.user_event_fn {
-                    emit(UserEvent::Progress {
-                        text: format!(
-                            "✅ 上下文已压缩（{} → {} 条消息）",
-                            msg_count,
-                            ctx.messages.len()
-                        ),
-                    });
-                }
+                let tokens_after: usize = ctx
+                    .messages
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum();
+                let reduction_pct = if tokens_before > 0 {
+                    ((tokens_before as f64 - tokens_after as f64) / tokens_before as f64 * 100.0)
+                        .round() as i32
+                } else {
+                    0
+                };
+                // Phase 2: emit "done" after compression.
+                emit(serde_json::json!({
+                    "phase": "done",
+                    "tokens_before": tokens_before,
+                    "tokens_after": tokens_after,
+                    "reduction_pct": reduction_pct,
+                    "msg_count_before": msg_count_before,
+                    "msg_count_after": ctx.messages.len(),
+                }));
             }
             None => {
-                // Compression skipped (below threshold, disabled, or too few messages).
-                // Original messages pass through unchanged.
+                // Compression skipped — no "done" event.
             }
         }
         Ok(())

@@ -299,7 +299,7 @@ pub fn safe_cut_index(messages: &[ChatMessage], start: usize, mut cut: usize) ->
 ///
 /// Mirrors `ContextWindowManager::message_tokens` (which is `pub(crate)` in
 /// agent-base and not reachable from here).
-fn estimate_message_tokens(msg: &ChatMessage) -> usize {
+pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> usize {
     match msg {
         ChatMessage::System { content, .. } => ContextWindowManager::estimate_tokens(content),
         ChatMessage::User {
