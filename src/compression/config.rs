@@ -39,8 +39,8 @@ impl Default for CompressionConfig {
             enabled: true,
             trigger_tokens: 30_000,
             keep_recent_messages: 40,
-            max_summary_chars: 10 * 1024,     // 10 KB
-            max_transcript_chars: 20 * 1024,   // 20 KB
+            max_summary_chars: 10 * 1024,    // 10 KB
+            max_transcript_chars: 20 * 1024, // 20 KB
         }
     }
 }

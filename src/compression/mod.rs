@@ -39,8 +39,10 @@
 //!
 //! This module is behind the `compression` Cargo feature.
 
+mod compactor;
 mod config;
 mod filter;
 
+pub use compactor::{ContextCompactor, safe_cut_index, serialize_block, truncate_str};
 pub use config::CompressionConfig;
 pub use filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
