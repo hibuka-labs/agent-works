@@ -12,9 +12,9 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use agent_base::{AgentResult, ChatMessage, ContextWindowManager, StreamClient};
+use agent_base::{AgentResult, AgentRuntime, ChatMessage, ContextWindowManager, SessionId, StreamClient};
 
 use crate::compression::config::CompressionConfig;
 use crate::compression::filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
@@ -33,20 +33,37 @@ type CompactionCache = std::collections::HashMap<(u64, u64), (usize, String)>;
 /// Holds a [`StreamClient`] for LLM summarisation and a thread-safe cache to
 /// avoid redundant calls.  Designed to be shared via `Arc` across middleware
 /// invocations.
+///
+/// Use [`clone()`](Self::clone) to create a second handle that shares the same
+/// underlying cache — useful when the compactor is registered as middleware *and*
+/// stored separately for manual `/compact` access.
 pub struct ContextCompactor {
-    client: std::sync::Arc<dyn StreamClient>,
+    client: Arc<dyn StreamClient>,
     config: CompressionConfig,
     /// `(session_id, prefix_hash) → (transcript_len, summary)` cache.
-    cache: Mutex<CompactionCache>,
+    /// Wrapped in `Arc` so that [`clone()`](Self::clone) shares the same cache.
+    cache: Arc<Mutex<CompactionCache>>,
 }
 
 #[allow(missing_docs)]
 impl ContextCompactor {
-    pub fn new(client: std::sync::Arc<dyn StreamClient>, config: CompressionConfig) -> Self {
+    pub fn new(client: Arc<dyn StreamClient>, config: CompressionConfig) -> Self {
         Self {
             client,
             config,
-            cache: Mutex::new(std::collections::HashMap::new()),
+            cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Create a second handle to the same compactor.
+    ///
+    /// The clone shares the same LLM client and summary cache — clearing the
+    /// cache through either handle affects both.
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            config: self.config.clone(),
+            cache: self.cache.clone(),
         }
     }
 
@@ -193,6 +210,50 @@ impl ContextCompactor {
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
         }
+    }
+
+    // ── Session-level compression ──────────────────────────────────────────
+
+    /// Read-compress-write-back: compress a session's messages in place.
+    ///
+    /// Returns `true` if compression was applied (session was above the
+    /// threshold), `false` if the session was already below the threshold.
+    ///
+    /// **Limitation**: `set_chat_messages` validates that the replacement
+    /// doesn't orphan tool-call pairs. The compactor's `safe_cut_index`
+    /// already guarantees this, so the write-back should always succeed.
+    /// If it fails (unexpected validation error), the session is left
+    /// unchanged and the error is logged.
+    pub async fn compact_session(
+        &self,
+        runtime: &AgentRuntime,
+        session_id: &SessionId,
+    ) -> AgentResult<bool> {
+        // Phase 1: read messages from the session (lock held briefly).
+        let messages = runtime
+            .with_session_mut(session_id, |session| session.chat_messages().to_vec())
+            .await?;
+
+        // Phase 2: compress (async LLM call, no session lock held).
+        let compressed = match self.compact(session_id.id, &messages).await? {
+            Some(msgs) => msgs,
+            None => return Ok(false), // below threshold, no-op
+        };
+
+        // Phase 3: write back (lock held briefly for set_chat_messages + validation).
+        runtime
+            .with_session_mut(session_id, |session| {
+                if let Err(e) = session.set_chat_messages(compressed) {
+                    tracing::error!(
+                        session_id = session_id.id,
+                        error = %e,
+                        "compact_session: set_chat_messages validation failed, session unchanged"
+                    );
+                }
+            })
+            .await?;
+
+        Ok(true)
     }
 }
 

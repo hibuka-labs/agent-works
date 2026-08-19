@@ -10,17 +10,20 @@ keywords = ["agent", "ai", "llm", "mcp", "tool-calling"]
 categories = ["development-tools", "asynchronous"]
 
 [features]
-default = []
+default = ["compression"]
 mcp = []
 skill = []
 prompt_skill = ["serde_yaml", "skill"]
 yaml_skill = ["serde_yaml"]
 hot-reload = ["dep:notify", "prompt_skill"]
 cli = []
-full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload"]
+focus = []
+compression = []
+multi_agent = []
+full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
 
 [dependencies]
-agent-base = { version = "0.2.0" }
+agent-base = { version = "0.2.0", path = "../agent-base" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

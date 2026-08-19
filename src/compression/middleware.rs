@@ -59,6 +59,15 @@ impl CompressionMiddleware {
         &self.compactor
     }
 
+    /// Create a cloned handle of the inner compactor.
+    ///
+    /// The clone shares the same cache — clearing it through either handle
+    /// affects both.  Useful for storing a separate handle outside the
+    /// middleware (e.g. in `PhiAgent` for `/compact` access).
+    pub fn clone_compactor(&self) -> ContextCompactor {
+        self.compactor.clone_handle()
+    }
+
     /// Access the compression config.
     pub fn config(&self) -> &CompressionConfig {
         self.compactor.config()
