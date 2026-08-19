@@ -896,6 +896,7 @@ mod agent_handle_tests {
 // Multi-Agent integration tests
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "multi_agent")]
 mod multi_agent_tests {
     use super::*;
     use agent_works::multi_agent::{

@@ -21,9 +21,7 @@ pub mod handle;
 
 #[cfg(feature = "skill")]
 pub use crate::builder::SkillDetailToolFactory;
-pub use crate::builder::{
-    AgentBuilder, build_memory_system_prompt,
-};
+pub use crate::builder::{AgentBuilder, build_memory_system_prompt};
 #[cfg(feature = "multi_agent")]
 pub use crate::builder::{
     MultiAgentToolFactory, build_multi_agent_system_prompt, setup_multi_agent,

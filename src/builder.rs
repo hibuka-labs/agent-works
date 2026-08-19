@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use agent_base::{AgentResult, AgentRuntime, StreamClient, Tool};
 
+#[cfg(feature = "multi_agent")]
 use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
 
 #[cfg(feature = "skill")]
 use crate::skill::{LazySkillPrompter, Skill, SkillPrompter};
 
 /// Factory type for creating multi-agent tools from a MultiAgentRuntime.
+#[cfg(feature = "multi_agent")]
 pub type MultiAgentToolFactory =
     Arc<dyn Fn(Arc<MultiAgentRuntime>) -> Vec<Arc<dyn Tool>> + Send + Sync>;
 
@@ -29,8 +31,10 @@ pub struct AgentBuilder {
     /// Business tools to pass to child agents (all registered tools).
     business_tools: Vec<Arc<dyn Tool>>,
     /// Multi-agent configuration (None = disabled).
+    #[cfg(feature = "multi_agent")]
     multi_agent_config: Option<MultiAgentConfig>,
     /// Factory to create multi-agent tools (injected by phi-kernel-tools).
+    #[cfg(feature = "multi_agent")]
     multi_agent_tool_factory: Option<MultiAgentToolFactory>,
     /// Error recovery (stored for multi-agent child inheritance).
     error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
@@ -60,7 +64,9 @@ impl AgentBuilder {
             system_prompt: None,
             tool_names: HashSet::new(),
             business_tools: Vec::new(),
+            #[cfg(feature = "multi_agent")]
             multi_agent_config: None,
+            #[cfg(feature = "multi_agent")]
             multi_agent_tool_factory: None,
             error_recovery: None,
             language: None,
@@ -83,6 +89,7 @@ impl AgentBuilder {
     ///
     /// Also sets the tool factory to create the 6 multi-agent tools.
     /// Callers should use `phi_kernel_tools::multi_agent::create_all_tools` as the factory.
+    #[cfg(feature = "multi_agent")]
     pub fn with_multi_agent(mut self, config: MultiAgentConfig) -> Self {
         self.multi_agent_config = Some(config);
         self
@@ -92,6 +99,7 @@ impl AgentBuilder {
     ///
     /// Removes any previously set multi-agent configuration. No multi-agent tools
     /// will be registered and the system prompt will not mention multi-agent capabilities.
+    #[cfg(feature = "multi_agent")]
     pub fn without_multi_agent(mut self) -> Self {
         self.multi_agent_config = None;
         self.multi_agent_tool_factory = None;
@@ -103,6 +111,7 @@ impl AgentBuilder {
     /// The factory receives the `MultiAgentRuntime` and returns the tools to register.
     /// If not set but multi-agent is enabled, no tools are registered (caller must
     /// set this for multi-agent to work).
+    #[cfg(feature = "multi_agent")]
     pub fn with_multi_agent_tool_factory(mut self, factory: MultiAgentToolFactory) -> Self {
         self.multi_agent_tool_factory = Some(factory);
         self
@@ -368,16 +377,24 @@ impl AgentBuilder {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, unused_mut)]
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
+        #[cfg(feature = "multi_agent")]
         let lang = self.language.clone().unwrap_or_default();
-        let ma_config = self.multi_agent_config.clone();
-        let ma_tool_factory = self.multi_agent_tool_factory.take();
+        #[cfg(feature = "multi_agent")]
         let business_tools = std::mem::take(&mut self.business_tools);
+        #[cfg(feature = "multi_agent")]
         let error_recovery = self.error_recovery.clone();
+        #[cfg(feature = "multi_agent")]
         let tool_names = self.tool_names.clone();
 
+        #[cfg(feature = "multi_agent")]
+        let ma_config = self.multi_agent_config.clone();
+        #[cfg(feature = "multi_agent")]
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
+
         // Inject multi-agent prompt before build
+        #[cfg(feature = "multi_agent")]
         if ma_config.as_ref().map(|c| c.enabled).unwrap_or(false) {
             let ma_prompt = build_multi_agent_system_prompt();
             let new_prompt = match self.system_prompt.take() {
@@ -390,6 +407,7 @@ impl AgentBuilder {
         let runtime = self.inner.build()?;
 
         // Post-build: register multi-agent tools if enabled and factory is set
+        #[cfg(feature = "multi_agent")]
         if let Some(config) = ma_config
             && config.enabled
         {
@@ -421,12 +439,19 @@ impl AgentBuilder {
     #[cfg(feature = "skill")]
     fn build_with_skills(mut self) -> AgentResult<AgentRuntime> {
         let mut ab = self.inner;
+        #[cfg(feature = "multi_agent")]
         let lang = self.language.clone().unwrap_or_default();
-        let ma_config = self.multi_agent_config.clone();
-        let ma_tool_factory = self.multi_agent_tool_factory.take();
+        #[cfg(feature = "multi_agent")]
         let business_tools = std::mem::take(&mut self.business_tools);
+        #[cfg(feature = "multi_agent")]
         let error_recovery = self.error_recovery.clone();
+        #[cfg(feature = "multi_agent")]
         let tool_names = self.tool_names.clone();
+
+        #[cfg(feature = "multi_agent")]
+        let ma_config = self.multi_agent_config.clone();
+        #[cfg(feature = "multi_agent")]
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
 
         // Process skills
         if !self.skills.is_empty() {
@@ -488,6 +513,7 @@ impl AgentBuilder {
         }
 
         // Inject multi-agent prompt
+        #[cfg(feature = "multi_agent")]
         if ma_config.as_ref().map(|c| c.enabled).unwrap_or(false) {
             let ma_prompt = build_multi_agent_system_prompt();
             let new_prompt = match self.system_prompt.take() {
@@ -500,6 +526,7 @@ impl AgentBuilder {
         let runtime = ab.build()?;
 
         // Post-build: register multi-agent tools
+        #[cfg(feature = "multi_agent")]
         if let Some(config) = ma_config
             && config.enabled
         {
@@ -528,6 +555,7 @@ impl AgentBuilder {
 ///
 /// The phi-agent CLI and all examples use the default multi-threaded runtime,
 /// so this is safe in practice.
+#[cfg(feature = "multi_agent")]
 pub fn setup_multi_agent(
     runtime: &AgentRuntime,
     config: MultiAgentConfig,
@@ -585,6 +613,7 @@ pub fn setup_multi_agent(
 }
 
 /// Build the multi-agent system prompt guidance for the main agent.
+#[cfg(feature = "multi_agent")]
 pub fn build_multi_agent_system_prompt() -> String {
     r#"## Multi-Agent Capabilities
 
@@ -739,6 +768,7 @@ mod tests {
 
     // ── setup_multi_agent tests ──
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_setup_multi_agent_without_factory_registers_no_tools() {
         let client = make_client();
@@ -763,6 +793,7 @@ mod tests {
         assert!(agents.is_empty());
     }
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_setup_multi_agent_with_factory_registers_tools() {
         let client = make_client();
@@ -816,6 +847,7 @@ mod tests {
         assert!(tools.contains(&"fake_tool".to_string()));
     }
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_setup_multi_agent_skips_duplicate_tool_names() {
         let client = make_client();
@@ -903,6 +935,7 @@ mod tests {
 
     // ── AgentBuilder factory methods ──
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builder_with_multi_agent_without_factory_builds_ok() {
         let client = make_client();
@@ -924,6 +957,7 @@ mod tests {
         assert!(!tools.contains(&"spawn_agent".to_string()));
     }
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builder_with_factory_registers_tools() {
         let client = make_client();
@@ -970,6 +1004,7 @@ mod tests {
         assert!(tools.contains(&"factory_test_tool".to_string()));
     }
 
+    #[cfg(feature = "multi_agent")]
     #[test]
     fn test_builder_disabled_multi_agent_skips_factory() {
         let client = make_client();
@@ -997,6 +1032,7 @@ mod tests {
 
     // ── build_multi_agent_system_prompt ──
 
+    #[cfg(feature = "multi_agent")]
     #[test]
     fn test_system_prompt_contains_tool_names() {
         let prompt = build_multi_agent_system_prompt();
@@ -1008,6 +1044,7 @@ mod tests {
         assert!(prompt.contains("close_agent"));
     }
 
+    #[cfg(feature = "multi_agent")]
     #[test]
     fn test_system_prompt_contains_guidance() {
         let prompt = build_multi_agent_system_prompt();
@@ -1018,6 +1055,7 @@ mod tests {
 
     // ── without_multi_agent ──
 
+    #[cfg(feature = "multi_agent")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_without_multi_agent_clears_config_and_factory() {
         let client = make_client();
