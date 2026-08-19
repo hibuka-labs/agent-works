@@ -14,7 +14,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use agent_base::{AgentResult, AgentRuntime, ChatMessage, ContextWindowManager, SessionId, StreamClient};
+use agent_base::{
+    AgentResult, AgentRuntime, ChatMessage, ContextWindowManager, SessionId, StreamClient,
+};
 
 use crate::compression::config::CompressionConfig;
 use crate::compression::filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
@@ -216,14 +218,12 @@ impl ContextCompactor {
 
     /// Read-compress-write-back: compress a session's messages in place.
     ///
-    /// Returns `true` if compression was applied (session was above the
-    /// threshold), `false` if the session was already below the threshold.
+    /// Returns `Ok(true)` if compression was applied (session was above the
+    /// threshold), `Ok(false)` if the session was already below the threshold.
     ///
-    /// **Limitation**: `set_chat_messages` validates that the replacement
-    /// doesn't orphan tool-call pairs. The compactor's `safe_cut_index`
-    /// already guarantees this, so the write-back should always succeed.
-    /// If it fails (unexpected validation error), the session is left
-    /// unchanged and the error is logged.
+    /// Returns `Err` if the write-back validation fails (unexpected) or if
+    /// the session was modified concurrently between read and write-back
+    /// (TOCTOU guard).
     pub async fn compact_session(
         &self,
         runtime: &AgentRuntime,
@@ -233,6 +233,7 @@ impl ContextCompactor {
         let messages = runtime
             .with_session_mut(session_id, |session| session.chat_messages().to_vec())
             .await?;
+        let msg_count_before = messages.len();
 
         // Phase 2: compress (async LLM call, no session lock held).
         let compressed = match self.compact(session_id.id, &messages).await? {
@@ -241,17 +242,25 @@ impl ContextCompactor {
         };
 
         // Phase 3: write back (lock held briefly for set_chat_messages + validation).
+        // TOCTOU guard: verify message count hasn't changed since Phase 1.
+        // If a concurrent turn appended messages, our stale compression would
+        // wipe them — abort instead.
         runtime
             .with_session_mut(session_id, |session| {
-                if let Err(e) = session.set_chat_messages(compressed) {
-                    tracing::error!(
-                        session_id = session_id.id,
-                        error = %e,
-                        "compact_session: set_chat_messages validation failed, session unchanged"
-                    );
+                let msg_count_now = session.chat_messages().len();
+                if msg_count_now != msg_count_before {
+                    return Err(agent_base::AgentError::internal(format!(
+                        "session modified concurrently ({} → {} messages), aborting write-back",
+                        msg_count_before, msg_count_now
+                    )));
                 }
+                session.set_chat_messages(compressed).map_err(|e| {
+                    agent_base::AgentError::internal(format!(
+                        "set_chat_messages validation failed: {e}"
+                    ))
+                })
             })
-            .await?;
+            .await??;
 
         Ok(true)
     }
