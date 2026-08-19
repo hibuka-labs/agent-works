@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use agent_base::{AgentResult, Middleware, PreLlmCtx, StreamClient};
+use agent_base::{AgentResult, Middleware, PreLlmCtx, StreamClient, UserEvent};
 
 use crate::compression::compactor::ContextCompactor;
 use crate::compression::config::CompressionConfig;
@@ -83,7 +83,17 @@ impl Middleware for CompressionMiddleware {
             .await?
         {
             Some(compressed) => {
+                let msg_count = ctx.messages.len();
                 ctx.messages = compressed;
+                if let Some(ref emit) = ctx.user_event_fn {
+                    emit(UserEvent::Progress {
+                        text: format!(
+                            "✅ 上下文已压缩（{} → {} 条消息）",
+                            msg_count,
+                            ctx.messages.len()
+                        ),
+                    });
+                }
             }
             None => {
                 // Compression skipped (below threshold, disabled, or too few messages).
@@ -181,6 +191,7 @@ mod tests {
             session_id: SessionId::new(1),
             messages,
             tools: vec![],
+            user_event_fn: None,
         }
     }
 
