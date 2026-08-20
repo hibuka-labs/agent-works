@@ -41,12 +41,18 @@
 
 mod compactor;
 mod config;
+pub mod events;
 mod filter;
 mod middleware;
+mod policy;
 mod summarizer;
 
 pub use compactor::{ContextCompactor, safe_cut_index, serialize_block, truncate_str};
 pub use config::CompressionConfig;
+pub use events::{CompressionEvent, CompressionTrigger};
 pub use filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
 pub use middleware::CompressionMiddleware;
+pub use policy::{
+    AutoCompressionPolicy, CompressionPolicy, RateLimitPolicy, UserConfirmationPolicy,
+};
 pub use summarizer::{language_instruction, summarize, truncate_summary_output};

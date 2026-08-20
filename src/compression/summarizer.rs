@@ -5,7 +5,8 @@
 //! *another* LLM to pick up seamlessly — it preserves the original goal, key
 //! decisions, tool findings, and clear next steps.
 
-use agent_base::{AgentResult, ChatMessage, StreamClient};
+use agent_base::{AgentResult, ChatMessage, StreamChunk, StreamClient};
+use futures_util::stream::StreamExt;
 
 /// Handoff-style summarisation prompt template.
 ///
@@ -48,6 +49,8 @@ const LANG_INSTRUCTION_DEFAULT: &str = "";
 /// * `transcript` — serialised older conversation (output of `serialize_block`).
 /// * `original_goal` — first user message, truncated to avoid blowing the prompt.
 /// * `max_chars` — target max length for the summary.
+/// * `on_progress` — optional callback invoked with cumulative character count
+///   as the LLM streams in. Useful for showing "generating summary... X chars".
 ///
 /// Returns the summary text, truncated to `max_chars` if the LLM over-shoots.
 pub async fn summarize(
@@ -55,6 +58,8 @@ pub async fn summarize(
     transcript: &str,
     original_goal: &str,
     max_chars: usize,
+    on_progress: Option<&(dyn Fn(usize) + Sync)>,
+    drain_fn: Option<&(dyn Fn() + Sync)>,
 ) -> AgentResult<String> {
     if max_chars == 0 {
         return Ok(String::new());
@@ -69,7 +74,24 @@ pub async fn summarize(
     );
     let user = ChatMessage::user(prompt);
 
-    let text = client.chat(&[system, user], &[], None, None).await?;
+    let mut stream = client.stream(&[system, user], &[], None, None).await?;
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk? {
+            StreamChunk::Text(t) => {
+                text.push_str(&t);
+                if let Some(cb) = on_progress {
+                    cb(text.len());
+                }
+                if let Some(cb) = drain_fn {
+                    cb();
+                }
+            }
+            StreamChunk::Stop { .. } => break,
+            _ => {}
+        }
+    }
+
     Ok(truncate_summary_output(&text, max_chars))
 }
 
@@ -208,7 +230,7 @@ mod tests {
     impl StreamClient for PromptCapture {
         async fn stream(
             &self,
-            _messages: &[ChatMessage],
+            messages: &[ChatMessage],
             _tools: &[serde_json::Value],
             _reasoning: Option<&agent_base::ReasoningConfig>,
             _response_format: Option<&ResponseFormat>,
@@ -217,7 +239,16 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!()
+            // Capture the user message content (same as chat()).
+            for msg in messages {
+                if let ChatMessage::User { content, .. } = msg {
+                    self.captured.lock().unwrap().push(content.clone());
+                }
+            }
+            let response = self.response.clone();
+            Ok(Box::pin(futures_util::stream::once(async move {
+                Ok(agent_base::StreamChunk::Text(response))
+            })))
         }
 
         async fn chat(
@@ -227,7 +258,6 @@ mod tests {
             _reasoning: Option<&agent_base::ReasoningConfig>,
             _response_format: Option<&ResponseFormat>,
         ) -> AgentResult<String> {
-            // Capture the user message content.
             for msg in messages {
                 if let ChatMessage::User { content, .. } = msg {
                     self.captured.lock().unwrap().push(content.clone());
@@ -378,6 +408,8 @@ mod tests {
             "tool output here",
             "分析服务器日志中的延迟问题",
             5000,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -403,7 +435,9 @@ mod tests {
             response: long_response,
         });
 
-        let result = summarize(client.as_ref(), "t", "g", 100).await.unwrap();
+        let result = summarize(client.as_ref(), "t", "g", 100, None, None)
+            .await
+            .unwrap();
         assert!(result.chars().count() <= 100);
     }
 
@@ -415,9 +449,92 @@ mod tests {
             response: "ignored".into(),
         });
 
-        let result = summarize(client.as_ref(), "t", "g", 0).await.unwrap();
+        let result = summarize(client.as_ref(), "t", "g", 0, None, None)
+            .await
+            .unwrap();
         assert!(result.is_empty());
         // Should not even call the LLM.
         assert!(captured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_summarize_returns_response_content() {
+        // Test that summarize() returns the LLM's response content.
+        let expected_summary =
+            "User said hello and asked for a poem. Assistant provided a classical Chinese poem.";
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = std::sync::Arc::new(PromptCapture {
+            captured: captured.clone(),
+            response: expected_summary.into(),
+        });
+
+        let transcript = "[user] 你好\n[assistant] 你好！有什么我可以帮你的吗？\n[user] 来一首古诗";
+        let result = summarize(client.as_ref(), transcript, "你好", 5000, None, None)
+            .await
+            .unwrap();
+
+        // The result should be the mock response.
+        assert_eq!(
+            result, expected_summary,
+            "summarize should return the LLM response"
+        );
+
+        // Verify the prompt was sent correctly.
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 1, "should have sent exactly one prompt");
+        let prompt = &prompts[0];
+        assert!(prompt.contains("你好"), "prompt should contain the goal");
+        assert!(
+            prompt.contains("来一首古诗"),
+            "prompt should contain the transcript"
+        );
+        assert!(
+            prompt.contains("CONTEXT CHECKPOINT COMPACTION"),
+            "prompt should contain the compaction instruction"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real API key: DEEPSEEK_API_KEY
+    async fn test_summarize_with_real_deepseek_api() {
+        // This test calls the real DeepSeek API to verify the summarization works.
+        // It's skipped by default because it requires an API key.
+        // Run with: cargo test test_summarize_with_real_deepseek_api -- --nocapture
+
+        let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            eprintln!("Skipping test: DEEPSEEK_API_KEY not set");
+            return;
+        }
+
+        let base_url = std::env::var("DEEPSEEK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+
+        // Create a real OpenAI client pointing to DeepSeek.
+        let client =
+            agent_base::OpenAiClient::new(api_key, "deepseek-chat".to_string(), Some(base_url));
+
+        let transcript = "[user] 你好\n[assistant] 你好！有什么我可以帮你的吗？\n[user] 来一首古诗";
+        let result = summarize(&client, transcript, "你好", 5000, None, None)
+            .await
+            .unwrap();
+
+        eprintln!("=== DeepSeek API Response ===");
+        eprintln!("{}", result);
+        eprintln!("=============================");
+
+        // The result should NOT start with "An alternate model reviewed".
+        assert!(
+            !result.starts_with("An alternate model reviewed"),
+            "DeepSeek should follow the prompt, but got: {}",
+            &result[..std::cmp::min(200, result.len())]
+        );
+
+        // The result should contain some summary content.
+        assert!(
+            result.len() > 10,
+            "Summary should have meaningful content, got: {} chars",
+            result.len()
+        );
     }
 }

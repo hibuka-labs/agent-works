@@ -7,19 +7,119 @@
 //! retention strategy (system prompt + summary + recent N messages) and the
 //! stable-prefix cache.  The session's stored history is **never** modified;
 //! only the mutable message copy in [`PreLlmCtx`] is replaced.
+//!
+//! A [`CompressionPolicy`] controls whether compression proceeds once the token
+//! threshold is crossed.  The default [`AutoCompressionPolicy`] always proceeds;
+//! custom policies can add user confirmation, rate limiting, etc.
 
 use std::sync::Arc;
 
-use agent_base::{AgentResult, Middleware, PreLlmCtx, StreamClient, UserEvent};
+use agent_base::{AgentResult, ChatMessage, Middleware, PreLlmCtx, StreamClient};
 
 use crate::compression::compactor::{ContextCompactor, estimate_message_tokens};
 use crate::compression::config::CompressionConfig;
+use crate::compression::events::{CompressionEvent, CompressionTrigger};
+use crate::compression::policy::{AutoCompressionPolicy, CompressionPolicy};
+
+/// Write compression before/after log to `/tmp/phi-agent-compression/`.
+fn write_compression_log(
+    session_id: u64,
+    before: &[ChatMessage],
+    after: &[ChatMessage],
+    tokens_before: usize,
+    tokens_after: usize,
+    reduction_pct: i32,
+) {
+    use std::io::Write;
+
+    let dir = std::path::Path::new("/tmp/phi-agent-compression");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        tracing::warn!("Failed to create compression log dir: {e}");
+        return;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let filename = dir.join(format!("session_{session_id}_{ts}.json"));
+
+    let log = serde_json::json!({
+        "session_id": session_id,
+        "timestamp": ts,
+        "evaluation": {
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "reduction_pct": reduction_pct,
+            "msg_count_before": before.len(),
+            "msg_count_after": after.len(),
+        },
+        "before": before.iter().map(format_message).collect::<Vec<_>>(),
+        "after": after.iter().map(format_message).collect::<Vec<_>>(),
+    });
+
+    match std::fs::File::create(&filename) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(serde_json::to_string_pretty(&log).unwrap().as_bytes()) {
+                tracing::warn!("Failed to write compression log: {e}");
+            } else {
+                tracing::info!("Compression log written to {}", filename.display());
+            }
+        }
+        Err(e) => tracing::warn!("Failed to create compression log file: {e}"),
+    }
+}
+
+/// Format a ChatMessage into a readable JSON value for logging.
+fn format_message(msg: &ChatMessage) -> serde_json::Value {
+    match msg {
+        ChatMessage::System { content, .. } => serde_json::json!({
+            "role": "system",
+            "content": content,
+        }),
+        ChatMessage::User { content, .. } => serde_json::json!({
+            "role": "user",
+            "content": content,
+        }),
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            let mut m = serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            });
+            if let Some(tc) = tool_calls {
+                m["tool_calls"] = serde_json::to_value(tc).unwrap_or_default();
+            }
+            m
+        }
+        ChatMessage::Tool {
+            content,
+            tool_call_id,
+            ..
+        } => serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }),
+        ChatMessage::Custom { role, data } => serde_json::json!({
+            "role": role,
+            "data": data,
+        }),
+    }
+}
 
 /// Middleware that compresses conversation history before each LLM call.
 ///
 /// Wraps a [`ContextCompactor`] and forwards `on_pre_llm` to its [`compact`]
 /// method.  When the estimated token count is below [`CompressionConfig::trigger_tokens`],
 /// the middleware is a no-op and the original messages pass through unchanged.
+///
+/// A [`CompressionPolicy`] controls whether compression actually proceeds once
+/// the threshold is crossed.  Use [`with_policy`](Self::with_policy) to supply
+/// a custom policy (e.g. user confirmation, rate limiting).
 ///
 /// # Usage
 ///
@@ -33,25 +133,41 @@ use crate::compression::config::CompressionConfig;
 /// [`compact`]: ContextCompactor::compact
 pub struct CompressionMiddleware {
     compactor: ContextCompactor,
+    policy: Box<dyn CompressionPolicy>,
 }
 
 #[allow(missing_docs)]
 impl CompressionMiddleware {
     /// Create a new middleware with the given config and LLM client.
     ///
-    /// The client is used for summary generation (only on cache miss).
+    /// Uses [`AutoCompressionPolicy`] (always compress when threshold is hit).
     pub fn new(config: CompressionConfig, client: Arc<dyn StreamClient>) -> Self {
         Self {
             compactor: ContextCompactor::new(client, config),
+            policy: Box::new(AutoCompressionPolicy),
         }
     }
 
     /// Create a new middleware from an existing [`ContextCompactor`].
     ///
-    /// Useful when the caller already has a shared compactor (e.g. for the
-    /// `/compact` command that reuses the same instance).
+    /// Uses [`AutoCompressionPolicy`].
     pub fn from_compactor(compactor: ContextCompactor) -> Self {
-        Self { compactor }
+        Self {
+            compactor,
+            policy: Box::new(AutoCompressionPolicy),
+        }
+    }
+
+    /// Create a new middleware with a custom [`CompressionPolicy`].
+    pub fn with_policy(
+        config: CompressionConfig,
+        client: Arc<dyn StreamClient>,
+        policy: Box<dyn CompressionPolicy>,
+    ) -> Self {
+        Self {
+            compactor: ContextCompactor::new(client, config),
+            policy,
+        }
     }
 
     /// Access the inner compactor (e.g. for `/compact` or cache clearing).
@@ -77,59 +193,148 @@ impl CompressionMiddleware {
 #[async_trait::async_trait]
 impl Middleware for CompressionMiddleware {
     async fn on_pre_llm(&self, ctx: &mut PreLlmCtx) -> AgentResult<()> {
-        let emit = |data: serde_json::Value| {
-            if let Some(ref f) = ctx.user_event_fn {
-                f(UserEvent::Structured {
-                    event_type: "compression".into(),
-                    data,
-                });
-            }
-        };
-
-        let msg_count_before = ctx.messages.len();
+        let t0 = std::time::Instant::now();
+        // Only count compressible messages (exclude system prompt — it's immutable).
         let tokens_before: usize = ctx
             .messages
             .iter()
+            .filter(|m| !matches!(m, ChatMessage::System { .. }))
             .map(estimate_message_tokens)
             .sum();
+        let msg_count = ctx.messages.len();
+        tracing::info!(
+            tokens_before,
+            msg_count,
+            trigger = self.config().trigger_tokens,
+            "[compression-timing] threshold check"
+        );
 
-        // Phase 1: emit "start" before the LLM call.
-        emit(serde_json::json!({
-            "phase": "start",
-            "tokens_before": tokens_before,
-            "msg_count": msg_count_before,
-        }));
+        // Quick check — below threshold, skip entirely.
+        if tokens_before <= self.config().trigger_tokens {
+            return Ok(());
+        }
+
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "[compression-timing] threshold passed"
+        );
+
+        // Policy check — ask policy whether to proceed.
+        if !self.policy.should_compress(tokens_before, msg_count).await {
+            return Ok(());
+        }
+
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "[compression-timing] policy passed, entering compact"
+        );
+
+        // Determine trigger type (manual if /compact, auto otherwise).
+        // For now, middleware is always auto; /compact goes through a different path.
+        let trigger = CompressionTrigger::Auto;
+        let sid = ctx.session_id.id;
+
+        // Save messages before compression for logging.
+        let messages_before = ctx.messages.clone();
+        let last_progress_chars = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        let t_compact = std::time::Instant::now();
 
         match self
             .compactor
-            .compact(ctx.session_id.id, &ctx.messages)
+            .compact(
+                sid,
+                &ctx.messages,
+                Some(&|chars| {
+                    // Deduplicate: compact() calls on_progress(0) before
+                    // summarize(), and the LLM stream may also emit an empty
+                    // first chunk (chars=0).  Only emit the first 0 and any
+                    // strictly-increasing value.
+                    let prev =
+                        last_progress_chars.swap(chars, std::sync::atomic::Ordering::Relaxed);
+                    if chars == 0 && prev == 0 {
+                        return; // skip duplicate 0
+                    }
+                    if let Some(ref f) = ctx.user_event_fn {
+                        f(CompressionEvent::Progress {
+                            session_id: sid,
+                            chars,
+                        }
+                        .into_user_event());
+                    }
+                }),
+                Some(&|tokens, msgs| {
+                    tracing::info!(tokens, msgs, "[on_start callback] called");
+                    if let Some(ref f) = ctx.user_event_fn {
+                        tracing::info!("[on_start callback] emitting Started event");
+                        f(CompressionEvent::Started {
+                            session_id: sid,
+                            tokens_before: tokens,
+                            msg_count: msgs,
+                            trigger: trigger.clone(),
+                        }
+                        .into_user_event());
+                        tracing::info!("[on_start callback] Started event emitted");
+                    } else {
+                        tracing::warn!("[on_start callback] user_event_fn is None!");
+                    }
+                }),
+                Some(&|tokens, msgs| {
+                    if let Some(ref f) = ctx.user_event_fn {
+                        f(CompressionEvent::Preparing {
+                            session_id: sid,
+                            tokens_before: tokens,
+                            msg_count: msgs,
+                            trigger: trigger.clone(),
+                        }
+                        .into_user_event());
+                    }
+                }),
+                Some(&|| ctx.drain_events()),
+            )
             .await?
         {
             Some(compressed) => {
+                tracing::info!(
+                    elapsed_ms = t_compact.elapsed().as_millis() as u64,
+                    "[compression-timing] compact() returned Some"
+                );
                 ctx.messages = compressed;
-                let tokens_after: usize = ctx
-                    .messages
-                    .iter()
-                    .map(estimate_message_tokens)
-                    .sum();
+                let tokens_after: usize = ctx.messages.iter().map(estimate_message_tokens).sum();
                 let reduction_pct = if tokens_before > 0 {
                     ((tokens_before as f64 - tokens_after as f64) / tokens_before as f64 * 100.0)
                         .round() as i32
                 } else {
                     0
                 };
-                // Phase 2: emit "done" after compression.
-                emit(serde_json::json!({
-                    "phase": "done",
-                    "tokens_before": tokens_before,
-                    "tokens_after": tokens_after,
-                    "reduction_pct": reduction_pct,
-                    "msg_count_before": msg_count_before,
-                    "msg_count_after": ctx.messages.len(),
-                }));
+
+                // Send Completed event.
+                if let Some(ref f) = ctx.user_event_fn {
+                    f(CompressionEvent::Completed {
+                        session_id: sid,
+                        tokens_before,
+                        tokens_after,
+                        reduction_pct,
+                        msg_count_before: msg_count,
+                        msg_count_after: ctx.messages.len(),
+                        trigger,
+                    }
+                    .into_user_event());
+                }
+
+                // Write before/after log to /tmp/phi-agent-compression/.
+                write_compression_log(
+                    ctx.session_id.id,
+                    &messages_before,
+                    &ctx.messages,
+                    tokens_before,
+                    tokens_after,
+                    reduction_pct,
+                );
             }
             None => {
-                // Compression skipped — no "done" event.
+                // Compression skipped (threshold not reached, disabled, or too few messages).
+                // This is a normal no-op — do NOT send Failed event.
+                // compact() is pure and never modified ctx.messages, so no restore needed.
             }
         }
         Ok(())
@@ -139,6 +344,8 @@ impl Middleware for CompressionMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compression::events::CompressionEvent;
+    use crate::compression::policy::{CompressionPolicy, RateLimitPolicy};
     use agent_base::{
         AgentResult, ChatMessage, LlmCapabilities, Middleware, PreLlmCtx, ResponseFormat,
         SessionId, StreamClient,
@@ -165,7 +372,11 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!()
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let response = self.response.to_string();
+            Ok(Box::pin(futures_util::stream::once(async move {
+                Ok(agent_base::StreamChunk::Text(response))
+            })))
         }
 
         async fn chat(
@@ -200,7 +411,7 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!()
+            Err(agent_base::AgentError::llm("summarisation failed"))
         }
 
         async fn chat(
@@ -218,12 +429,63 @@ mod tests {
         }
     }
 
+    /// Policy that records calls and returns a fixed value.
+    struct SpyPolicy {
+        /// `(tokens_before, msg_count)` for each call.
+        observed: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize)>>>,
+        result: bool,
+    }
+
+    impl SpyPolicy {
+        #[allow(clippy::type_complexity)]
+        fn new(result: bool) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<(usize, usize)>>>) {
+            let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    observed: observed.clone(),
+                    result,
+                },
+                observed,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CompressionPolicy for SpyPolicy {
+        async fn should_compress(&self, tokens_before: usize, msg_count: usize) -> bool {
+            self.observed
+                .lock()
+                .unwrap()
+                .push((tokens_before, msg_count));
+            self.result
+        }
+    }
+
     fn make_ctx(messages: Vec<ChatMessage>) -> PreLlmCtx {
         PreLlmCtx {
             session_id: SessionId::new(1),
             messages,
             tools: vec![],
             user_event_fn: None,
+            drain_fn: None,
+        }
+    }
+
+    fn make_ctx_with_events(
+        messages: Vec<ChatMessage>,
+        events: std::sync::Arc<std::sync::Mutex<Vec<CompressionEvent>>>,
+    ) -> PreLlmCtx {
+        let events_clone = events.clone();
+        PreLlmCtx {
+            session_id: SessionId::new(1),
+            messages,
+            tools: vec![],
+            user_event_fn: Some(Arc::new(move |event| {
+                if let Some(ev) = CompressionEvent::from_user_event(&event) {
+                    events_clone.lock().unwrap().push(ev);
+                }
+            })),
+            drain_fn: None,
         }
     }
 
@@ -254,9 +516,7 @@ mod tests {
 
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
-        // Messages should be unchanged.
         assert_eq!(ctx.messages.len(), original_len);
-        // No LLM call should have been made.
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
@@ -268,7 +528,7 @@ mod tests {
             calls: calls.clone(),
         });
         let config = CompressionConfig::default()
-            .with_trigger_tokens(1) // Always trigger.
+            .with_trigger_tokens(1)
             .with_keep_recent_messages(4);
         let mw = CompressionMiddleware::new(config, client);
 
@@ -277,25 +537,19 @@ mod tests {
 
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
-        // Should have fewer messages than original.
         assert!(
             ctx.messages.len() < 41,
             "expected compression, got {} messages",
             ctx.messages.len()
         );
-
-        // First message should still be system prompt.
         assert!(matches!(&ctx.messages[0], ChatMessage::System { .. }));
 
-        // Should have a summary message.
         use crate::compression::SUMMARY_PREFIX;
         let has_summary = ctx.messages.iter().any(|m| match m {
             ChatMessage::User { content, .. } => content.starts_with(SUMMARY_PREFIX),
             _ => false,
         });
         assert!(has_summary, "expected summary in compressed output");
-
-        // LLM should have been called once (cache miss).
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -313,12 +567,10 @@ mod tests {
 
         let msgs = make_messages(20);
 
-        // First call.
         let mut ctx1 = make_ctx(msgs.clone());
         mw.on_pre_llm(&mut ctx1).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-        // Second call with same messages — should hit cache.
         let mut ctx2 = make_ctx(msgs);
         mw.on_pre_llm(&mut ctx2).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -335,10 +587,8 @@ mod tests {
         let msgs = make_messages(20);
         let mut ctx = make_ctx(msgs);
 
-        // Should not error — falls back to dropping old block.
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
-        // Should have system + recent only (no summary).
         assert!(matches!(&ctx.messages[0], ChatMessage::System { .. }));
 
         use crate::compression::SUMMARY_PREFIX;
@@ -380,7 +630,6 @@ mod tests {
             .with_keep_recent_messages(4);
         let mw = CompressionMiddleware::new(config, client);
 
-        // Multi-system prompt scenario.
         let mut msgs = vec![
             ChatMessage::system("You are helpful."),
             ChatMessage::system("Extra instructions."),
@@ -393,7 +642,6 @@ mod tests {
         let mut ctx = make_ctx(msgs);
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
-        // Both system messages should be preserved.
         assert!(matches!(&ctx.messages[0], ChatMessage::System { .. }));
         assert!(matches!(&ctx.messages[1], ChatMessage::System { .. }));
         match &ctx.messages[0] {
@@ -417,5 +665,310 @@ mod tests {
         let mw = CompressionMiddleware::from_compactor(compactor);
 
         assert_eq!(mw.config().trigger_tokens, 42);
+    }
+
+    // ── Policy integration ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_policy_called_with_correct_args() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let (policy, observed) = SpyPolicy::new(true);
+        let mw = CompressionMiddleware::with_policy(config, client, Box::new(policy));
+
+        let msgs = make_messages(10);
+        let msg_count = msgs.len();
+        let tokens_est: usize = msgs.iter().map(estimate_message_tokens).sum();
+        let mut ctx = make_ctx(msgs);
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        // Policy should have been called once.
+        let spy_calls = observed.lock().unwrap();
+        assert_eq!(spy_calls.len(), 1);
+        assert_eq!(spy_calls[0].1, msg_count);
+        // tokens_before should be > trigger_tokens (which is 1).
+        assert!(spy_calls[0].0 > 1);
+        // Approximate match — spy should receive roughly the same token estimate.
+        assert!(
+            (spy_calls[0].0 as i64 - tokens_est as i64).unsigned_abs() < 100,
+            "token estimate mismatch: spy={}, computed={}",
+            spy_calls[0].0,
+            tokens_est
+        );
+    }
+
+    #[tokio::test]
+    async fn test_policy_deny_skips_compression() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: calls.clone(),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let (policy, _observed) = SpyPolicy::new(false);
+        let mw = CompressionMiddleware::with_policy(config, client, Box::new(policy));
+
+        let msgs = make_messages(20);
+        let original_len = msgs.len();
+        let mut ctx = make_ctx(msgs);
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        // Messages should be unchanged — policy denied.
+        assert_eq!(ctx.messages.len(), original_len);
+        // No LLM call should have been made.
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_policy_not_called_when_below_threshold() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default().with_trigger_tokens(999_999);
+        let (policy, observed) = SpyPolicy::new(true);
+        let mw = CompressionMiddleware::with_policy(config, client, Box::new(policy));
+
+        let msgs = make_messages(5);
+        let mut ctx = make_ctx(msgs);
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        // Policy should NOT have been called — below threshold.
+        let spy_calls = observed.lock().unwrap();
+        assert_eq!(spy_calls.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_policy_blocks_repeated_compression() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: calls.clone(),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        // 60-second rate limit — second call should be blocked.
+        let policy = Box::new(RateLimitPolicy::new(std::time::Duration::from_secs(60)));
+        let mw = CompressionMiddleware::with_policy(config, client, policy);
+
+        let msgs = make_messages(20);
+
+        // First call — should compress.
+        let mut ctx1 = make_ctx(msgs.clone());
+        mw.on_pre_llm(&mut ctx1).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call immediately — rate limited, no LLM call.
+        let mut ctx2 = make_ctx(msgs);
+        mw.on_pre_llm(&mut ctx2).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // ── Typed event emission ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_emits_preparing_and_completed_events() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "compressed summary text",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let msgs = make_messages(20);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+        let mut ctx = make_ctx_with_events(msgs, events.clone());
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        // Should have: Started (from compact on_start), Preparing (from compact on_preparing), Progress, Completed.
+        assert!(
+            events.len() >= 3,
+            "expected at least 3 events, got {}",
+            events.len()
+        );
+
+        // First event should be Started.
+        assert!(
+            matches!(&events[0], CompressionEvent::Started { .. }),
+            "first event should be Started, got {:?}",
+            events[0]
+        );
+
+        // Second event should be Preparing.
+        assert!(
+            matches!(&events[1], CompressionEvent::Preparing { .. }),
+            "second event should be Preparing, got {:?}",
+            events[1]
+        );
+
+        // Last event should be Completed.
+        assert!(
+            matches!(events.last().unwrap(), CompressionEvent::Completed { .. }),
+            "last event should be Completed, got {:?}",
+            events.last().unwrap()
+        );
+
+        // Verify Preparing has trigger = Auto.
+        if let CompressionEvent::Preparing { trigger, .. } = &events[0] {
+            assert_eq!(*trigger, CompressionTrigger::Auto);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_events_when_below_threshold() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default().with_trigger_tokens(999_999);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let msgs = make_messages(5);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+        let mut ctx = make_ctx_with_events(msgs, events.clone());
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(events.is_empty(), "no events expected below threshold");
+    }
+
+    #[tokio::test]
+    async fn test_no_events_when_policy_denies() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let (policy, _observed) = SpyPolicy::new(false);
+        let mw = CompressionMiddleware::with_policy(config, client, Box::new(policy));
+
+        let msgs = make_messages(20);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+        let mut ctx = make_ctx_with_events(msgs, events.clone());
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(events.is_empty(), "no events expected when policy denies");
+    }
+
+    #[tokio::test]
+    async fn test_messages_unchanged_when_compact_returns_none() {
+        // compact() returns None when disabled or too few messages —
+        // compact() is pure so ctx.messages is never mutated.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(MockClient {
+            response: "summary",
+            calls: calls.clone(),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4)
+            .with_enabled(false); // disabled → compact() returns None
+        let (policy, _observed) = SpyPolicy::new(true);
+        let mw = CompressionMiddleware::with_policy(config, client, Box::new(policy));
+
+        let msgs = make_messages(20);
+        let original_len = msgs.len();
+        let mut ctx = make_ctx(msgs);
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        // Messages unchanged — compact() never modified them.
+        assert_eq!(ctx.messages.len(), original_len);
+    }
+
+    #[tokio::test]
+    async fn test_exact_event_sequence_on_cache_miss() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "compressed summary text",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let msgs = make_messages(20);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+        let mut ctx = make_ctx_with_events(msgs, events.clone());
+
+        mw.on_pre_llm(&mut ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        // Exact sequence: Started → Preparing → Progress(0) → Progress(N) → Completed
+        // Started = on_start callback, Preparing = on_preparing callback,
+        // Progress(0) = "Connecting to LLM", Progress(N) = streaming chars from summarizer.
+        assert_eq!(
+            events.len(),
+            5,
+            "expected 5 events, got {}: {:?}",
+            events.len(),
+            *events
+        );
+        assert!(matches!(&events[0], CompressionEvent::Started { .. }));
+        assert!(matches!(&events[1], CompressionEvent::Preparing { .. }));
+        assert!(matches!(
+            &events[2],
+            CompressionEvent::Progress { chars: 0, .. }
+        ));
+        // events[3] is Progress with actual char count from the mock response.
+        assert!(matches!(&events[3], CompressionEvent::Progress { chars, .. } if *chars > 0));
+        assert!(matches!(&events[4], CompressionEvent::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_event_sequence_on_cache_hit() {
+        let client = std::sync::Arc::new(MockClient {
+            response: "cached summary",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let msgs = make_messages(20);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+
+        // First call — cache miss, populates cache.
+        let mut ctx1 = make_ctx_with_events(msgs.clone(), events.clone());
+        mw.on_pre_llm(&mut ctx1).await.unwrap();
+        events.lock().unwrap().clear();
+
+        // Second call — cache hit, no LLM call.
+        // compact() still fires on_start (it's after early-exit checks, before cache check),
+        // but skips on_progress (no LLM call).
+        let mut ctx2 = make_ctx_with_events(msgs, events.clone());
+        mw.on_pre_llm(&mut ctx2).await.unwrap();
+
+        let events = events.lock().unwrap();
+        // Cache hit: Started → Preparing → Completed (no Progress events).
+        assert_eq!(
+            events.len(),
+            3,
+            "cache hit: expected 3 events, got {}",
+            events.len()
+        );
+        assert!(matches!(&events[0], CompressionEvent::Started { .. }));
+        assert!(matches!(&events[1], CompressionEvent::Preparing { .. }));
+        assert!(matches!(&events[2], CompressionEvent::Completed { .. }));
     }
 }

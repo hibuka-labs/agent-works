@@ -87,18 +87,34 @@ impl ContextCompactor {
         &self,
         session_id: u64,
         messages: &[ChatMessage],
+        on_progress: Option<&(dyn Fn(usize) + Sync)>,
+        on_start: Option<&(dyn Fn(usize, usize) + Sync)>,
+        on_preparing: Option<&(dyn Fn(usize, usize) + Sync)>,
+        drain_fn: Option<&(dyn Fn() + Sync)>,
     ) -> AgentResult<Option<Vec<ChatMessage>>> {
+        let t0 = std::time::Instant::now();
         if !self.config.enabled {
             return Ok(None);
         }
 
         let total_tokens: usize = messages.iter().map(estimate_message_tokens).sum();
+        tracing::info!(
+            total_tokens,
+            trigger = self.config.trigger_tokens,
+            "[compact-timing] enter compact()"
+        );
         if total_tokens <= self.config.trigger_tokens {
             return Ok(None);
         }
 
         // 1. Split off system prompt.
         let (system_msgs, conversation) = split_system_prompt(messages);
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            conv_len = conversation.len(),
+            keep = self.config.keep_recent_messages,
+            "[compact-timing] after split_system_prompt"
+        );
         if conversation.len() <= self.config.keep_recent_messages + 1 {
             return Ok(None);
         }
@@ -106,9 +122,16 @@ impl ContextCompactor {
         // 2. Split conversation into old / recent.
         let mut recent_start = conversation.len() - self.config.keep_recent_messages;
         recent_start = safe_cut_index(conversation, 0, recent_start);
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            recent_start,
+            "[compact-timing] after split old/recent"
+        );
         if recent_start == 0 {
             return Ok(None);
         }
+
+        // All checks passed — compression will proceed. Notify caller.
 
         let old = &conversation[..recent_start];
         let recent = &conversation[recent_start..];
@@ -141,6 +164,21 @@ impl ContextCompactor {
             return Ok(None);
         }
 
+        // All early-exit checks passed — compression will proceed.
+        let msg_count = messages.len();
+        if let Some(cb) = on_start {
+            cb(total_tokens, msg_count);
+        }
+        if let Some(cb) = drain_fn {
+            cb();
+        }
+        if let Some(cb) = on_preparing {
+            cb(total_tokens, msg_count);
+        }
+        if let Some(cb) = drain_fn {
+            cb();
+        }
+
         const CACHE_PREFIX_CHARS: usize = 4096;
         let prefix: String = transcript.chars().take(CACHE_PREFIX_CHARS).collect();
         let key = (session_id, hash_str(&prefix));
@@ -155,15 +193,34 @@ impl ContextCompactor {
         let summary = match cached {
             Some((_, ref s)) if cache_effective => s.clone(),
             _ => {
+                // Notify caller that we're about to call the LLM.
+                if let Some(cb) = on_progress {
+                    cb(0);
+                }
+                if let Some(cb) = drain_fn {
+                    cb();
+                }
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    "[compact-timing] before summarize() LLM call"
+                );
                 let s = match summarize(
                     self.client.as_ref(),
                     &transcript,
                     &original_goal,
                     self.config.max_summary_chars,
+                    on_progress,
+                    drain_fn,
                 )
                 .await
                 {
-                    Ok(s) => s,
+                    Ok(s) => {
+                        tracing::info!(
+                            elapsed_ms = t0.elapsed().as_millis() as u64,
+                            "[compact-timing] summarize() returned Ok"
+                        );
+                        s
+                    }
                     Err(e) => {
                         tracing::warn!(
                             session_id,
@@ -199,7 +256,8 @@ impl ContextCompactor {
             kept_recent = self.config.keep_recent_messages,
             summary_len = trimmed.len(),
             cache_hit = cache_effective,
-            "context compression"
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "[compact-timing] compression complete"
         );
 
         Ok(Some(new_messages))
@@ -228,23 +286,75 @@ impl ContextCompactor {
         &self,
         runtime: &AgentRuntime,
         session_id: &SessionId,
+        user_event_fn: Option<std::sync::Arc<dyn Fn(agent_base::UserEvent) + Send + Sync>>,
     ) -> AgentResult<bool> {
+        let sid = session_id.id;
+        let trigger = crate::compression::events::CompressionTrigger::Manual;
+
         // Phase 1: read messages from the session (lock held briefly).
         let messages = runtime
             .with_session_mut(session_id, |session| session.chat_messages().to_vec())
             .await?;
         let msg_count_before = messages.len();
+        let tokens_before: usize = messages.iter().map(estimate_message_tokens).sum();
 
         // Phase 2: compress (async LLM call, no session lock held).
-        let compressed = match self.compact(session_id.id, &messages).await? {
+        let trigger_for_cbs = trigger.clone();
+        let trigger_for_preparing = trigger.clone();
+        let ef_start = user_event_fn.clone();
+        let ef_progress = user_event_fn.clone();
+        let ef_preparing = user_event_fn.clone();
+        let compressed = match self
+            .compact(
+                sid,
+                &messages,
+                Some(&move |chars| {
+                    if let Some(ref f) = ef_progress {
+                        f(crate::compression::events::CompressionEvent::Progress {
+                            session_id: sid,
+                            chars,
+                        }
+                        .into_user_event());
+                    }
+                }),
+                Some(&move |tokens, msgs| {
+                    if let Some(ref f) = ef_start {
+                        f(crate::compression::events::CompressionEvent::Started {
+                            session_id: sid,
+                            tokens_before: tokens,
+                            msg_count: msgs,
+                            trigger: trigger_for_cbs.clone(),
+                        }
+                        .into_user_event());
+                    }
+                }),
+                Some(&move |tokens, msgs| {
+                    if let Some(ref f) = ef_preparing {
+                        f(crate::compression::events::CompressionEvent::Preparing {
+                            session_id: sid,
+                            tokens_before: tokens,
+                            msg_count: msgs,
+                            trigger: trigger_for_preparing.clone(),
+                        }
+                        .into_user_event());
+                    }
+                }),
+                None, // compact_session has no PreLlmCtx drain_fn
+            )
+            .await?
+        {
             Some(msgs) => msgs,
-            None => return Ok(false), // below threshold, no-op
+            None => {
+                // Below threshold — no-op, no events needed.
+                return Ok(false);
+            }
         };
+
+        let tokens_after: usize = compressed.iter().map(estimate_message_tokens).sum();
+        let msg_count_after = compressed.len();
 
         // Phase 3: write back (lock held briefly for set_chat_messages + validation).
         // TOCTOU guard: verify message count hasn't changed since Phase 1.
-        // If a concurrent turn appended messages, our stale compression would
-        // wipe them — abort instead.
         runtime
             .with_session_mut(session_id, |session| {
                 let msg_count_now = session.chat_messages().len();
@@ -261,6 +371,26 @@ impl ContextCompactor {
                 })
             })
             .await??;
+
+        // Emit Completed event.
+        let reduction_pct = if tokens_before > 0 {
+            ((tokens_before as f64 - tokens_after as f64) / tokens_before as f64 * 100.0).round()
+                as i32
+        } else {
+            0
+        };
+        if let Some(ref f) = user_event_fn {
+            f(crate::compression::events::CompressionEvent::Completed {
+                session_id: sid,
+                tokens_before,
+                tokens_after,
+                reduction_pct,
+                msg_count_before,
+                msg_count_after,
+                trigger,
+            }
+            .into_user_event());
+        }
 
         Ok(true)
     }
@@ -443,7 +573,10 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!("stream() should not be called in tests")
+            let response = self.0.to_string();
+            Ok(Box::pin(futures_util::stream::once(async move {
+                Ok(agent_base::StreamChunk::Text(response))
+            })))
         }
 
         async fn chat(
@@ -480,7 +613,11 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!()
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let response = self.response.to_string();
+            Ok(Box::pin(futures_util::stream::once(async move {
+                Ok(agent_base::StreamChunk::Text(response))
+            })))
         }
 
         async fn chat(
@@ -515,7 +652,7 @@ mod tests {
                 Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
             >,
         > {
-            unreachable!()
+            Err(agent_base::AgentError::llm("summarisation failed"))
         }
 
         async fn chat(
@@ -662,7 +799,10 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(100);
-        let result = compactor.compact(1, &msgs).await.unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -672,7 +812,10 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(10);
-        let result = compactor.compact(1, &msgs).await.unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -684,7 +827,11 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("test summary text"));
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(20);
-        let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // First message should be system prompt.
         assert!(matches!(&result[0], ChatMessage::System { .. }));
@@ -722,7 +869,11 @@ mod tests {
         let client = std::sync::Arc::new(FailingClient);
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(20);
-        let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Fallback: summary is empty, so we get system + recent only.
         assert!(matches!(&result[0], ChatMessage::System { .. }));
@@ -749,18 +900,27 @@ mod tests {
         let msgs = make_messages(20);
 
         // First call — should invoke LLM once.
-        let _ = compactor.compact(1, &msgs).await.unwrap();
+        let _ = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Second call with same old block — should hit cache (no new LLM call).
-        let _ = compactor.compact(1, &msgs).await.unwrap();
+        let _ = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Third call after appending messages (old block grows) — should re-summarize.
         let mut grown = msgs.clone();
         grown.push(ChatMessage::user("new question"));
         grown.push(ChatMessage::assistant("new answer"));
-        let _ = compactor.compact(1, &grown).await.unwrap();
+        let _ = compactor
+            .compact(1, &grown, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
@@ -791,18 +951,27 @@ mod tests {
         }
 
         // First call — cache miss, LLM called once.
-        let _ = compactor.compact(1, &msgs).await.unwrap();
+        let _ = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Second call, identical — cache hit (same prefix + same length).
-        let _ = compactor.compact(1, &msgs).await.unwrap();
+        let _ = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Grow the tail: prefix hash unchanged (first 4096 chars identical),
         // but transcript length increased → length guard should reject cache.
         msgs.push(ChatMessage::user("extra question"));
         msgs.push(ChatMessage::assistant("extra answer"));
-        let _ = compactor.compact(1, &msgs).await.unwrap();
+        let _ = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             2,
@@ -832,7 +1001,11 @@ mod tests {
             msgs.push(ChatMessage::tool(format!("tc{i}"), format!("r{i}")));
         }
 
-        let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // No orphan Tool: every Tool must be preceded by an Assistant whose
         // tool_calls reference the same tool_call_id.
@@ -867,7 +1040,10 @@ mod tests {
         let config = CompressionConfig::default().with_trigger_tokens(1);
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
-        let result = compactor.compact(1, &[]).await.unwrap();
+        let result = compactor
+            .compact(1, &[], None, None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -877,7 +1053,10 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
         let msgs = vec![ChatMessage::system("You are helpful.")];
-        let result = compactor.compact(1, &msgs).await.unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -890,7 +1069,10 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(3); // 1 system + 6 conversation = 7
-        let result = compactor.compact(1, &msgs).await.unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -913,7 +1095,11 @@ mod tests {
             msgs.push(ChatMessage::assistant(format!("answer {i}")));
         }
 
-        let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // The old summary should NOT appear in the output.
         let summary_count = result
@@ -952,7 +1138,11 @@ mod tests {
             msgs.push(ChatMessage::assistant(format!("answer {i}")));
         }
 
-        let result = compactor.compact(1, &msgs).await.unwrap().unwrap();
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap()
+            .unwrap();
 
         // Only the new summary should remain.
         let summary_count = result
@@ -966,5 +1156,117 @@ mod tests {
             summary_count, 1,
             "old summary in recent block must be filtered"
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires real API key: DEEPSEEK_API_KEY
+    async fn test_compact_with_real_deepseek_api() {
+        // This test calls the real DeepSeek API to verify compact() works end-to-end.
+        // Run with: cargo test test_compact_with_real_deepseek_api -- --nocapture
+
+        let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            eprintln!("Skipping test: DEEPSEEK_API_KEY not set");
+            return;
+        }
+
+        let base_url = std::env::var("DEEPSEEK_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+
+        // Create a real OpenAI client pointing to DeepSeek.
+        let client: std::sync::Arc<dyn agent_base::StreamClient> = std::sync::Arc::new(
+            agent_base::OpenAiClient::new(api_key, "deepseek-v4-flash".to_string(), Some(base_url)),
+        );
+
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1) // Always trigger.
+            .with_keep_recent_messages(4);
+
+        let compactor = ContextCompactor::new(client, config);
+
+        // Create messages similar to the user's test case.
+        let msgs = vec![
+            ChatMessage::system("You are a versatile AI assistant."),
+            ChatMessage::user("你好".to_string()),
+            ChatMessage::assistant("你好！有什么我可以帮你的吗？".to_string()),
+            ChatMessage::user("来一首古诗".to_string()),
+            ChatMessage::assistant(
+                "好的，送你一首王维的《山居秋暝》：\n空山新雨后，天气晚来秋。".to_string(),
+            ),
+            ChatMessage::user("再来".to_string()),
+            ChatMessage::assistant("秋江独酌\n清秋江上月，独酌对孤舟。".to_string()),
+            ChatMessage::user("再来一首".to_string()),
+            ChatMessage::assistant("夏日山居\n薰风拂面柳丝柔，蝉噪林深夏日幽。".to_string()),
+            ChatMessage::user("再来".to_string()),
+        ];
+
+        let result = compactor
+            .compact(1, &msgs, None, None, None, None)
+            .await
+            .unwrap();
+
+        match result {
+            Some(compressed) => {
+                eprintln!("=== Compact Result ===");
+                eprintln!("Messages: {} -> {}", msgs.len(), compressed.len());
+                for (i, msg) in compressed.iter().enumerate() {
+                    match msg {
+                        ChatMessage::User { content, .. } => {
+                            let preview = if content.len() > 100 {
+                                &content[..100]
+                            } else {
+                                content
+                            };
+                            eprintln!("{}: [user] {}", i, preview);
+                        }
+                        ChatMessage::Assistant { content, .. } => {
+                            let text = content.as_deref().unwrap_or("");
+                            let preview = if text.len() > 100 { &text[..100] } else { text };
+                            eprintln!("{}: [assistant] {}", i, preview);
+                        }
+                        ChatMessage::System { content, .. } => {
+                            let preview = if content.len() > 100 {
+                                &content[..100]
+                            } else {
+                                content
+                            };
+                            eprintln!("{}: [system] {}", i, preview);
+                        }
+                        _ => {}
+                    }
+                }
+                eprintln!("======================");
+
+                // Check that the summary doesn't start with "An alternate model reviewed".
+                let summary_msg = compressed.iter().find(|m| match m {
+                    ChatMessage::User { content, .. } => content.starts_with(SUMMARY_PREFIX),
+                    _ => false,
+                });
+
+                if let Some(ChatMessage::User { content, .. }) = summary_msg {
+                    let summary_content = content
+                        .strip_prefix(SUMMARY_PREFIX)
+                        .unwrap_or(content)
+                        .trim();
+                    let preview = if summary_content.len() > 200 {
+                        &summary_content[..200]
+                    } else {
+                        summary_content
+                    };
+                    eprintln!("=== Summary Content ===");
+                    eprintln!("{}", preview);
+                    eprintln!("========================");
+
+                    assert!(
+                        !summary_content.starts_with("An alternate model reviewed"),
+                        "Summary should not start with 'An alternate model reviewed', got: {}",
+                        preview
+                    );
+                }
+            }
+            None => {
+                eprintln!("Compact returned None (no compression needed)");
+            }
+        }
     }
 }

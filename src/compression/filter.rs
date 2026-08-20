@@ -10,12 +10,10 @@ use agent_base::ChatMessage;
 /// The summarizer prepends this block to the summary text so that subsequent
 /// compression passes can detect (and skip) old summaries, preventing
 /// summary-of-summary degradation.
-pub const SUMMARY_PREFIX: &str = "Another language model started to solve this problem \
-and produced a summary of its thinking process. You also have access to the state \
-of the tools that were used by that language model. Use this to build on the work \
-that has already been done and avoid duplicating work. Here is the summary produced \
-by the other language model, use the information in this summary to assist with \
-your own analysis:";
+pub const SUMMARY_PREFIX: &str = "An alternate model reviewed this conversation \
+and produced a condensed summary of its reasoning. You have access to all \
+tool outputs from that session. Build upon this foundation without repeating \
+the work that was already completed. Use the following summary to inform your approach:";
 
 /// Returns `true` if `msg` is a user message whose content starts with
 /// [`SUMMARY_PREFIX`] — i.e. a summary injected by a previous compression pass.
@@ -94,7 +92,7 @@ mod tests {
     #[test]
     fn test_partial_prefix_not_detected() {
         // Only a substring of the prefix — must NOT match.
-        let msg = ChatMessage::user("Another language model started");
+        let msg = ChatMessage::user("An alternate model reviewed");
         assert!(!is_summary_message(&msg));
     }
 
