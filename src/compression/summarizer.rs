@@ -13,24 +13,33 @@ use futures_util::stream::StreamExt;
 /// Framed as a "context checkpoint compaction" — tells the LLM this is a
 /// handoff to another model, not a self-summary.  Placeholders `{goal}`,
 /// `{lang}`, `{max_chars}`, and `{transcript}` are filled by [`build_prompt`].
+///
+/// User messages are preserved verbatim (handled by the compactor), so the
+/// summarizer only receives assistant and tool responses.  The prompt
+/// explicitly instructs the LLM to describe *what happened* without
+/// reproducing assistant text verbatim (poems, code, articles, etc.).
 const SUMMARIZATION_PROMPT: &str = "\
 You are performing a CONTEXT CHECKPOINT COMPACTION. \
 Create a handoff summary for another LLM that will resume the task.
 
 The original goal of this session was: {goal}
 
+User messages have been preserved separately. \
+Summarize ONLY the assistant responses and tool results below.
+
 Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
+- What the assistant did (tools called, actions taken, results found)
+- Key decisions made and important constraints discovered
 - What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
-- Key findings from tool calls (especially data analysis results)
 {lang}
+Do NOT reproduce assistant text replies verbatim (poems, articles, code examples, etc.). \
+Only describe what was done, not the content itself.
+
 Be concise, structured, and focused on helping the next LLM seamlessly continue the work. \
 Do not repeat work that has already been done. \
 Output ONLY the summary text, no preamble, about {max_chars} characters max.
 
-=== OLDER CONVERSATION ===
+=== ASSISTANT AND TOOL RESPONSES ===
 {transcript}";
 
 /// Language instruction injected when CJK content is detected.
@@ -59,7 +68,6 @@ pub async fn summarize(
     original_goal: &str,
     max_chars: usize,
     on_progress: Option<&(dyn Fn(usize) + Sync)>,
-    drain_fn: Option<&(dyn Fn() + Sync)>,
 ) -> AgentResult<String> {
     if max_chars == 0 {
         return Ok(String::new());
@@ -82,9 +90,6 @@ pub async fn summarize(
                 text.push_str(&t);
                 if let Some(cb) = on_progress {
                     cb(text.len());
-                }
-                if let Some(cb) = drain_fn {
-                    cb();
                 }
             }
             StreamChunk::Stop { .. } => break,
@@ -409,7 +414,6 @@ mod tests {
             "分析服务器日志中的延迟问题",
             5000,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -435,7 +439,7 @@ mod tests {
             response: long_response,
         });
 
-        let result = summarize(client.as_ref(), "t", "g", 100, None, None)
+        let result = summarize(client.as_ref(), "t", "g", 100, None)
             .await
             .unwrap();
         assert!(result.chars().count() <= 100);
@@ -449,9 +453,7 @@ mod tests {
             response: "ignored".into(),
         });
 
-        let result = summarize(client.as_ref(), "t", "g", 0, None, None)
-            .await
-            .unwrap();
+        let result = summarize(client.as_ref(), "t", "g", 0, None).await.unwrap();
         assert!(result.is_empty());
         // Should not even call the LLM.
         assert!(captured.lock().unwrap().is_empty());
@@ -469,7 +471,7 @@ mod tests {
         });
 
         let transcript = "[user] 你好\n[assistant] 你好！有什么我可以帮你的吗？\n[user] 来一首古诗";
-        let result = summarize(client.as_ref(), transcript, "你好", 5000, None, None)
+        let result = summarize(client.as_ref(), transcript, "你好", 5000, None)
             .await
             .unwrap();
 
@@ -515,7 +517,7 @@ mod tests {
             agent_base::OpenAiClient::new(api_key, "deepseek-chat".to_string(), Some(base_url));
 
         let transcript = "[user] 你好\n[assistant] 你好！有什么我可以帮你的吗？\n[user] 来一首古诗";
-        let result = summarize(&client, transcript, "你好", 5000, None, None)
+        let result = summarize(&client, transcript, "你好", 5000, None)
             .await
             .unwrap();
 

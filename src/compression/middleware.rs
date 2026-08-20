@@ -13,12 +13,14 @@
 //! custom policies can add user confirmation, rate limiting, etc.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_base::{AgentResult, ChatMessage, Middleware, PreLlmCtx, StreamClient};
 
 use crate::compression::compactor::{ContextCompactor, estimate_message_tokens};
 use crate::compression::config::CompressionConfig;
 use crate::compression::events::{CompressionEvent, CompressionTrigger};
+use crate::compression::filter::is_summary_message;
 use crate::compression::policy::{AutoCompressionPolicy, CompressionPolicy};
 
 /// Write compression before/after log to `/tmp/phi-agent-compression/`.
@@ -134,6 +136,10 @@ fn format_message(msg: &ChatMessage) -> serde_json::Value {
 pub struct CompressionMiddleware {
     compactor: ContextCompactor,
     policy: Box<dyn CompressionPolicy>,
+    /// Message count after the last successful compression.
+    /// Used to calculate only the *new* old-block tokens for threshold checks,
+    /// preventing re-triggering caused by recent messages rolling into the old block.
+    last_compressed_msg_count: AtomicUsize,
 }
 
 #[allow(missing_docs)]
@@ -145,6 +151,7 @@ impl CompressionMiddleware {
         Self {
             compactor: ContextCompactor::new(client, config),
             policy: Box::new(AutoCompressionPolicy),
+            last_compressed_msg_count: AtomicUsize::new(0),
         }
     }
 
@@ -155,6 +162,7 @@ impl CompressionMiddleware {
         Self {
             compactor,
             policy: Box::new(AutoCompressionPolicy),
+            last_compressed_msg_count: AtomicUsize::new(0),
         }
     }
 
@@ -167,6 +175,7 @@ impl CompressionMiddleware {
         Self {
             compactor: ContextCompactor::new(client, config),
             policy,
+            last_compressed_msg_count: AtomicUsize::new(0),
         }
     }
 
@@ -194,14 +203,29 @@ impl CompressionMiddleware {
 impl Middleware for CompressionMiddleware {
     async fn on_pre_llm(&self, ctx: &mut PreLlmCtx) -> AgentResult<()> {
         let t0 = std::time::Instant::now();
-        // Only count compressible messages (exclude system prompt — it's immutable).
+        let msg_count = ctx.messages.len();
+
+        // Quick check — below minimum message count, skip entirely.
+        // Need at least system + keep_recent + 1 to have anything to compress.
+        let keep = self.config().keep_recent_messages;
+        if msg_count <= keep + 1 {
+            return Ok(());
+        }
+
+        // Only count tokens added SINCE the last compression (new old-block
+        // content).  This prevents re-triggering caused by recent messages
+        // rolling into the old block after compression.
+        //
+        // Also skip system and existing summary messages.
+        let last_compressed = self.last_compressed_msg_count.load(Ordering::Relaxed);
         let tokens_before: usize = ctx
             .messages
             .iter()
+            .skip(last_compressed)
             .filter(|m| !matches!(m, ChatMessage::System { .. }))
+            .filter(|m| !is_summary_message(m))
             .map(estimate_message_tokens)
             .sum();
-        let msg_count = ctx.messages.len();
         tracing::info!(
             tokens_before,
             msg_count,
@@ -234,62 +258,36 @@ impl Middleware for CompressionMiddleware {
         let trigger = CompressionTrigger::Auto;
         let sid = ctx.session_id.id;
 
+        // Discard old summary before re-compressing.
+        // compact() handles preserving user messages and summarizing assistant/tool.
+        // We only need to remove the old summary so it doesn't get re-summarized.
+        let filtered: Vec<ChatMessage> = ctx
+            .messages
+            .iter()
+            .filter(|m| !is_summary_message(m))
+            .cloned()
+            .collect();
+
+        // After filtering, check if there's enough content to compress.
+        // Need more than keep_recent messages to have an old block at all.
+        let keep = self.config().keep_recent_messages;
+        if filtered.len() <= keep + 1 {
+            self.last_compressed_msg_count
+                .store(msg_count, Ordering::Relaxed);
+            return Ok(());
+        }
+
         // Save messages before compression for logging.
         let messages_before = ctx.messages.clone();
-        let last_progress_chars = std::sync::atomic::AtomicUsize::new(usize::MAX);
         let t_compact = std::time::Instant::now();
 
         match self
             .compactor
             .compact(
                 sid,
-                &ctx.messages,
-                Some(&|chars| {
-                    // Deduplicate: compact() calls on_progress(0) before
-                    // summarize(), and the LLM stream may also emit an empty
-                    // first chunk (chars=0).  Only emit the first 0 and any
-                    // strictly-increasing value.
-                    let prev =
-                        last_progress_chars.swap(chars, std::sync::atomic::Ordering::Relaxed);
-                    if chars == 0 && prev == 0 {
-                        return; // skip duplicate 0
-                    }
-                    if let Some(ref f) = ctx.user_event_fn {
-                        f(CompressionEvent::Progress {
-                            session_id: sid,
-                            chars,
-                        }
-                        .into_user_event());
-                    }
-                }),
-                Some(&|tokens, msgs| {
-                    tracing::info!(tokens, msgs, "[on_start callback] called");
-                    if let Some(ref f) = ctx.user_event_fn {
-                        tracing::info!("[on_start callback] emitting Started event");
-                        f(CompressionEvent::Started {
-                            session_id: sid,
-                            tokens_before: tokens,
-                            msg_count: msgs,
-                            trigger: trigger.clone(),
-                        }
-                        .into_user_event());
-                        tracing::info!("[on_start callback] Started event emitted");
-                    } else {
-                        tracing::warn!("[on_start callback] user_event_fn is None!");
-                    }
-                }),
-                Some(&|tokens, msgs| {
-                    if let Some(ref f) = ctx.user_event_fn {
-                        f(CompressionEvent::Preparing {
-                            session_id: sid,
-                            tokens_before: tokens,
-                            msg_count: msgs,
-                            trigger: trigger.clone(),
-                        }
-                        .into_user_event());
-                    }
-                }),
-                Some(&|| ctx.drain_events()),
+                &filtered,
+                trigger.clone(),
+                Some(&|ev| ctx.emit(ev.into_user_event())),
             )
             .await?
         {
@@ -299,7 +297,22 @@ impl Middleware for CompressionMiddleware {
                     "[compression-timing] compact() returned Some"
                 );
                 ctx.messages = compressed;
-                let tokens_after: usize = ctx.messages.iter().map(estimate_message_tokens).sum();
+                // Record the pre-compression message count so the next threshold
+                // check only counts new content added since this compression.
+                // Using pre-compression count (not compressed length) because
+                // skip() operates on the full message array structure.
+                self.last_compressed_msg_count
+                    .store(msg_count, Ordering::Relaxed);
+                // Count replacement tokens (same scope as tokens_before: old block only).
+                let keep = self.config().keep_recent_messages;
+                let old_end = ctx.messages.len().saturating_sub(keep);
+                let tokens_after: usize = ctx
+                    .messages
+                    .iter()
+                    .take(old_end)
+                    .filter(|m| !matches!(m, ChatMessage::System { .. }))
+                    .map(estimate_message_tokens)
+                    .sum();
                 let reduction_pct = if tokens_before > 0 {
                     ((tokens_before as f64 - tokens_after as f64) / tokens_before as f64 * 100.0)
                         .round() as i32
@@ -308,8 +321,8 @@ impl Middleware for CompressionMiddleware {
                 };
 
                 // Send Completed event.
-                if let Some(ref f) = ctx.user_event_fn {
-                    f(CompressionEvent::Completed {
+                ctx.emit(
+                    CompressionEvent::Completed {
                         session_id: sid,
                         tokens_before,
                         tokens_after,
@@ -318,8 +331,8 @@ impl Middleware for CompressionMiddleware {
                         msg_count_after: ctx.messages.len(),
                         trigger,
                     }
-                    .into_user_event());
-                }
+                    .into_user_event(),
+                );
 
                 // Write before/after log to /tmp/phi-agent-compression/.
                 write_compression_log(
@@ -335,6 +348,11 @@ impl Middleware for CompressionMiddleware {
                 // Compression skipped (threshold not reached, disabled, or too few messages).
                 // This is a normal no-op — do NOT send Failed event.
                 // compact() is pure and never modified ctx.messages, so no restore needed.
+                //
+                // Still update the checkpoint so the next threshold check only
+                // counts truly new content, preventing a re-trigger loop.
+                self.last_compressed_msg_count
+                    .store(msg_count, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -466,8 +484,7 @@ mod tests {
             session_id: SessionId::new(1),
             messages,
             tools: vec![],
-            user_event_fn: None,
-            drain_fn: None,
+            emit_fn: None,
         }
     }
 
@@ -480,12 +497,11 @@ mod tests {
             session_id: SessionId::new(1),
             messages,
             tools: vec![],
-            user_event_fn: Some(Arc::new(move |event| {
+            emit_fn: Some(Box::new(move |event: agent_base::UserEvent| {
                 if let Some(ev) = CompressionEvent::from_user_event(&event) {
                     events_clone.lock().unwrap().push(ev);
                 }
             })),
-            drain_fn: None,
         }
     }
 
@@ -493,7 +509,9 @@ mod tests {
         let mut msgs = vec![ChatMessage::system("You are a test agent.")];
         for i in 0..count {
             msgs.push(ChatMessage::user(format!("question {i}")));
-            msgs.push(ChatMessage::assistant(format!("answer {i}")));
+            msgs.push(ChatMessage::assistant(format!(
+                "answer {i} with some extra content to make the old block large enough"
+            )));
         }
         msgs
     }
@@ -794,24 +812,24 @@ mod tests {
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
         let events = events.lock().unwrap();
-        // Should have: Started (from compact on_start), Preparing (from compact on_preparing), Progress, Completed.
+        // Should have: Preparing (from compact), Started (from compact), Progress, Completed.
         assert!(
             events.len() >= 3,
             "expected at least 3 events, got {}",
             events.len()
         );
 
-        // First event should be Started.
+        // First event should be Preparing.
         assert!(
-            matches!(&events[0], CompressionEvent::Started { .. }),
-            "first event should be Started, got {:?}",
+            matches!(&events[0], CompressionEvent::Preparing { .. }),
+            "first event should be Preparing, got {:?}",
             events[0]
         );
 
-        // Second event should be Preparing.
+        // Second event should be Started.
         assert!(
-            matches!(&events[1], CompressionEvent::Preparing { .. }),
-            "second event should be Preparing, got {:?}",
+            matches!(&events[1], CompressionEvent::Started { .. }),
+            "second event should be Started, got {:?}",
             events[1]
         );
 
@@ -913,8 +931,8 @@ mod tests {
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
         let events = events.lock().unwrap();
-        // Exact sequence: Started → Preparing → Progress(0) → Progress(N) → Completed
-        // Started = on_start callback, Preparing = on_preparing callback,
+        // Exact sequence: Preparing → Started → Progress(0) → Progress(N) → Completed
+        // Preparing = compact emits Preparing first, then Started,
         // Progress(0) = "Connecting to LLM", Progress(N) = streaming chars from summarizer.
         assert_eq!(
             events.len(),
@@ -923,8 +941,8 @@ mod tests {
             events.len(),
             *events
         );
-        assert!(matches!(&events[0], CompressionEvent::Started { .. }));
-        assert!(matches!(&events[1], CompressionEvent::Preparing { .. }));
+        assert!(matches!(&events[0], CompressionEvent::Preparing { .. }));
+        assert!(matches!(&events[1], CompressionEvent::Started { .. }));
         assert!(matches!(
             &events[2],
             CompressionEvent::Progress { chars: 0, .. }
@@ -935,7 +953,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_sequence_on_cache_hit() {
+    async fn test_event_sequence_on_no_retrigger() {
+        // After compression, calling with the same messages should NOT re-trigger
+        // because last_compressed_msg_count was set to the pre-compression count.
         let client = std::sync::Arc::new(MockClient {
             response: "cached summary",
             calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -948,27 +968,174 @@ mod tests {
         let msgs = make_messages(20);
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
 
-        // First call — cache miss, populates cache.
+        // First call — should compress and emit events.
         let mut ctx1 = make_ctx_with_events(msgs.clone(), events.clone());
         mw.on_pre_llm(&mut ctx1).await.unwrap();
+        assert!(events.lock().unwrap().len() >= 3, "first call should emit events");
         events.lock().unwrap().clear();
 
-        // Second call — cache hit, no LLM call.
-        // compact() still fires on_start (it's after early-exit checks, before cache check),
-        // but skips on_progress (no LLM call).
+        // Second call with the same messages — should NOT re-trigger.
+        // last_compressed=20, skip(20) → 0 new messages → below threshold.
         let mut ctx2 = make_ctx_with_events(msgs, events.clone());
         mw.on_pre_llm(&mut ctx2).await.unwrap();
 
         let events = events.lock().unwrap();
-        // Cache hit: Started → Preparing → Completed (no Progress events).
         assert_eq!(
             events.len(),
-            3,
-            "cache hit: expected 3 events, got {}",
+            0,
+            "same messages: expected 0 events (no re-trigger), got {}",
             events.len()
         );
-        assert!(matches!(&events[0], CompressionEvent::Started { .. }));
-        assert!(matches!(&events[1], CompressionEvent::Preparing { .. }));
-        assert!(matches!(&events[2], CompressionEvent::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_no_retrigger_after_compression() {
+        // After successful compression, the next call with the compressed messages
+        // should NOT re-trigger compression because last_compressed_msg_count
+        // was set to the pre-compression message count, so skip() returns 0 new messages.
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(MockClient {
+            response: "short",
+            calls: calls.clone(),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(1)
+            .with_keep_recent_messages(4);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let msgs = make_messages(20);
+
+        // First call — should compress (20 messages > trigger_tokens=1).
+        let mut ctx1 = make_ctx(msgs.clone());
+        mw.on_pre_llm(&mut ctx1).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let compressed_len = ctx1.messages.len();
+        assert!(compressed_len < msgs.len(), "should have compressed");
+
+        // Second call with the compressed messages (realistic: next turn reloads
+        // compressed state from disk). last_compressed=20 (pre-compression count),
+        // skip(20) on compressed_len messages → 0 messages → no re-trigger.
+        let mut ctx2 = make_ctx(ctx1.messages.clone());
+        mw.on_pre_llm(&mut ctx2).await.unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "should NOT have re-triggered compression"
+        );
+    }
+
+    /// End-to-end simulation: 30 turns of long conversation.
+    /// Verifies compression triggers, no re-trigger, and old block stability.
+    #[tokio::test]
+    async fn test_e2e_simulation_30_turns() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = std::sync::Arc::new(MockClient {
+            response: "compressed summary of the conversation so far",
+            calls: calls.clone(),
+        });
+        let config = CompressionConfig::default()
+            .with_trigger_tokens(2000)
+            .with_keep_recent_messages(4);
+        let mw = CompressionMiddleware::new(config, client);
+
+        let mut messages = vec![ChatMessage::system("You are a helpful assistant.")];
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<CompressionEvent>::new()));
+        let mut compression_count = 0;
+        let mut compression_turns = Vec::new();
+        let mut old_block_sizes = Vec::new();
+
+        for turn in 0..30 {
+            messages.push(ChatMessage::user(format!(
+                "请继续讲故事，这是第{}轮对话。我想听一个关于古代英雄的故事，要有曲折的情节和深刻的寓意，最好能让人有所启发和思考。",
+                turn + 1
+            )));
+            // Longer assistant response (~500 chars) to accumulate tokens faster.
+            messages.push(ChatMessage::assistant(format!(
+                "好的，让我继续讲第{}轮的故事。从前有座山，山里有座庙，庙里有个老和尚在讲故事。\
+                 这个故事讲的是从前有座山，山里有座庙，庙里有个老和尚在讲故事。\
+                 故事的内容是关于一个勇敢的冒险者，他走遍了千山万水，经历了无数磨难。\
+                 他遇到了各种各样的人，有善良的农夫，有狡猾的商人，有智慧的老者。\
+                 每个人都给了他不同的启示，让他对人生有了更深的理解。\
+                 他学会了坚韧不拔，学会了与人为善，学会了在困境中寻找希望。\
+                 最终，他回到了家乡，成为了一个受人尊敬的长者，把自己的故事讲给后人听。\
+                 这个故事告诉我们，人生就是一场旅行，重要的不是目的地，而是沿途的风景。",
+                turn + 1
+            )));
+
+            let mut ctx = make_ctx_with_events(messages.clone(), events.clone());
+            mw.on_pre_llm(&mut ctx).await.unwrap();
+            messages = ctx.messages.clone();
+
+            let new_compressions = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, CompressionEvent::Completed { .. }))
+                .count();
+            let turn_compressions = new_compressions - compression_count;
+            compression_count = new_compressions;
+
+            if turn_compressions > 0 {
+                compression_turns.push(turn + 1);
+                // Record old block size from the compression event.
+                if let CompressionEvent::Completed {
+                    msg_count_before, msg_count_after, ..
+                } = events.lock().unwrap().last().unwrap()
+                {
+                    old_block_sizes.push((*msg_count_before, *msg_count_after));
+                }
+                println!(
+                    "[Turn {:2}] COMPRESSED | msgs={:2} → {:2} | llm_calls={}",
+                    turn + 1,
+                    old_block_sizes.last().unwrap().0,
+                    old_block_sizes.last().unwrap().1,
+                    calls.load(std::sync::atomic::Ordering::SeqCst)
+                );
+            } else {
+                println!(
+                    "[Turn {:2}] ok         | msgs={:2}",
+                    turn + 1,
+                    messages.len(),
+                );
+            }
+        }
+
+        println!("\n=== Simulation Summary ===");
+        println!("Compression turns: {:?}", compression_turns);
+        println!("Total compressions: {}", compression_count);
+        println!("LLM calls: {}", calls.load(std::sync::atomic::Ordering::SeqCst));
+        println!("Final messages: {}", messages.len());
+        println!("Old block before/after: {:?}", old_block_sizes);
+
+        // Verify: at least 2 compressions in 30 turns.
+        assert!(
+            compression_count >= 2,
+            "expected at least 2 compressions, got {}",
+            compression_count
+        );
+
+        // Verify: LLM calls == compression count (no wasted calls).
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            compression_count,
+        );
+
+        // Verify: no two compressions on consecutive turns.
+        for window in compression_turns.windows(2) {
+            assert!(
+                window[1] - window[0] >= 2,
+                "consecutive compressions at turns {:?}",
+                window
+            );
+        }
+
+        // Verify: final message count is reasonable.
+        // With "preserve user messages" strategy, users accumulate, so the count
+        // grows over time.  But it should be less than uncompressed (61 msgs).
+        assert!(
+            messages.len() < 61,
+            "final messages should be < 61 (uncompressed), got {}",
+            messages.len()
+        );
     }
 }

@@ -19,6 +19,7 @@ use agent_base::{
 };
 
 use crate::compression::config::CompressionConfig;
+use crate::compression::events::{CompressionEvent, CompressionTrigger};
 use crate::compression::filter::{SUMMARY_PREFIX, is_summary_message, split_system_prompt};
 use crate::compression::summarizer::summarize;
 
@@ -75,6 +76,14 @@ impl ContextCompactor {
 
     // ── Core compression ─────────────────────────────────────────────────
 
+    /// Maximum tokens for user messages preserved verbatim from the old block.
+    ///
+    /// Matches codex's `COMPACT_USER_MESSAGE_MAX_TOKENS`.  User messages are
+    /// typically short instructions, so 20k tokens is generous enough to never
+    /// truncate in practice while preventing pathological cases (e.g., user
+    /// pasting a huge code block).
+    const MAX_PRESERVED_USER_TOKENS: usize = 20_000;
+
     /// Produce a compressed copy of `messages` for a single LLM call.
     ///
     /// Returns `None` when compression is skipped (disabled, below threshold,
@@ -83,14 +92,22 @@ impl ContextCompactor {
     ///
     /// `session_id` is used as part of the cache key so different sessions
     /// never share summaries.
+    ///
+    /// # Compression strategy
+    ///
+    /// User messages from the old block are preserved verbatim (truncated to
+    /// [`MAX_PRESERVED_USER_TOKENS`](Self::MAX_PRESERVED_USER_TOKENS)).
+    /// Only assistant and tool responses are summarised by the LLM.  This
+    /// mirrors codex's compaction strategy and avoids the common pitfall of
+    /// the summarizer reproducing assistant-generated content (poems, code,
+    /// articles) verbatim, which can make the compressed output *larger* than
+    /// the original.
     pub async fn compact(
         &self,
         session_id: u64,
         messages: &[ChatMessage],
-        on_progress: Option<&(dyn Fn(usize) + Sync)>,
-        on_start: Option<&(dyn Fn(usize, usize) + Sync)>,
-        on_preparing: Option<&(dyn Fn(usize, usize) + Sync)>,
-        drain_fn: Option<&(dyn Fn() + Sync)>,
+        trigger: CompressionTrigger,
+        emit_fn: Option<&(dyn Fn(CompressionEvent) + Sync)>,
     ) -> AgentResult<Option<Vec<ChatMessage>>> {
         let t0 = std::time::Instant::now();
         if !self.config.enabled {
@@ -158,25 +175,40 @@ impl ContextCompactor {
             .unwrap_or("(unknown goal)");
         let original_goal = truncate_str(original_goal, 400);
 
-        // 5. Serialise old block and check cache.
-        let transcript = truncate_to_chars(&old, self.config.max_transcript_chars);
-        if transcript.trim().is_empty() {
+        // 5. Separate user messages (preserved verbatim) from assistant/tool
+        //    messages (sent to summarizer).
+        let preserved_user_msgs: Vec<&ChatMessage> = old
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::User { .. }))
+            .copied()
+            .collect();
+        let assistant_tool_msgs: Vec<&ChatMessage> = old
+            .iter()
+            .filter(|m| !matches!(m, ChatMessage::User { .. }))
+            .copied()
+            .collect();
+
+        // Serialize only assistant/tool messages for the summarizer.
+        let transcript = truncate_to_chars(&assistant_tool_msgs, self.config.max_transcript_chars);
+        if transcript.trim().is_empty() && preserved_user_msgs.is_empty() {
             return Ok(None);
         }
 
         // All early-exit checks passed — compression will proceed.
         let msg_count = messages.len();
-        if let Some(cb) = on_start {
-            cb(total_tokens, msg_count);
-        }
-        if let Some(cb) = drain_fn {
-            cb();
-        }
-        if let Some(cb) = on_preparing {
-            cb(total_tokens, msg_count);
-        }
-        if let Some(cb) = drain_fn {
-            cb();
+        if let Some(emit) = emit_fn {
+            emit(CompressionEvent::Preparing {
+                session_id,
+                tokens_before: total_tokens,
+                msg_count,
+                trigger: trigger.clone(),
+            });
+            emit(CompressionEvent::Started {
+                session_id,
+                tokens_before: total_tokens,
+                msg_count,
+                trigger: trigger.clone(),
+            });
         }
 
         const CACHE_PREFIX_CHARS: usize = 4096;
@@ -190,58 +222,114 @@ impl ContextCompactor {
         // further growth only affects the tail which is truncated away).
         let cache_effective = matches!(cached, Some((cl, _)) if cl == transcript.len() || transcript.len() >= self.config.max_transcript_chars);
 
-        let summary = match cached {
-            Some((_, ref s)) if cache_effective => s.clone(),
-            _ => {
-                // Notify caller that we're about to call the LLM.
-                if let Some(cb) = on_progress {
-                    cb(0);
-                }
-                if let Some(cb) = drain_fn {
-                    cb();
-                }
-                tracing::info!(
-                    elapsed_ms = t0.elapsed().as_millis() as u64,
-                    "[compact-timing] before summarize() LLM call"
-                );
-                let s = match summarize(
-                    self.client.as_ref(),
-                    &transcript,
-                    &original_goal,
-                    self.config.max_summary_chars,
-                    on_progress,
-                    drain_fn,
-                )
-                .await
-                {
-                    Ok(s) => {
-                        tracing::info!(
-                            elapsed_ms = t0.elapsed().as_millis() as u64,
-                            "[compact-timing] summarize() returned Ok"
-                        );
-                        s
-                    }
-                    Err(e) => {
-                        tracing::warn!(
+        let summary = if transcript.trim().is_empty() {
+            // No assistant/tool content to summarize — skip LLM call.
+            String::new()
+        } else {
+            match cached {
+                Some((_, ref s)) if cache_effective => s.clone(),
+                _ => {
+                    // Notify caller that we're about to call the LLM.
+                    if let Some(emit) = emit_fn {
+                        emit(CompressionEvent::Progress {
                             session_id,
-                            "summarisation failed, falling back to dropping old block: {e}"
-                        );
-                        String::new()
+                            chars: 0,
+                        });
                     }
-                };
-                if !s.is_empty()
-                    && let Ok(mut cache) = self.cache.lock()
-                {
-                    cache.insert(key, (transcript.len(), s.clone()));
+                    tracing::info!(
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        "[compact-timing] before summarize() LLM call"
+                    );
+                    // summarize() reports cumulative char count via on_progress.
+                    // Wrap it to emit CompressionEvent::Progress.
+                    let s = if let Some(emit) = emit_fn {
+                        let progress_fn = |chars: usize| {
+                            emit(CompressionEvent::Progress { session_id, chars });
+                        };
+                        summarize(
+                            self.client.as_ref(),
+                            &transcript,
+                            &original_goal,
+                            self.config.max_summary_chars,
+                            Some(&progress_fn),
+                        )
+                        .await
+                    } else {
+                        summarize(
+                            self.client.as_ref(),
+                            &transcript,
+                            &original_goal,
+                            self.config.max_summary_chars,
+                            None,
+                        )
+                        .await
+                    };
+                    let s = match s {
+                        Ok(s) => {
+                            tracing::info!(
+                                elapsed_ms = t0.elapsed().as_millis() as u64,
+                                "[compact-timing] summarize() returned Ok"
+                            );
+                            s
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                session_id,
+                                "summarisation failed, falling back to dropping old block: {e}"
+                            );
+                            String::new()
+                        }
+                    };
+                    if !s.is_empty()
+                        && let Ok(mut cache) = self.cache.lock()
+                    {
+                        cache.insert(key, (transcript.len(), s.clone()));
+                    }
+                    s
                 }
-                s
             }
         };
 
-        // 6. Assemble: [system prompt] + [summary] + [recent N].
+        // 6. Assemble: [system prompt] + [preserved user messages] + [summary] + [recent N].
+        //    User messages are preserved verbatim (truncated to MAX_PRESERVED_USER_TOKENS)
+        //    so the LLM always sees exact user instructions.
         let mut new_messages: Vec<ChatMessage> = system_msgs.to_vec();
 
+        // Add preserved user messages, truncated from the start to fit.
+        let truncated_user = truncate_user_messages(
+            &preserved_user_msgs,
+            Self::MAX_PRESERVED_USER_TOKENS,
+        );
+
         let trimmed = summary.trim();
+
+        // 7. Guard: if the replacement (preserved users + summary) is larger
+        //    than the original old block, discard the compression and keep the
+        //    original messages.  This prevents negative compression on short
+        //    conversations where the summary overhead exceeds the original
+        //    assistant content.
+        let old_block_chars: usize = old.iter().map(|m| message_content_len(m)).sum();
+        let replacement_chars: usize = truncated_user
+            .iter()
+            .map(|m| message_content_len(m))
+            .sum::<usize>()
+            + if trimmed.is_empty() {
+                0
+            } else {
+                SUMMARY_PREFIX.len() + 1 + trimmed.len()
+            };
+        if replacement_chars >= old_block_chars {
+            tracing::info!(
+                session_id,
+                old_block_chars,
+                replacement_chars,
+                "[compact-timing] replacement larger than original, skipping compression"
+            );
+            return Ok(None);
+        }
+
+        new_messages.extend(truncated_user.into_iter().cloned());
+
         if !trimmed.is_empty() {
             new_messages.push(ChatMessage::user(format!("{SUMMARY_PREFIX}\n{trimmed}")));
         }
@@ -255,6 +343,9 @@ impl ContextCompactor {
             tokens_after = compressed_tokens,
             kept_recent = self.config.keep_recent_messages,
             summary_len = trimmed.len(),
+            preserved_user_count = preserved_user_msgs.len(),
+            old_block_chars,
+            replacement_chars,
             cache_hit = cache_effective,
             elapsed_ms = t0.elapsed().as_millis() as u64,
             "[compact-timing] compression complete"
@@ -286,10 +377,10 @@ impl ContextCompactor {
         &self,
         runtime: &AgentRuntime,
         session_id: &SessionId,
-        user_event_fn: Option<std::sync::Arc<dyn Fn(agent_base::UserEvent) + Send + Sync>>,
+        emit_fn: Option<std::sync::Arc<dyn Fn(agent_base::UserEvent) + Send + Sync>>,
     ) -> AgentResult<bool> {
         let sid = session_id.id;
-        let trigger = crate::compression::events::CompressionTrigger::Manual;
+        let trigger = CompressionTrigger::Manual;
 
         // Phase 1: read messages from the session (lock held briefly).
         let messages = runtime
@@ -299,50 +390,30 @@ impl ContextCompactor {
         let tokens_before: usize = messages.iter().map(estimate_message_tokens).sum();
 
         // Phase 2: compress (async LLM call, no session lock held).
-        let trigger_for_cbs = trigger.clone();
-        let trigger_for_preparing = trigger.clone();
-        let ef_start = user_event_fn.clone();
-        let ef_progress = user_event_fn.clone();
-        let ef_preparing = user_event_fn.clone();
-        let compressed = match self
-            .compact(
+        // Filter out old summary messages before compressing (same as middleware).
+        let filtered: Vec<ChatMessage> = messages
+            .iter()
+            .filter(|m| !is_summary_message(m))
+            .cloned()
+            .collect();
+
+        // Build emit_fn wrapper: CompressionEvent → into_user_event() → caller's emit_fn.
+        let compressed = if let Some(ref ef) = emit_fn {
+            let ef = ef.clone();
+            self.compact(
                 sid,
-                &messages,
-                Some(&move |chars| {
-                    if let Some(ref f) = ef_progress {
-                        f(crate::compression::events::CompressionEvent::Progress {
-                            session_id: sid,
-                            chars,
-                        }
-                        .into_user_event());
-                    }
+                &filtered,
+                trigger.clone(),
+                Some(&move |ev: CompressionEvent| {
+                    ef(ev.into_user_event());
                 }),
-                Some(&move |tokens, msgs| {
-                    if let Some(ref f) = ef_start {
-                        f(crate::compression::events::CompressionEvent::Started {
-                            session_id: sid,
-                            tokens_before: tokens,
-                            msg_count: msgs,
-                            trigger: trigger_for_cbs.clone(),
-                        }
-                        .into_user_event());
-                    }
-                }),
-                Some(&move |tokens, msgs| {
-                    if let Some(ref f) = ef_preparing {
-                        f(crate::compression::events::CompressionEvent::Preparing {
-                            session_id: sid,
-                            tokens_before: tokens,
-                            msg_count: msgs,
-                            trigger: trigger_for_preparing.clone(),
-                        }
-                        .into_user_event());
-                    }
-                }),
-                None, // compact_session has no PreLlmCtx drain_fn
             )
             .await?
-        {
+        } else {
+            self.compact(sid, &filtered, trigger.clone(), None).await?
+        };
+
+        let compressed = match compressed {
             Some(msgs) => msgs,
             None => {
                 // Below threshold — no-op, no events needed.
@@ -379,8 +450,8 @@ impl ContextCompactor {
         } else {
             0
         };
-        if let Some(ref f) = user_event_fn {
-            f(crate::compression::events::CompressionEvent::Completed {
+        if let Some(ref f) = emit_fn {
+            f(CompressionEvent::Completed {
                 session_id: sid,
                 tokens_before,
                 tokens_after,
@@ -397,6 +468,38 @@ impl ContextCompactor {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Total character length of a message's text content.
+///
+/// Used for size-based comparison (before vs after compression) rather than
+/// token estimation.
+fn message_content_len(msg: &ChatMessage) -> usize {
+    match msg {
+        ChatMessage::System { content, .. } => content.len(),
+        ChatMessage::User { content, .. } => content.len(),
+        ChatMessage::Assistant {
+            content,
+            reasoning_content,
+            tool_calls,
+        } => {
+            let mut len = content.as_deref().map(|c| c.len()).unwrap_or(0);
+            if let Some(rc) = reasoning_content {
+                len += rc.len();
+            }
+            if let Some(calls) = tool_calls {
+                for c in calls {
+                    len += c.id.len() + c.name.len() + c.arguments.len();
+                }
+            }
+            len
+        }
+        ChatMessage::Tool {
+            tool_call_id,
+            content,
+        } => tool_call_id.len() + content.len(),
+        ChatMessage::Custom { role, data } => role.len() + data.to_string().len(),
+    }
+}
 
 /// Walk `cut` backward until the boundary is tool-pairing safe.
 ///
@@ -548,6 +651,34 @@ fn truncate_to_chars(messages: &[&ChatMessage], max_chars: usize) -> String {
     serialize_block(messages, max_chars)
 }
 
+/// Truncate a list of user messages to fit within `max_tokens`.
+///
+/// Preserves messages from the *end* (most recent) and drops from the start
+/// when the budget is exceeded.  This mirrors codex's approach: recent user
+/// instructions are more valuable than older ones.
+fn truncate_user_messages<'a>(
+    messages: &[&'a ChatMessage],
+    max_tokens: usize,
+) -> Vec<&'a ChatMessage> {
+    if max_tokens == 0 {
+        return Vec::new();
+    }
+    let mut result: Vec<&ChatMessage> = Vec::with_capacity(messages.len());
+    let mut remaining = max_tokens;
+    // Walk from end to start, keeping messages that fit.
+    for msg in messages.iter().rev() {
+        let tokens = estimate_message_tokens(msg);
+        if tokens <= remaining {
+            result.push(msg);
+            remaining -= tokens;
+        } else {
+            break;
+        }
+    }
+    result.reverse();
+    result
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -674,7 +805,9 @@ mod tests {
         let mut msgs = vec![ChatMessage::system("You are a test agent.")];
         for i in 0..count {
             msgs.push(ChatMessage::user(format!("question {i}")));
-            msgs.push(ChatMessage::assistant(format!("answer {i}")));
+            msgs.push(ChatMessage::assistant(format!(
+                "answer {i} with some extra content to make it longer"
+            )));
         }
         msgs
     }
@@ -800,7 +933,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(100);
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -813,7 +946,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(10);
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -828,7 +961,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(20);
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap()
             .unwrap();
@@ -870,7 +1003,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(20);
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap()
             .unwrap();
@@ -901,14 +1034,14 @@ mod tests {
 
         // First call — should invoke LLM once.
         let _ = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Second call with same old block — should hit cache (no new LLM call).
         let _ = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -918,7 +1051,7 @@ mod tests {
         grown.push(ChatMessage::user("new question"));
         grown.push(ChatMessage::assistant("new answer"));
         let _ = compactor
-            .compact(1, &grown, None, None, None, None)
+            .compact(1, &grown, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -952,14 +1085,14 @@ mod tests {
 
         // First call — cache miss, LLM called once.
         let _ = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // Second call, identical — cache hit (same prefix + same length).
         let _ = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -969,7 +1102,7 @@ mod tests {
         msgs.push(ChatMessage::user("extra question"));
         msgs.push(ChatMessage::assistant("extra answer"));
         let _ = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert_eq!(
@@ -996,13 +1129,16 @@ mod tests {
             msgs.push(ChatMessage::assistant_tool_call(
                 format!("tc{i}"),
                 "bash",
-                "{}",
+                format!("{{\"cmd\":\"echo {i} with some extra arguments to make it longer\"}}"),
             ));
-            msgs.push(ChatMessage::tool(format!("tc{i}"), format!("r{i}")));
+            msgs.push(ChatMessage::tool(
+                format!("tc{i}"),
+                format!("result {i} with some extra output content"),
+            ));
         }
 
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap()
             .unwrap();
@@ -1041,7 +1177,7 @@ mod tests {
         let client = std::sync::Arc::new(MockClient("summary"));
         let compactor = ContextCompactor::new(client, config);
         let result = compactor
-            .compact(1, &[], None, None, None, None)
+            .compact(1, &[], CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1054,7 +1190,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = vec![ChatMessage::system("You are helpful.")];
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1070,7 +1206,7 @@ mod tests {
         let compactor = ContextCompactor::new(client, config);
         let msgs = make_messages(3); // 1 system + 6 conversation = 7
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1092,11 +1228,13 @@ mod tests {
         )));
         for i in 0..10 {
             msgs.push(ChatMessage::user(format!("question {i}")));
-            msgs.push(ChatMessage::assistant(format!("answer {i}")));
+            msgs.push(ChatMessage::assistant(format!(
+                "answer {i} with some extra content to make the old block large enough"
+            )));
         }
 
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap()
             .unwrap();
@@ -1127,7 +1265,9 @@ mod tests {
         let mut msgs = vec![ChatMessage::system("sys")];
         for i in 0..5 {
             msgs.push(ChatMessage::user(format!("question {i}")));
-            msgs.push(ChatMessage::assistant(format!("answer {i}")));
+            msgs.push(ChatMessage::assistant(format!(
+                "answer {i} with some extra content to make the old block large enough"
+            )));
         }
         // Old summary at the end of old block / start of recent.
         msgs.push(ChatMessage::user(format!(
@@ -1135,11 +1275,13 @@ mod tests {
         )));
         for i in 5..10 {
             msgs.push(ChatMessage::user(format!("question {i}")));
-            msgs.push(ChatMessage::assistant(format!("answer {i}")));
+            msgs.push(ChatMessage::assistant(format!(
+                "answer {i} with some extra content to make the old block large enough"
+            )));
         }
 
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap()
             .unwrap();
@@ -1201,7 +1343,7 @@ mod tests {
         ];
 
         let result = compactor
-            .compact(1, &msgs, None, None, None, None)
+            .compact(1, &msgs, CompressionTrigger::Auto, None)
             .await
             .unwrap();
 
