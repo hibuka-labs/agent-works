@@ -25,6 +25,8 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 [dependencies]
 agent-base = { version = "0.2.0", path = "../agent-base" }
 async-trait = "0.1"
+futures-core = "0.3"
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52", features = ["full"] }
@@ -36,8 +38,6 @@ notify = { version = "7", optional = true, default-features = false, features = 
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-futures-core = "0.3"
-futures-util = "0.3"
 anyhow = "1"
 tempfile = "3"
 serial_test = "3"

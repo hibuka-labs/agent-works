@@ -40,7 +40,15 @@ impl LlmClient for MockLlmClient {
         _reasoning: Option<&agent_base::ReasoningConfig>,
         _response_format: Option<&ResponseFormat>,
     ) -> AgentResult<Value> {
-        unimplemented!()
+        // Used by the guard's LLM judge. Return a valid chat completion response
+        // with a "done" verdict so the guard returns Done.
+        Ok(json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"done\":true,\"reason\":\"task complete\"}"
+                }
+            }]
+        }))
     }
 
     async fn chat_stream(

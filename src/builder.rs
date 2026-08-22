@@ -26,6 +26,7 @@ pub type ListSkillsToolFactory =
 
 pub struct AgentBuilder {
     inner: agent_base::AgentBuilder,
+    client: Arc<dyn StreamClient>,
     system_prompt: Option<String>,
     tool_names: HashSet<String>,
     /// Business tools to pass to child agents (all registered tools).
@@ -60,7 +61,8 @@ pub struct AgentBuilder {
 impl AgentBuilder {
     pub fn new(client: Arc<dyn StreamClient>) -> Self {
         Self {
-            inner: agent_base::AgentBuilder::new(client),
+            inner: agent_base::AgentBuilder::new(client.clone()),
+            client,
             system_prompt: None,
             tool_names: HashSet::new(),
             business_tools: Vec::new(),
@@ -387,9 +389,11 @@ impl AgentBuilder {
     #[allow(dead_code, unused_mut)]
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
         // Inject default guard if none was set by the consumer.
+        // Uses the same LLM client for the judge (enabled by default).
         if self.inner.get_guard().is_none() {
-            self.inner = self.inner.guard(crate::guard::DefaultGuard::new(
+            self.inner = self.inner.guard(crate::guard::DefaultGuard::with_llm_client(
                 crate::guard::DefaultGuardConfig::default(),
+                self.client.clone(),
             ));
         }
 
@@ -453,9 +457,11 @@ impl AgentBuilder {
     #[cfg(feature = "skill")]
     fn build_with_skills(mut self) -> AgentResult<AgentRuntime> {
         // Inject default guard if none was set by the consumer.
+        // Uses the same LLM client for the judge (enabled by default).
         if self.inner.get_guard().is_none() {
-            self.inner = self.inner.guard(crate::guard::DefaultGuard::new(
+            self.inner = self.inner.guard(crate::guard::DefaultGuard::with_llm_client(
                 crate::guard::DefaultGuardConfig::default(),
+                self.client.clone(),
             ));
         }
 

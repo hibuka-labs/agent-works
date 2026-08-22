@@ -223,6 +223,16 @@ impl ReactLoopGuard for DefaultGuard {
             );
 
             if ctx.run_has_tool_calls && self.config.use_llm_judge {
+                // Skip LLM judge for very large inputs — judge would be too slow
+                const INPUT_LEN_LIMIT: usize = 10_000;
+                if input_len > INPUT_LEN_LIMIT {
+                    tracing::info!(
+                        input_chars = input_len,
+                        input_limit = INPUT_LEN_LIMIT,
+                        "skipping LLM judge — user input too large, trusting model"
+                    );
+                    return GuardAction::Done;
+                }
                 // Short response after tools — call judge to verify completion
                 match self
                     .call_completion_judge(&ctx.user_input, &ctx.model_response)
@@ -262,6 +272,17 @@ impl ReactLoopGuard for DefaultGuard {
                     response_chars = output_len,
                     threshold = self.config.judge_skip_threshold,
                     "text-only response long enough, skipping judge"
+                );
+                return GuardAction::Done;
+            }
+
+            // Skip LLM judge for very large inputs — judge would be too slow
+            const INPUT_LEN_LIMIT: usize = 10_000;
+            if input_len > INPUT_LEN_LIMIT {
+                tracing::info!(
+                    input_chars = input_len,
+                    input_limit = INPUT_LEN_LIMIT,
+                    "skipping LLM judge — user input too large, trusting model"
                 );
                 return GuardAction::Done;
             }
@@ -307,7 +328,12 @@ impl ReactLoopGuard for DefaultGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::types::{FinishReason, SessionId};
+    use agent_base::llm::{LlmCapabilities, StreamChunk};
+    use agent_base::types::{AgentResult, FinishReason, SessionId};
+    use futures_core::Stream;
+    use serde_json::Value;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
     fn make_ctx(
         reasoning_only_strikes: usize,
@@ -327,6 +353,97 @@ mod tests {
             reasoning_only_strikes,
             empty_response_strikes,
             run_has_tool_calls,
+        }
+    }
+
+    /// Build a GuardCtx with custom input/response text (for length-sensitive tests).
+    fn make_ctx_with_text(
+        user_input: &str,
+        model_response: &str,
+        run_has_tool_calls: bool,
+    ) -> GuardCtx {
+        GuardCtx {
+            session_id: SessionId {
+                id: 1,
+                external_id: None,
+            },
+            turn_count: 2,
+            user_input: user_input.to_string(),
+            model_response: model_response.to_string(),
+            finish_reason: FinishReason::Stop,
+            available_tools: vec!["echo".to_string()],
+            reasoning_only_strikes: 0,
+            empty_response_strikes: 0,
+            run_has_tool_calls,
+        }
+    }
+
+    // ── Mock LLM clients for judge testing ──
+
+    /// Mock StreamClient that returns a fixed JSON response (for judge calls).
+    struct MockJudgeClient {
+        response: String,
+    }
+
+    impl MockJudgeClient {
+        fn new(response: Value) -> Self {
+            Self {
+                response: response.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StreamClient for MockJudgeClient {
+        async fn stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+            let chunks = vec![
+                Ok(StreamChunk::Text(self.response.clone())),
+                Ok(StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(chunks)))
+        }
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::default()
+        }
+    }
+
+    /// Mock StreamClient that never resolves (for timeout testing).
+    struct MockTimeoutClient;
+
+    #[async_trait]
+    impl StreamClient for MockTimeoutClient {
+        async fn stream(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[Value],
+            _reasoning: Option<&agent_base::ReasoningConfig>,
+            _response_format: Option<&ResponseFormat>,
+        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+            // Return a stream whose first item never resolves.
+            struct HangingStream;
+            impl Stream for HangingStream {
+                type Item = AgentResult<StreamChunk>;
+                fn poll_next(
+                    self: Pin<&mut Self>,
+                    _cx: &mut Context<'_>,
+                ) -> Poll<Option<Self::Item>> {
+                    Poll::Pending // never wakes
+                }
+            }
+            Ok(Box::pin(HangingStream))
+        }
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities::default()
         }
     }
 
@@ -436,5 +553,199 @@ mod tests {
         let ctx = make_ctx(0, 2, false);
         let action = guard.on_empty_response(&ctx).await;
         assert!(matches!(action, GuardAction::Fail(_)));
+    }
+
+    // ── Branch 4: text-only after tools — LLM judge tests ──
+
+    #[tokio::test]
+    async fn test_text_only_judge_says_done() {
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": true,
+            "reason": "task is complete"
+        })));
+        let guard = DefaultGuard::with_llm_client(
+            DefaultGuardConfig::default(),
+            judge_client,
+        );
+        let ctx = make_ctx_with_text(
+            "what is 2+2?",
+            "The answer is 4.",
+            true, // run_has_tool_calls
+        );
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "judge says done → Done, got: {:?}",
+            action
+        );
+    }
+
+    #[tokio::test]
+    async fn test_text_only_judge_says_not_done() {
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": false,
+            "reason": "only answered part of the question"
+        })));
+        let guard = DefaultGuard::with_llm_client(
+            DefaultGuardConfig::default(),
+            judge_client,
+        );
+        let ctx = make_ctx_with_text(
+            "list all files and explain each",
+            "Here are the files:", // incomplete
+            true,
+        );
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("incomplete"),
+                    "nudge should mention incomplete: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("only answered part"),
+                    "nudge should include judge reason: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Continue, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_only_short_response_detected_no_tools() {
+        // Long input (>128 chars) + short output (<64 chars) + no tool calls → nudge
+        let long_input = "a".repeat(200);
+        let short_output = "done";
+        let guard = DefaultGuard::new(DefaultGuardConfig::default());
+        let ctx = make_ctx_with_text(&long_input, short_output, false);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("incomplete"),
+                    "short response nudge: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Continue for short response, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_only_short_response_with_judge_done() {
+        // Short response + tools + judge says done → Done
+        let long_input = "a".repeat(200);
+        let short_output = "42";
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": true,
+            "reason": "answer is correct"
+        })));
+        let guard = DefaultGuard::with_llm_client(
+            DefaultGuardConfig::default(),
+            judge_client,
+        );
+        let ctx = make_ctx_with_text(&long_input, short_output, true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "short response + judge done → Done, got: {:?}",
+            action
+        );
+    }
+
+    #[tokio::test]
+    async fn test_text_only_skip_threshold() {
+        // Output >= 256 chars → skip judge entirely → Done
+        let long_output = "x".repeat(300);
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": false,
+            "reason": "would be incomplete but skipped"
+        })));
+        let guard = DefaultGuard::with_llm_client(
+            DefaultGuardConfig::default(),
+            judge_client,
+        );
+        let ctx = make_ctx_with_text("query", &long_output, true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "response >= skip_threshold → Done without calling judge, got: {:?}",
+            action
+        );
+    }
+
+    #[tokio::test]
+    async fn test_text_only_judge_timeout_fail_open() {
+        let judge_client = Arc::new(MockTimeoutClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: true,
+            judge_timeout_secs: 1, // 1 second timeout
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let ctx = make_ctx_with_text("query", "short answer", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "timeout + fail_open → Done (trust model), got: {:?}",
+            action
+        );
+    }
+
+    #[tokio::test]
+    async fn test_text_only_judge_timeout_fail_closed() {
+        let judge_client = Arc::new(MockTimeoutClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: false,
+            judge_timeout_secs: 1, // 1 second timeout
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let ctx = make_ctx_with_text("query", "short answer", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("Cannot verify"),
+                    "fail_closed timeout → Continue with verify message: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected Continue for timeout + fail_closed, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_only_skip_judge_when_input_too_large() {
+        // user_input > 10k chars → skip judge, trust model (Done)
+        let long_input = "a".repeat(10_001);
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": false,
+            "reason": "would be incomplete but skipped"
+        })));
+        let guard = DefaultGuard::with_llm_client(
+            DefaultGuardConfig::default(),
+            judge_client,
+        );
+        let ctx = make_ctx_with_text(&long_input, "short answer", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "input > 10k → skip judge → Done, got: {:?}",
+            action
+        );
     }
 }
