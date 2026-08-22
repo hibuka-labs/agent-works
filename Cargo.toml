@@ -23,7 +23,7 @@ multi_agent = []
 full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
 
 [dependencies]
-agent-base = { version = "0.3.0", path = "../agent-base" }
+agent-base = { version = "0.3.1" }
 async-trait = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
