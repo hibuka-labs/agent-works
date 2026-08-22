@@ -855,6 +855,7 @@ fn build_child_input(task: &MailboxTask) -> String {
 fn summarize_outcome(outcome: &RunOutcome) -> String {
     match outcome {
         RunOutcome::Completed => "task completed".to_string(),
+        RunOutcome::Continuing => "continuing".to_string(),
         RunOutcome::Failed { error } => format!("task failed: {}", error),
         RunOutcome::MaxTurnsExceeded { turns } => {
             format!("max turns exceeded ({} turns)", turns)

@@ -303,13 +303,14 @@ impl Middleware for CompressionMiddleware {
                 // skip() operates on the full message array structure.
                 self.last_compressed_msg_count
                     .store(msg_count, Ordering::Relaxed);
-                // Count replacement tokens (same scope as tokens_before: old block only).
-                let keep = self.config().keep_recent_messages;
-                let old_end = ctx.messages.len().saturating_sub(keep);
+                // Count tokens after compression (same scope as tokens_before).
+                // tokens_before counts all non-system, non-summary messages from last_compressed.
+                // tokens_after should count the same scope after compression.
+                // Since compression replaces the old block with a summary, we count
+                // all non-system messages in the compressed result (including the new summary).
                 let tokens_after: usize = ctx
                     .messages
                     .iter()
-                    .take(old_end)
                     .filter(|m| !matches!(m, ChatMessage::System { .. }))
                     .map(estimate_message_tokens)
                     .sum();
@@ -971,7 +972,10 @@ mod tests {
         // First call — should compress and emit events.
         let mut ctx1 = make_ctx_with_events(msgs.clone(), events.clone());
         mw.on_pre_llm(&mut ctx1).await.unwrap();
-        assert!(events.lock().unwrap().len() >= 3, "first call should emit events");
+        assert!(
+            events.lock().unwrap().len() >= 3,
+            "first call should emit events"
+        );
         events.lock().unwrap().clear();
 
         // Second call with the same messages — should NOT re-trigger.
@@ -1079,7 +1083,9 @@ mod tests {
                 compression_turns.push(turn + 1);
                 // Record old block size from the compression event.
                 if let CompressionEvent::Completed {
-                    msg_count_before, msg_count_after, ..
+                    msg_count_before,
+                    msg_count_after,
+                    ..
                 } = events.lock().unwrap().last().unwrap()
                 {
                     old_block_sizes.push((*msg_count_before, *msg_count_after));
@@ -1103,7 +1109,10 @@ mod tests {
         println!("\n=== Simulation Summary ===");
         println!("Compression turns: {:?}", compression_turns);
         println!("Total compressions: {}", compression_count);
-        println!("LLM calls: {}", calls.load(std::sync::atomic::Ordering::SeqCst));
+        println!(
+            "LLM calls: {}",
+            calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
         println!("Final messages: {}", messages.len());
         println!("Old block before/after: {:?}", old_block_sizes);
 

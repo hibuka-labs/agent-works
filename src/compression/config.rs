@@ -11,8 +11,8 @@
 /// | Field | Default | Purpose |
 /// |-------|---------|---------|
 /// | `enabled` | `true` | Master switch |
-/// | `trigger_tokens` | 30 000 | Skip compression when estimated tokens are below this |
-/// | `keep_recent_messages` | 40 | Number of most-recent messages kept verbatim |
+/// | `trigger_tokens` | 160 000 | Skip compression when estimated tokens are below this |
+/// | `keep_recent_messages` | 16 | Number of most-recent messages kept verbatim |
 /// | `max_summary_chars` | 10 240 (10 KB) | Hard cap on the generated summary length |
 /// | `max_transcript_chars` | 20 480 (20 KB) | Max chars of old messages sent to the summarizer |
 #[derive(Clone, Debug)]
@@ -37,8 +37,8 @@ impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            trigger_tokens: 30_000,
-            keep_recent_messages: 40,
+            trigger_tokens: 160_000,
+            keep_recent_messages: 16,
             max_summary_chars: 10 * 1024,    // 10 KB
             max_transcript_chars: 20 * 1024, // 20 KB
         }
@@ -87,8 +87,8 @@ mod tests {
     fn test_default_values() {
         let cfg = CompressionConfig::default();
         assert!(cfg.enabled);
-        assert_eq!(cfg.trigger_tokens, 30_000);
-        assert_eq!(cfg.keep_recent_messages, 40);
+        assert_eq!(cfg.trigger_tokens, 160_000);
+        assert_eq!(cfg.keep_recent_messages, 16);
         assert_eq!(cfg.max_summary_chars, 10 * 1024);
         assert_eq!(cfg.max_transcript_chars, 20 * 1024);
     }

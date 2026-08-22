@@ -16,6 +16,8 @@ pub mod multi_agent;
 #[cfg(feature = "compression")]
 pub mod compression;
 
+pub mod guard;
+
 mod builder;
 pub mod handle;
 

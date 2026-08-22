@@ -474,6 +474,7 @@ impl McpServer {
 
         let result_text = match &outcome {
             Ok(RunOutcome::Completed) => final_text.join("\n"),
+            Ok(RunOutcome::Continuing) => final_text.join("\n"),
             Ok(RunOutcome::Cancelled) => {
                 if final_text.is_empty() {
                     "Task cancelled.".to_string()

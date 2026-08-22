@@ -249,6 +249,13 @@ impl AgentBuilder {
         }
     }
 
+    pub fn guard(self, guard: impl agent_base::ReactLoopGuard + 'static) -> Self {
+        Self {
+            inner: self.inner.guard(guard),
+            ..self
+        }
+    }
+
     pub fn context_window(self, max_tokens: usize) -> Self {
         Self {
             inner: self.inner.context_window(max_tokens),
@@ -379,6 +386,13 @@ impl AgentBuilder {
 
     #[allow(dead_code, unused_mut)]
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
+        // Inject default guard if none was set by the consumer.
+        if self.inner.get_guard().is_none() {
+            self.inner = self.inner.guard(crate::guard::DefaultGuard::new(
+                crate::guard::DefaultGuardConfig::default(),
+            ));
+        }
+
         #[cfg(feature = "multi_agent")]
         let lang = self.language.clone().unwrap_or_default();
         #[cfg(feature = "multi_agent")]
@@ -438,6 +452,13 @@ impl AgentBuilder {
     /// so this is safe in practice.
     #[cfg(feature = "skill")]
     fn build_with_skills(mut self) -> AgentResult<AgentRuntime> {
+        // Inject default guard if none was set by the consumer.
+        if self.inner.get_guard().is_none() {
+            self.inner = self.inner.guard(crate::guard::DefaultGuard::new(
+                crate::guard::DefaultGuardConfig::default(),
+            ));
+        }
+
         let mut ab = self.inner;
         #[cfg(feature = "multi_agent")]
         let lang = self.language.clone().unwrap_or_default();

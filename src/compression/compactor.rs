@@ -296,10 +296,8 @@ impl ContextCompactor {
         let mut new_messages: Vec<ChatMessage> = system_msgs.to_vec();
 
         // Add preserved user messages, truncated from the start to fit.
-        let truncated_user = truncate_user_messages(
-            &preserved_user_msgs,
-            Self::MAX_PRESERVED_USER_TOKENS,
-        );
+        let truncated_user =
+            truncate_user_messages(&preserved_user_msgs, Self::MAX_PRESERVED_USER_TOKENS);
 
         let trimmed = summary.trim();
 
@@ -671,9 +669,8 @@ fn truncate_user_messages<'a>(
         if tokens <= remaining {
             result.push(msg);
             remaining -= tokens;
-        } else {
-            break;
         }
+        // Skip oversized messages — don't break, earlier messages may still fit.
     }
     result.reverse();
     result
