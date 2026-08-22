@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -23,7 +23,7 @@ multi_agent = []
 full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
 
 [dependencies]
-agent-base = { version = "0.3.0" }
+agent-base = { version = "0.3.0", path = "../agent-base" }
 async-trait = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"

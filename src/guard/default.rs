@@ -313,8 +313,7 @@ impl ReactLoopGuard for DefaultGuard {
                         GuardAction::Done
                     } else {
                         GuardAction::Continue(
-                            "Cannot verify task completion, please continue working."
-                                .to_string(),
+                            "Cannot verify task completion, please continue working.".to_string(),
                         )
                     }
                 }
@@ -563,10 +562,7 @@ mod tests {
             "done": true,
             "reason": "task is complete"
         })));
-        let guard = DefaultGuard::with_llm_client(
-            DefaultGuardConfig::default(),
-            judge_client,
-        );
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
         let ctx = make_ctx_with_text(
             "what is 2+2?",
             "The answer is 4.",
@@ -587,10 +583,7 @@ mod tests {
             "done": false,
             "reason": "only answered part of the question"
         })));
-        let guard = DefaultGuard::with_llm_client(
-            DefaultGuardConfig::default(),
-            judge_client,
-        );
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
         let ctx = make_ctx_with_text(
             "list all files and explain each",
             "Here are the files:", // incomplete
@@ -626,11 +619,7 @@ mod tests {
         let action = guard.on_text_only(&ctx).await;
         match &action {
             GuardAction::Continue(msg) => {
-                assert!(
-                    msg.contains("incomplete"),
-                    "short response nudge: {}",
-                    msg
-                );
+                assert!(msg.contains("incomplete"), "short response nudge: {}", msg);
             }
             other => panic!("expected Continue for short response, got: {:?}", other),
         }
@@ -645,10 +634,7 @@ mod tests {
             "done": true,
             "reason": "answer is correct"
         })));
-        let guard = DefaultGuard::with_llm_client(
-            DefaultGuardConfig::default(),
-            judge_client,
-        );
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
         let ctx = make_ctx_with_text(&long_input, short_output, true);
 
         let action = guard.on_text_only(&ctx).await;
@@ -667,10 +653,7 @@ mod tests {
             "done": false,
             "reason": "would be incomplete but skipped"
         })));
-        let guard = DefaultGuard::with_llm_client(
-            DefaultGuardConfig::default(),
-            judge_client,
-        );
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
         let ctx = make_ctx_with_text("query", &long_output, true);
 
         let action = guard.on_text_only(&ctx).await;
@@ -735,10 +718,7 @@ mod tests {
             "done": false,
             "reason": "would be incomplete but skipped"
         })));
-        let guard = DefaultGuard::with_llm_client(
-            DefaultGuardConfig::default(),
-            judge_client,
-        );
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
         let ctx = make_ctx_with_text(&long_input, "short answer", true);
 
         let action = guard.on_text_only(&ctx).await;

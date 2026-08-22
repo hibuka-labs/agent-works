@@ -391,10 +391,12 @@ impl AgentBuilder {
         // Inject default guard if none was set by the consumer.
         // Uses the same LLM client for the judge (enabled by default).
         if self.inner.get_guard().is_none() {
-            self.inner = self.inner.guard(crate::guard::DefaultGuard::with_llm_client(
-                crate::guard::DefaultGuardConfig::default(),
-                self.client.clone(),
-            ));
+            self.inner = self
+                .inner
+                .guard(crate::guard::DefaultGuard::with_llm_client(
+                    crate::guard::DefaultGuardConfig::default(),
+                    self.client.clone(),
+                ));
         }
 
         #[cfg(feature = "multi_agent")]
@@ -459,10 +461,12 @@ impl AgentBuilder {
         // Inject default guard if none was set by the consumer.
         // Uses the same LLM client for the judge (enabled by default).
         if self.inner.get_guard().is_none() {
-            self.inner = self.inner.guard(crate::guard::DefaultGuard::with_llm_client(
-                crate::guard::DefaultGuardConfig::default(),
-                self.client.clone(),
-            ));
+            self.inner = self
+                .inner
+                .guard(crate::guard::DefaultGuard::with_llm_client(
+                    crate::guard::DefaultGuardConfig::default(),
+                    self.client.clone(),
+                ));
         }
 
         let mut ab = self.inner;

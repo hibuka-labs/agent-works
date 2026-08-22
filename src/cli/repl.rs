@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 use agent_base::{AgentError, AgentResult, AgentRuntime, SessionId};
 
@@ -79,15 +80,18 @@ impl CliRepl {
             }
 
             let sid = self.session_id.clone().expect("session not initialized");
-            let mut printer = super::printer::CliEventPrinter::new();
+            let printer = Arc::new(Mutex::new(super::printer::CliEventPrinter::new()));
+            let printer_clone = printer.clone();
             match self
                 .runtime
-                .run_turn(sid, input, |event| printer.handle(event))
+                .run_turn(sid, input, move |event| {
+                    printer_clone.lock().unwrap().handle(event)
+                })
                 .await
             {
-                Ok(_) => printer.finish(),
+                Ok(_) => printer.lock().unwrap().finish(),
                 Err(err) => {
-                    printer.finish();
+                    printer.lock().unwrap().finish();
                     eprintln!("[Error] {err}");
                 }
             }
