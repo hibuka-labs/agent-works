@@ -37,14 +37,14 @@ type CompactionCache = std::collections::HashMap<(u64, u64), (usize, String)>;
 /// avoid redundant calls.  Designed to be shared via `Arc` across middleware
 /// invocations.
 ///
-/// Use [`clone()`](Self::clone) to create a second handle that shares the same
+/// Use `clone()` to create a second handle that shares the same
 /// underlying cache — useful when the compactor is registered as middleware *and*
 /// stored separately for manual `/compact` access.
 pub struct ContextCompactor {
     client: Arc<dyn StreamClient>,
     config: CompressionConfig,
     /// `(session_id, prefix_hash) → (transcript_len, summary)` cache.
-    /// Wrapped in `Arc` so that [`clone()`](Self::clone) shares the same cache.
+    /// Wrapped in `Arc` so that `clone()` shares the same cache.
     cache: Arc<Mutex<CompactionCache>>,
 }
 
@@ -96,7 +96,7 @@ impl ContextCompactor {
     /// # Compression strategy
     ///
     /// User messages from the old block are preserved verbatim (truncated to
-    /// [`MAX_PRESERVED_USER_TOKENS`](Self::MAX_PRESERVED_USER_TOKENS)).
+    /// `MAX_PRESERVED_USER_TOKENS`).
     /// Only assistant and tool responses are summarised by the LLM.  This
     /// mirrors codex's compaction strategy and avoids the common pitfall of
     /// the summarizer reproducing assistant-generated content (poems, code,
