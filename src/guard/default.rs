@@ -35,6 +35,9 @@ pub struct DefaultGuardConfig {
     pub short_response_max_output: usize,
     /// Nudge message for short responses
     pub short_response_nudge: String,
+    /// Number of recent user messages to include in the judge prompt.
+    /// Helps the judge understand context like "继续" after a multi-turn discussion.
+    pub recent_user_count: usize,
 }
 
 impl Default for DefaultGuardConfig {
@@ -59,6 +62,7 @@ impl Default for DefaultGuardConfig {
             short_response_nudge: "Your response may be incomplete — \
                 you may need to continue."
                 .to_string(),
+            recent_user_count: 5,
         }
     }
 }
@@ -95,6 +99,7 @@ impl DefaultGuard {
         &self,
         user_input: &str,
         model_response: &str,
+        all_user_inputs: &[String],
     ) -> Result<JudgeResult, String> {
         let Some(client) = &self.llm_client else {
             // No LLM client available — use configured behavior
@@ -109,13 +114,34 @@ impl DefaultGuard {
         };
 
         let system_prompt = "You are a task completion judge. \
-            Given the user's original question and the agent's response, \
+            Given the user's conversation history and the agent's response, \
             determine if the agent has sufficiently answered the task. \
             Reply with JSON: {\"done\": true/false, \"reason\": \"brief explanation\"}";
 
+        // Build context from recent user messages
+        let user_context = if all_user_inputs.is_empty() {
+            user_input.to_string()
+        } else {
+            let n = self.config.recent_user_count;
+            let start = all_user_inputs.len().saturating_sub(n);
+            let recent = &all_user_inputs[start..];
+            if recent.len() <= 1 {
+                // Only one message (the current one) — use as-is
+                user_input.to_string()
+            } else {
+                // Multiple messages — show conversation history
+                recent
+                    .iter()
+                    .enumerate()
+                    .map(|(i, msg)| format!("{}. {}", start + i + 1, msg))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+
         let user_prompt = format!(
-            "【User Question】\n{}\n\n【Agent Response】\n{}",
-            user_input, model_response
+            "【User Messages】\n{}\n\n【Agent Response】\n{}",
+            user_context, model_response
         );
 
         let messages = vec![
@@ -235,7 +261,11 @@ impl ReactLoopGuard for DefaultGuard {
                 }
                 // Short response after tools — call judge to verify completion
                 match self
-                    .call_completion_judge(&ctx.user_input, &ctx.model_response)
+                    .call_completion_judge(
+                        &ctx.user_input,
+                        &ctx.model_response,
+                        &ctx.all_user_inputs,
+                    )
                     .await
                 {
                     Ok(judge) => {
@@ -293,7 +323,7 @@ impl ReactLoopGuard for DefaultGuard {
                 "text-only response short, calling judge"
             );
             match self
-                .call_completion_judge(&ctx.user_input, &ctx.model_response)
+                .call_completion_judge(&ctx.user_input, &ctx.model_response, &ctx.all_user_inputs)
                 .await
             {
                 Ok(judge) => {
@@ -352,6 +382,7 @@ mod tests {
             reasoning_only_strikes,
             empty_response_strikes,
             run_has_tool_calls,
+            all_user_inputs: vec!["test".to_string()],
         }
     }
 
@@ -374,6 +405,7 @@ mod tests {
             reasoning_only_strikes: 0,
             empty_response_strikes: 0,
             run_has_tool_calls,
+            all_user_inputs: vec![user_input.to_string()],
         }
     }
 
@@ -725,6 +757,67 @@ mod tests {
         assert!(
             matches!(action, GuardAction::Done),
             "input > 10k → skip judge → Done, got: {:?}",
+            action
+        );
+    }
+
+    #[tokio::test]
+    async fn test_text_only_judge_with_multiple_user_messages() {
+        // Simulates: user discusses a problem over 3 turns, then says "继续".
+        // The judge should see all messages, not just "继续".
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": false,
+            "reason": "agent has not finished the task yet"
+        })));
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
+
+        let mut ctx = make_ctx_with_text("继续", "I'll continue working on it.", true);
+        ctx.all_user_inputs = vec![
+            "帮我分析一下这个 bug 的根因".to_string(),
+            "好的，那你帮我修复一下".to_string(),
+            "继续".to_string(),
+        ];
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("incomplete"),
+                    "judge should see history and say incomplete: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Continue (judge says not done), got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_only_judge_respects_recent_user_count() {
+        // recent_user_count=2, but there are 5 messages in all_user_inputs.
+        // Judge should only see the last 2.
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": true,
+            "reason": "task complete"
+        })));
+        let config = DefaultGuardConfig {
+            recent_user_count: 2,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+
+        let mut ctx = make_ctx_with_text("继续", "done", true);
+        ctx.all_user_inputs = vec![
+            "msg1".to_string(),
+            "msg2".to_string(),
+            "msg3".to_string(),
+            "msg4".to_string(),
+            "继续".to_string(),
+        ];
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "judge says done → Done, got: {:?}",
             action
         );
     }
