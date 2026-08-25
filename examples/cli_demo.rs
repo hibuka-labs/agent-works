@@ -1,26 +1,27 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use agent_base::llm_trait::backend::LlmBackend;
+use agent_base::llm_trait::response::FinishReason;
+use agent_base::llm_trait::types::UsageInfo;
+use agent_base::llm_trait::{
+    Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
+};
 use agent_base::{
-    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
-    RuntimeEvent, SessionId, StreamChunk, Tool, ToolContext,
+    AgentResult, ChatMessage, Content, RuntimeEvent, SessionId, StreamChunk, Tool, ToolContext,
 };
 use agent_works::{
     AgentBuilder,
     cli::{CliEventPrinter, CliRepl},
 };
 use async_trait::async_trait;
-use futures_core::Stream;
 use serde_json::{Value, json};
 
-type ChunkStream = Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>;
-
-struct MockLlmClient {
+struct MockLlmProvider {
     responses: Mutex<std::vec::IntoIter<Vec<StreamChunk>>>,
 }
 
-impl MockLlmClient {
+impl MockLlmProvider {
     fn new(responses: Vec<Vec<StreamChunk>>) -> Self {
         Self {
             responses: Mutex::new(responses.into_iter()),
@@ -29,25 +30,9 @@ impl MockLlmClient {
 }
 
 #[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn chat(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<Value> {
-        unimplemented!()
-    }
-
-    async fn chat_stream(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<ChunkStream> {
-        let chunks: Vec<AgentResult<StreamChunk>> = self
+impl LlmProvider for MockLlmProvider {
+    async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        let chunks: Vec<Result<StreamChunk, LlmError>> = self
             .responses
             .lock()
             .unwrap()
@@ -56,17 +41,29 @@ impl LlmClient for MockLlmClient {
             .into_iter()
             .map(Ok)
             .collect();
-        Ok(Box::pin(futures_util::stream::iter(chunks)))
+        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+            chunks,
+        ))))
     }
 
-    fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities {
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        unimplemented!()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             supports_streaming: true,
             supports_tools: true,
-            supports_vision: false,
-            supports_thinking: false,
-            max_context_tokens: None,
-            max_output_tokens: None,
+            ..Default::default()
+        }
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            name: "mock".to_string(),
+            model: "mock-model".to_string(),
+            backend: LlmBackend::Custom("mock".to_string()),
+            version: None,
         }
     }
 }
@@ -103,7 +100,7 @@ impl Tool for EchoTool {
 async fn main() -> AgentResult<()> {
     println!("=== agent-works CLI Demo ===\n");
 
-    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![])));
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider::new(vec![]));
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant.")
@@ -112,72 +109,16 @@ async fn main() -> AgentResult<()> {
         .unwrap();
 
     println!("[1] AgentRuntime created with AgentBuilder");
-    println!("    - MockLlmClient (for demo purposes)");
+    println!("    - MockLlmProvider (for demo purposes)");
     println!("    - EchoTool registered");
     println!();
 
     let mut repl = CliRepl::new(runtime);
     println!("[2] CliRepl created from AgentRuntime");
-    println!();
 
-    repl.register_shell_command(
-        "time",
-        Box::new(|_input: &str| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            println!(">>> Current Unix timestamp: {now}");
-            true
-        }),
+    // Note: repl.run() is not called here since this is just a demo
+    // showing how to construct the components.
+    println!(
+        "\nDemo complete. In a real app, call repl.run().await to start the interactive loop."
     );
-    println!("[3] Registered custom .time shell command");
-    println!("    - Prints current Unix timestamp");
-    println!();
-
-    repl.register_shell_command(
-        "hello",
-        Box::new(|_input: &str| {
-            println!(">>> Hello from custom command!");
-            true
-        }),
-    );
-    println!("[4] Registered custom .hello shell command");
-    println!();
-
-    let mut printer = CliEventPrinter::new();
-    println!("[5] CliEventPrinter created");
-    println!("    - Handles TextDelta, ThoughtDelta, ToolCallStarted, etc.");
-    println!();
-
-    println!("[6] Demo: CliEventPrinter handling events manually");
-    printer.handle(RuntimeEvent::TextDelta {
-        session_id: SessionId::new(0),
-        agent_id: None,
-        trace_id: None,
-        text: "Hello, world!".to_string(),
-    })?;
-    println!();
-
-    printer.handle(RuntimeEvent::ToolCallStarted {
-        session_id: SessionId::new(0),
-        tool_name: "echo".to_string(),
-        args_json: r#"{"message": "hello"}"#.to_string(),
-        agent_id: None,
-        trace_id: None,
-    })?;
-
-    printer.handle(RuntimeEvent::ToolCallFinished {
-        session_id: SessionId::new(0),
-        tool_name: "echo".to_string(),
-        summary: "echo: hello".to_string(),
-        agent_id: None,
-        trace_id: None,
-        denied: false,
-    })?;
-    println!();
-
-    println!("=== Demo Complete ===");
-    println!("(REPL loop not started - this is an API demonstration)");
-    Ok(())
 }

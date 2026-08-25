@@ -1,17 +1,16 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use agent_base::llm_trait::response::FinishReason as LlmFinishReason;
+use agent_base::llm_trait::{
+    Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider,
+};
 use agent_base::{
-    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ResponseFormat, RunOutcome,
-    StreamChunk, Tool, ToolContext,
+    AgentResult, Content, RunOutcome, StreamChunk, Tool, ToolContext,
 };
 use agent_works::AgentBuilder;
 use async_trait::async_trait;
-use futures_core::Stream;
 use serde_json::{Value, json};
-
-type ChunkStream = Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>;
 
 struct MockLlmClient {
     responses: Mutex<std::vec::IntoIter<Vec<StreamChunk>>>,
@@ -32,34 +31,10 @@ impl MockLlmClient {
 }
 
 #[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn chat(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&agent_base::ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<Value> {
-        // Used by the guard's LLM judge. Return a valid chat completion response
-        // with a "done" verdict so the guard returns Done.
-        Ok(json!({
-            "choices": [{
-                "message": {
-                    "content": "{\"done\":true,\"reason\":\"task complete\"}"
-                }
-            }]
-        }))
-    }
-
-    async fn chat_stream(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&agent_base::ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<ChunkStream> {
+impl LlmProvider for MockLlmClient {
+    async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
         *self.call_count.lock().unwrap() += 1;
-        let chunks: Vec<AgentResult<StreamChunk>> = self
+        let chunks: Vec<Result<StreamChunk, LlmError>> = self
             .responses
             .lock()
             .unwrap()
@@ -68,18 +43,38 @@ impl LlmClient for MockLlmClient {
             .into_iter()
             .map(Ok)
             .collect();
-        let stream = futures_util::stream::iter(chunks);
-        Ok(Box::pin(stream))
+        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+            chunks,
+        ))))
     }
 
-    fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities {
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Ok(ChatResponse {
+            content: "{\"done\":true,\"reason\":\"task complete\"}".to_string(),
+            tool_calls: vec![],
+            usage: agent_base::UsageInfo::default(),
+            finish_reason: LlmFinishReason::Stop,
+            raw: None,
+        })
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             supports_streaming: true,
             supports_tools: true,
             supports_vision: false,
             supports_thinking: false,
             max_context_tokens: None,
             max_output_tokens: None,
+        }
+    }
+
+    fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+        agent_base::llm_trait::ProviderInfo {
+            name: "mock".to_string(),
+            model: "mock-model".to_string(),
+            backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
+            version: None,
         }
     }
 }
@@ -124,7 +119,7 @@ async fn test_builder_forwarding_text_reply() {
             finish_reason: Some("stop".to_string()),
         },
     ]]));
-    let llm = agent_base::llm::adapt(mock.clone());
+    let llm: Arc<dyn LlmProvider> = mock.clone();
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant")
@@ -165,7 +160,7 @@ async fn test_builder_forwarding_with_tool() {
             },
         ],
     ]));
-    let llm = agent_base::llm::adapt(mock.clone());
+    let llm: Arc<dyn LlmProvider> = mock.clone();
 
     let runtime = AgentBuilder::new(llm)
         .register_tool(EchoTool)
@@ -196,12 +191,12 @@ async fn test_builder_forwarding_middleware() {
         }
     }
 
-    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::Text("reply".to_string()),
         StreamChunk::Stop {
             finish_reason: Some("stop".to_string()),
         },
-    ]])));
+    ]]));
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("sys")
@@ -226,7 +221,7 @@ async fn test_builder_forwarding_middleware() {
 
 #[tokio::test]
 async fn test_builder_forwarding_error_recovery() {
-    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::ToolCall(json!({
             "delta": {
                 "tool_calls": [{
@@ -241,7 +236,7 @@ async fn test_builder_forwarding_error_recovery() {
         StreamChunk::Stop {
             finish_reason: Some("stop".to_string()),
         },
-    ]])));
+    ]]));
 
     let runtime = AgentBuilder::new(llm)
         .register_tool(EchoTool)
@@ -262,12 +257,12 @@ async fn test_builder_forwarding_error_recovery() {
 
 #[tokio::test]
 async fn test_tool_enforcement_available_via_works() {
-    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
         StreamChunk::Text("I will do it...".to_string()),
         StreamChunk::Stop {
             finish_reason: Some("stop".to_string()),
         },
-    ]])));
+    ]]));
 
     let config = agent_base::ToolEnforcementConfig::default();
     let runtime = AgentBuilder::new(llm)
@@ -346,7 +341,7 @@ mod skill_tests {
 
     #[tokio::test]
     async fn test_register_skill_with_builder() {
-        let llm = agent_base::llm::adapt(Arc::new(super::MockLlmClient::new(vec![vec![
+        let llm = Arc::new(super::MockLlmClient::new(vec![vec![
             StreamChunk::ToolCall(json!({
                 "delta": {
                     "tool_calls": [{
@@ -361,7 +356,7 @@ mod skill_tests {
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let runtime = AgentBuilder::new(llm)
             .system_prompt("You are a math assistant")
@@ -382,7 +377,7 @@ mod skill_tests {
 
     #[tokio::test]
     async fn test_skill_disable_prompt_injection() {
-        let llm = agent_base::llm::adapt(Arc::new(super::MockLlmClient::new(vec![vec![
+        let llm = Arc::new(super::MockLlmClient::new(vec![vec![
             StreamChunk::ToolCall(json!({
                 "delta": {
                     "tool_calls": [{
@@ -397,7 +392,7 @@ mod skill_tests {
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let runtime = AgentBuilder::new(llm)
             .system_prompt("My custom prompt")
@@ -414,7 +409,7 @@ mod skill_tests {
     #[tokio::test]
     #[ignore = "SkillDetailTool lives in phi-kernel-tools; this test needs a factory set via with_skill_detail_tool_factory"]
     async fn test_skill_custom_detail_tool_name() {
-        let llm = agent_base::llm::adapt(Arc::new(super::MockLlmClient::new(vec![vec![
+        let llm = Arc::new(super::MockLlmClient::new(vec![vec![
             StreamChunk::ToolCall(json!({
                 "delta": {
                     "tool_calls": [{
@@ -429,7 +424,7 @@ mod skill_tests {
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let runtime = AgentBuilder::new(llm)
             .system_prompt("sys")
@@ -457,7 +452,7 @@ mod skill_tests {
 
     #[tokio::test]
     async fn test_skill_tool_name_conflict() {
-        let llm = agent_base::llm::adapt(Arc::new(super::MockLlmClient::new(vec![])));
+        let llm = Arc::new(super::MockLlmClient::new(vec![]));
 
         let result = AgentBuilder::new(llm)
             .register_tool(AddTool) // registers "add" directly
@@ -676,12 +671,12 @@ mod agent_handle_tests {
     /// 场景1：基本会话调度 — send_input → recv_event → RunFinished
     #[tokio::test]
     async fn test_handle_basic_session() {
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("disk: 37% used".to_string()),
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let runtime = AgentBuilder::new(llm)
             .system_prompt("You are a helpful assistant")
@@ -717,47 +712,47 @@ mod agent_handle_tests {
     #[tokio::test]
     async fn test_handle_cancel() {
         // Create a mock that uses a channel-based stream that blocks
+        type BlockingTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Result<StreamChunk, LlmError>>>>>;
         struct BlockingLlm {
-            tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentResult<StreamChunk>>>>>,
+            tx: BlockingTx,
         }
         #[async_trait]
-        impl LlmClient for BlockingLlm {
-            async fn chat(
-                &self,
-                _: &[ChatMessage],
-                _: &[Value],
-                _: Option<&agent_base::ReasoningConfig>,
-                _: Option<&ResponseFormat>,
-            ) -> AgentResult<Value> {
-                unimplemented!()
-            }
-            async fn chat_stream(
-                &self,
-                _: &[ChatMessage],
-                _: &[Value],
-                _: Option<&agent_base::ReasoningConfig>,
-                _: Option<&ResponseFormat>,
-            ) -> AgentResult<ChunkStream> {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentResult<StreamChunk>>();
+        impl LlmProvider for BlockingLlm {
+            async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+                let (tx, rx) =
+                    tokio::sync::mpsc::unbounded_channel::<Result<StreamChunk, LlmError>>();
                 *self.tx.lock().unwrap() = Some(tx);
-                // Create a stream from the channel receiver
                 let stream = futures_util::stream::unfold(rx, |mut rx| async move {
                     let item = rx.recv().await?;
                     Some((item, rx))
                 });
-                Ok(Box::pin(stream))
+                Ok(ChatStream::new(Box::pin(stream)))
             }
-            fn capabilities(&self) -> LlmCapabilities {
-                LlmCapabilities::default()
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                unimplemented!()
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::default()
+            }
+            fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+                agent_base::llm_trait::ProviderInfo {
+                    name: "blocking".to_string(),
+                    model: "blocking-model".to_string(),
+                    backend: agent_base::llm_trait::backend::LlmBackend::Custom(
+                        "blocking".to_string(),
+                    ),
+                    version: None,
+                }
             }
         }
 
-        let llm = Arc::new(BlockingLlm {
+        let blocking = Arc::new(BlockingLlm {
             tx: Arc::new(Mutex::new(None)),
         });
-        let llm_ref = llm.clone();
+        let llm_ref = blocking.clone();
+        let llm: Arc<dyn LlmProvider> = blocking;
 
-        let runtime = AgentBuilder::new(agent_base::llm::adapt(llm))
+        let runtime = AgentBuilder::new(llm)
             .system_prompt("You are a helpful assistant")
             .build()
             .unwrap();
@@ -801,31 +796,27 @@ mod agent_handle_tests {
         // Use an LLM that returns an error
         struct ErrorLlm;
         #[async_trait]
-        impl LlmClient for ErrorLlm {
-            async fn chat(
-                &self,
-                _: &[ChatMessage],
-                _: &[Value],
-                _: Option<&agent_base::ReasoningConfig>,
-                _: Option<&ResponseFormat>,
-            ) -> AgentResult<Value> {
-                Err(agent_base::AgentError::internal("simulated LLM failure"))
+        impl LlmProvider for ErrorLlm {
+            async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+                Err(LlmError::llm("simulated LLM failure"))
             }
-            async fn chat_stream(
-                &self,
-                _: &[ChatMessage],
-                _: &[Value],
-                _: Option<&agent_base::ReasoningConfig>,
-                _: Option<&ResponseFormat>,
-            ) -> AgentResult<ChunkStream> {
-                Err(agent_base::AgentError::internal("simulated LLM failure"))
+            async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+                Err(LlmError::llm("simulated LLM failure"))
             }
-            fn capabilities(&self) -> LlmCapabilities {
-                LlmCapabilities::default()
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::default()
+            }
+            fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+                agent_base::llm_trait::ProviderInfo {
+                    name: "error-mock".to_string(),
+                    model: "error-model".to_string(),
+                    backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
+                    version: None,
+                }
             }
         }
 
-        let runtime = AgentBuilder::new(agent_base::llm::adapt(Arc::new(ErrorLlm)))
+        let runtime = AgentBuilder::new(Arc::new(ErrorLlm))
             .system_prompt("test")
             .build()
             .unwrap();
@@ -853,7 +844,7 @@ mod agent_handle_tests {
     /// 场景2b：取消后可以继续发送新命令
     #[tokio::test]
     async fn test_handle_cancel_then_continue() {
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![
+        let llm = Arc::new(MockLlmClient::new(vec![
             // First response: never stops (will be cancelled)
             vec![StreamChunk::Text("processing...".to_string())],
             // Second response: normal
@@ -863,7 +854,7 @@ mod agent_handle_tests {
                     finish_reason: Some("stop".to_string()),
                 },
             ],
-        ])));
+        ]));
 
         let runtime = AgentBuilder::new(llm)
             .system_prompt("test")
@@ -941,12 +932,12 @@ mod multi_agent_tests {
     /// Test building an agent with multi-agent enabled.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_build_with_multi_agent_enabled() {
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("I'll analyze this in parallel.".to_string()),
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let runtime = AgentBuilder::new(llm)
             .register_tool(EchoTool)
@@ -967,12 +958,12 @@ mod multi_agent_tests {
     /// Test that multi-agent builder with custom limits works.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multi_agent_custom_limits() {
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("ok".to_string()),
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let config = MultiAgentConfig {
             enabled: true,
@@ -999,12 +990,12 @@ mod multi_agent_tests {
     async fn test_runtime_spawn_child_and_wait() {
         use tokio_util::sync::CancellationToken;
 
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![vec![
+        let llm = Arc::new(MockLlmClient::new(vec![vec![
             StreamChunk::Text("child response".to_string()),
             StreamChunk::Stop {
                 finish_reason: Some("stop".to_string()),
             },
-        ]])));
+        ]]));
 
         let cancel = CancellationToken::new();
         let config = MultiAgentConfig::enabled();
@@ -1067,7 +1058,7 @@ mod multi_agent_tests {
     async fn test_spawn_limit_enforcement() {
         use tokio_util::sync::CancellationToken;
 
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![])));
+        let llm = Arc::new(MockLlmClient::new(vec![]));
         let cancel = CancellationToken::new();
         let config = MultiAgentConfig {
             enabled: true,
@@ -1117,7 +1108,7 @@ mod multi_agent_tests {
     async fn test_depth_limit_enforcement() {
         use tokio_util::sync::CancellationToken;
 
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![])));
+        let llm = Arc::new(MockLlmClient::new(vec![]));
         let cancel = CancellationToken::new();
         let config = MultiAgentConfig {
             enabled: true,
@@ -1160,7 +1151,7 @@ mod multi_agent_tests {
     async fn test_close_nonexistent_agent() {
         use tokio_util::sync::CancellationToken;
 
-        let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![])));
+        let llm = Arc::new(MockLlmClient::new(vec![]));
         let cancel = CancellationToken::new();
         let config = MultiAgentConfig::enabled();
 

@@ -1,6 +1,6 @@
 use agent_base::engine::react_loop_guard::{GuardAction, GuardCtx, ReactLoopGuard};
-use agent_base::llm::StreamClient;
-use agent_base::types::{ChatMessage, ResponseFormat};
+use agent_base::llm_trait::{ChatRequest, LlmProvider};
+use agent_base::types::ChatMessage;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,7 +72,7 @@ impl Default for DefaultGuardConfig {
 /// Does not manage its own state; uses RunState information from GuardCtx.
 pub struct DefaultGuard {
     config: DefaultGuardConfig,
-    llm_client: Option<Arc<dyn StreamClient>>,
+    llm_client: Option<Arc<dyn LlmProvider>>,
 }
 
 impl DefaultGuard {
@@ -84,7 +84,7 @@ impl DefaultGuard {
     }
 
     /// Create a new DefaultGuard with LLM client for judge functionality
-    pub fn with_llm_client(config: DefaultGuardConfig, llm_client: Arc<dyn StreamClient>) -> Self {
+    pub fn with_llm_client(config: DefaultGuardConfig, llm_client: Arc<dyn LlmProvider>) -> Self {
         Self {
             config,
             llm_client: Some(llm_client),
@@ -152,12 +152,14 @@ impl DefaultGuard {
         let timeout_duration = Duration::from_secs(self.config.judge_timeout_secs);
 
         let result = tokio::time::timeout(timeout_duration, async {
-            let raw_response = client
-                .chat(&messages, &[], None, Some(&ResponseFormat::JsonObject))
+            let request = ChatRequest::new(messages)
+                .with_response_format(agent_base::llm_trait::request::ResponseFormat::JsonObject);
+            let response = client
+                .chat(request)
                 .await
                 .map_err(|e| format!("LLM judge call failed: {}", e))?;
 
-            let result: JudgeResult = serde_json::from_str(&raw_response)
+            let result: JudgeResult = serde_json::from_str(&response.content)
                 .map_err(|e| format!("Failed to parse judge response: {}", e))?;
 
             Ok(result)
@@ -357,12 +359,13 @@ impl ReactLoopGuard for DefaultGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::llm::{LlmCapabilities, StreamChunk};
-    use agent_base::types::{AgentResult, FinishReason, SessionId};
-    use futures_core::Stream;
+    use agent_base::llm_trait::response::{
+        ChatResponse, ChatStream, FinishReason as LlmFinishReason, StreamChunk,
+    };
+    use agent_base::llm_trait::{Capabilities, ChatRequest, LlmError, LlmProvider};
+    use agent_base::types::{FinishReason, SessionId};
     use serde_json::Value;
     use std::pin::Pin;
-    use std::task::{Context, Poll};
 
     fn make_ctx(
         reasoning_only_strikes: usize,
@@ -425,25 +428,40 @@ mod tests {
     }
 
     #[async_trait]
-    impl StreamClient for MockJudgeClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+    impl LlmProvider for MockJudgeClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
             let chunks = vec![
                 Ok(StreamChunk::Text(self.response.clone())),
                 Ok(StreamChunk::Stop {
                     finish_reason: Some("stop".to_string()),
                 }),
             ];
-            Ok(Box::pin(futures_util::stream::iter(chunks)))
+            Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+                chunks,
+            ))))
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: self.response.clone(),
+                tool_calls: vec![],
+                usage: agent_base::UsageInfo::default(),
+                finish_reason: LlmFinishReason::Stop,
+                raw: None,
+            })
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "mock-judge".to_string(),
+                model: "mock-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
+                version: None,
+            }
         }
     }
 
@@ -451,30 +469,65 @@ mod tests {
     struct MockTimeoutClient;
 
     #[async_trait]
-    impl StreamClient for MockTimeoutClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
+    impl LlmProvider for MockTimeoutClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
             // Return a stream whose first item never resolves.
             struct HangingStream;
-            impl Stream for HangingStream {
-                type Item = AgentResult<StreamChunk>;
+            impl futures_core::Stream for HangingStream {
+                type Item = Result<StreamChunk, LlmError>;
                 fn poll_next(
                     self: Pin<&mut Self>,
-                    _cx: &mut Context<'_>,
-                ) -> Poll<Option<Self::Item>> {
-                    Poll::Pending // never wakes
+                    _cx: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Option<Self::Item>> {
+                    std::task::Poll::Pending // never wakes
                 }
             }
-            Ok(Box::pin(HangingStream))
+            Ok(ChatStream::new(Box::pin(HangingStream)))
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            // Never resolve — will be interrupted by timeout.
+            std::future::pending().await
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "mock-timeout".to_string(),
+                model: "mock-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
+                version: None,
+            }
+        }
+    }
+
+    /// Mock StreamClient that always returns an error (for judge error testing).
+    struct MockErrorClient;
+
+    #[async_trait]
+    impl LlmProvider for MockErrorClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            Err(LlmError::llm("simulated stream error"))
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Err(LlmError::llm("simulated judge error"))
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "mock-error".to_string(),
+                model: "mock-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
+                version: None,
+            }
         }
     }
 
@@ -820,5 +873,221 @@ mod tests {
             "judge says done → Done, got: {:?}",
             action
         );
+    }
+
+    // ── Missing branch coverage tests ──────────────────────────────────
+
+    /// Judge returns an error (not timeout) with fail_closed → Continue
+    #[tokio::test]
+    async fn test_text_only_judge_error_fail_closed() {
+        let judge_client = Arc::new(MockErrorClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: false,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let ctx = make_ctx_with_text("query", "short", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("Cannot verify"),
+                    "fail_closed error → Continue with verify message: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected Continue for judge error + fail_closed, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Judge returns an error (not timeout) with fail_open → Done
+    #[tokio::test]
+    async fn test_text_only_judge_error_fail_open() {
+        let judge_client = Arc::new(MockErrorClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: true,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let ctx = make_ctx_with_text("query", "short", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "fail_open + judge error → Done (trust model), got: {:?}",
+            action
+        );
+    }
+
+    /// Short response + tools + judge timeout + fail_closed → Continue
+    #[tokio::test]
+    async fn test_text_only_short_response_judge_timeout_fail_closed() {
+        let judge_client = Arc::new(MockTimeoutClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: false,
+            judge_timeout_secs: 1,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let long_input = "a".repeat(200);
+        let ctx = make_ctx_with_text(&long_input, "42", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("Cannot verify"),
+                    "short + timeout + fail_closed → Continue: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected Continue for short response + timeout + fail_closed, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Short response + tools + judge error (non-timeout) + fail_closed → Continue
+    #[tokio::test]
+    async fn test_text_only_short_response_judge_error_fail_closed() {
+        let judge_client = Arc::new(MockErrorClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: false,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let long_input = "a".repeat(200);
+        let ctx = make_ctx_with_text(&long_input, "42", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("Cannot verify"),
+                    "short + error + fail_closed → Continue: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected Continue for short response + judge error + fail_closed, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Short response + tools + judge error (non-timeout) + fail_open → Done
+    #[tokio::test]
+    async fn test_text_only_short_response_judge_error_fail_open() {
+        let judge_client = Arc::new(MockErrorClient);
+        let config = DefaultGuardConfig {
+            judge_fail_open: true,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::with_llm_client(config, judge_client);
+        let long_input = "a".repeat(200);
+        let ctx = make_ctx_with_text(&long_input, "42", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "short + error + fail_open → Done, got: {:?}",
+            action
+        );
+    }
+
+    /// Reasoning-only with tools registered — same behavior as without tools
+    /// (on_reasoning_only doesn't check run_has_tool_calls).
+    #[tokio::test]
+    async fn test_reasoning_only_with_tools_below_threshold() {
+        let guard = DefaultGuard::new(DefaultGuardConfig::default());
+        let mut ctx = make_ctx(1, 0, false);
+        ctx.available_tools = vec!["echo".to_string()];
+        ctx.run_has_tool_calls = true; // tools were called earlier in the run
+
+        let action = guard.on_reasoning_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Continue(_)),
+            "reasoning_only with tools, below threshold → Continue, got: {:?}",
+            action
+        );
+    }
+
+    /// Reasoning-only at max strikes with tools → Fail
+    #[tokio::test]
+    async fn test_reasoning_only_with_tools_at_threshold() {
+        let guard = DefaultGuard::new(DefaultGuardConfig::default());
+        let mut ctx = make_ctx(3, 0, false);
+        ctx.available_tools = vec!["echo".to_string()];
+        ctx.run_has_tool_calls = true;
+
+        let action = guard.on_reasoning_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Fail(_)),
+            "reasoning_only with tools, at threshold → Fail, got: {:?}",
+            action
+        );
+    }
+
+    /// Non-short text-only, no tools, judge enabled but no client → Done
+    /// (run_has_tool_calls=false skips the judge entirely)
+    #[tokio::test]
+    async fn test_text_only_no_tools_judge_enabled_no_client() {
+        let config = DefaultGuardConfig {
+            use_llm_judge: true,
+            ..DefaultGuardConfig::default()
+        };
+        let guard = DefaultGuard::new(config);
+        // Long enough response to not trigger short-response detection
+        let long_output = "x".repeat(300);
+        let ctx = make_ctx_with_text("query", &long_output, false);
+
+        let action = guard.on_text_only(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Done),
+            "no tools + judge enabled + no client → Done (skips judge), got: {:?}",
+            action
+        );
+    }
+
+    /// Empty response with tools — should nudge, not Done
+    #[tokio::test]
+    async fn test_empty_response_with_tool_calls() {
+        let guard = DefaultGuard::new(DefaultGuardConfig::default());
+        let ctx = make_ctx(0, 1, true); // run_has_tool_calls=true
+
+        let action = guard.on_empty_response(&ctx).await;
+        assert!(
+            matches!(action, GuardAction::Continue(_)),
+            "empty response with tools → Continue (nudge), got: {:?}",
+            action
+        );
+    }
+
+    /// Verify judge reason is propagated into the Continue nudge message
+    #[tokio::test]
+    async fn test_text_only_judge_reason_propagated_to_nudge() {
+        let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+            "done": false,
+            "reason": "missing file list and explanation"
+        })));
+        let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
+        let ctx = make_ctx_with_text("list files and explain", "here are the files:", true);
+
+        let action = guard.on_text_only(&ctx).await;
+        match &action {
+            GuardAction::Continue(msg) => {
+                assert!(
+                    msg.contains("missing file list and explanation"),
+                    "nudge should include judge reason: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Continue, got: {:?}", other),
+        }
     }
 }

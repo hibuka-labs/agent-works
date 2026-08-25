@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use agent_base::{AgentResult, AgentRuntime, StreamClient, Tool};
+use agent_base::{AgentResult, AgentRuntime, Tool};
 
 #[cfg(feature = "multi_agent")]
 use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
@@ -26,7 +26,7 @@ pub type ListSkillsToolFactory =
 
 pub struct AgentBuilder {
     inner: agent_base::AgentBuilder,
-    client: Arc<dyn StreamClient>,
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
     system_prompt: Option<String>,
     tool_names: HashSet<String>,
     /// Business tools to pass to child agents (all registered tools).
@@ -59,7 +59,7 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    pub fn new(client: Arc<dyn StreamClient>) -> Self {
+    pub fn new(client: Arc<dyn agent_base::llm_trait::LlmProvider>) -> Self {
         Self {
             inner: agent_base::AgentBuilder::new(client.clone()),
             client,
@@ -596,7 +596,7 @@ pub fn setup_multi_agent(
     existing_tool_names: &HashSet<String>,
     tool_factory: Option<MultiAgentToolFactory>,
 ) -> AgentResult<Arc<MultiAgentRuntime>> {
-    let client = runtime.client();
+    let client = runtime.provider();
     let cancel_token = runtime.cancel_token();
     let tool_policy = runtime.tool_policy().cloned();
     let approval_handler = runtime.approval_handler().cloned();
@@ -744,57 +744,63 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::{Content, LlmClient};
-    use std::pin::Pin;
+    use agent_base::Content;
+    use agent_base::llm_trait::backend::LlmBackend;
+    use agent_base::llm_trait::response::FinishReason;
+    use agent_base::llm_trait::types::UsageInfo;
+    use agent_base::llm_trait::{
+        Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
+    };
+    
 
-    // ── Stub LLM client ──
+    // ── Stub LLM provider ──
 
-    struct StubClient;
+    struct StubProvider;
 
     #[async_trait::async_trait]
-    impl LlmClient for StubClient {
-        async fn chat(
-            &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> AgentResult<serde_json::Value> {
-            Ok(serde_json::json!({"choices": [{"message": {"content": "ok"}}]}))
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> AgentResult<
-            Pin<Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>>,
-        > {
-            let chunks: Vec<AgentResult<agent_base::StreamChunk>> = vec![
+    impl LlmProvider for StubProvider {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            let chunks = vec![
                 Ok(agent_base::StreamChunk::Text("ok".to_string())),
                 Ok(agent_base::StreamChunk::Stop {
                     finish_reason: Some("stop".to_string()),
                 }),
             ];
-            Ok(Box::pin(futures_util::stream::iter(chunks)))
+            Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+                chunks,
+            ))))
         }
 
-        fn capabilities(&self) -> agent_base::LlmCapabilities {
-            agent_base::LlmCapabilities {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: "ok".to_string(),
+                tool_calls: vec![],
+                usage: UsageInfo::default(),
+                finish_reason: FinishReason::Stop,
+                raw: None,
+            })
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
                 supports_streaming: true,
                 supports_tools: true,
-                supports_vision: false,
-                supports_thinking: false,
-                max_context_tokens: None,
-                max_output_tokens: None,
+                ..Default::default()
+            }
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: LlmBackend::Custom("stub".to_string()),
+                version: None,
             }
         }
     }
 
-    fn make_client() -> Arc<dyn StreamClient> {
-        agent_base::llm::adapt(Arc::new(StubClient))
+    fn make_client() -> Arc<dyn LlmProvider> {
+        Arc::new(StubProvider)
     }
 
     // ── setup_multi_agent tests ──
@@ -1206,7 +1212,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(runtime.client().capabilities().supports_streaming);
+        assert!(runtime.provider().capabilities().supports_streaming);
     }
 
     #[tokio::test(flavor = "multi_thread")]

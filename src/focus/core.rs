@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_base::{ChatMessage, ResponseFormat, StreamClient};
+use agent_base::ChatMessage;
 use serde::de::DeserializeOwned;
 
 // ── FocusInput ───────────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ pub struct FocusOutput<T> {
 /// let output = status_focus.ask::<TaskStatus>(&ctx, 5s).await?;
 /// ```
 pub struct Focus {
-    client: Arc<dyn StreamClient>,
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
     system_prompt: String,
 }
 
@@ -131,7 +131,10 @@ impl Focus {
     ///
     /// - `client`: LLM client (shared; multiple Focus instances can reuse the same client)
     /// - `system_prompt`: The role and judgment rules for this Focus (bound at creation, never changes)
-    pub fn new(client: Arc<dyn StreamClient>, system_prompt: impl Into<String>) -> Self {
+    pub fn new(
+        client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+        system_prompt: impl Into<String>,
+    ) -> Self {
         Self {
             client,
             system_prompt: system_prompt.into(),
@@ -177,18 +180,17 @@ impl Focus {
             ChatMessage::user(user_prompt),
         ];
 
-        let response = tokio::time::timeout(
-            timeout,
-            self.client
-                .chat(&messages, &[], None, Some(&ResponseFormat::JsonObject)),
-        )
-        .await
-        .map_err(|_| FocusError::Timeout(timeout))?
-        .map_err(|e| FocusError::Llm(e.to_string()))?;
+        let request = agent_base::llm_trait::ChatRequest::new(messages)
+            .with_response_format(agent_base::llm_trait::request::ResponseFormat::JsonObject);
+
+        let response = tokio::time::timeout(timeout, self.client.chat(request))
+            .await
+            .map_err(|_| FocusError::Timeout(timeout))?
+            .map_err(|e| FocusError::Llm(e.to_string()))?;
 
         let elapsed_ms = start.elapsed().as_millis();
-        // StreamClient::chat() returns extracted text — no JSON unwrapping needed.
-        let raw_response = response;
+        // LlmProvider::chat() returns ChatResponse with content field.
+        let raw_response = response.content;
 
         let result: T = serde_json::from_str(&raw_response).map_err(|e| {
             tracing::warn!(
@@ -247,18 +249,19 @@ impl std::error::Error for FocusError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::{LlmCapabilities, StreamChunk};
+    use agent_base::llm_trait::backend::LlmBackend;
+    use agent_base::llm_trait::response::{FinishReason, StreamChunk};
+    use agent_base::llm_trait::types::UsageInfo;
+    use agent_base::llm_trait::{
+        Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider,
+    };
     use async_trait::async_trait;
-    use futures_core::Stream;
     use serde::Deserialize;
-    use std::pin::Pin;
     use std::sync::Mutex;
-    use std::task::Context as TaskContext;
-    use std::task::Poll;
 
-    // ── Mock StreamClient for Focus tests ──
+    // ── Mock LlmProvider for Focus tests ──
 
-    /// A mock StreamClient whose `chat()` returns a pre-set string.
+    /// A mock LlmProvider whose `chat()` returns a pre-set string.
     struct MockStreamClient {
         /// Canned response for `chat()`. Consumed on first call (take).
         response: Mutex<Option<Result<String, String>>>,
@@ -278,47 +281,44 @@ mod tests {
         }
     }
 
-    /// Empty stream — returned by MockStreamClient::stream() which is never called.
-    struct EmptyStream;
-
-    impl Stream for EmptyStream {
-        type Item = agent_base::AgentResult<StreamChunk>;
-        fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Ready(None)
-        }
-    }
-
     #[async_trait]
-    impl StreamClient for MockStreamClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> agent_base::AgentResult<
-            Pin<Box<dyn Stream<Item = agent_base::AgentResult<StreamChunk>> + Send>>,
-        > {
-            Ok(Box::pin(EmptyStream))
+    impl LlmProvider for MockStreamClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            Ok(ChatStream::new(Box::pin(futures_util::stream::empty())))
         }
 
         /// Override `chat()` to return the canned response directly.
-        async fn chat(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> agent_base::AgentResult<String> {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
             match self.response.lock().unwrap().take() {
-                Some(Ok(text)) => Ok(text),
-                Some(Err(e)) => Err(agent_base::AgentError::internal(e)),
-                None => Ok(String::new()),
+                Some(Ok(text)) => Ok(ChatResponse {
+                    content: text,
+                    tool_calls: vec![],
+                    usage: UsageInfo::default(),
+                    finish_reason: FinishReason::Stop,
+                    raw: None,
+                }),
+                Some(Err(e)) => Err(LlmError::llm(e)),
+                None => Ok(ChatResponse {
+                    content: String::new(),
+                    tool_calls: vec![],
+                    usage: UsageInfo::default(),
+                    finish_reason: FinishReason::Stop,
+                    raw: None,
+                }),
             }
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "mock".to_string(),
+                model: "mock-model".to_string(),
+                backend: LlmBackend::Custom("mock".to_string()),
+                version: None,
+            }
         }
     }
 

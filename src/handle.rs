@@ -206,43 +206,61 @@ impl AgentHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
+    
     use std::sync::Arc;
     use std::time::Duration;
 
-    use agent_base::{
-        AgentBuilder, AgentResult, ChatMessage, LlmCapabilities, ReasoningConfig, ResponseFormat,
-        StreamChunk, StreamClient,
+    use agent_base::llm_trait::backend::LlmBackend;
+    use agent_base::llm_trait::response::FinishReason;
+    use agent_base::llm_trait::types::UsageInfo;
+    use agent_base::llm_trait::{
+        Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
     };
-    use futures_core::Stream;
-    use serde_json::Value;
+    use agent_base::{
+        AgentBuilder, StreamChunk,
+    };
+    
+    
 
-    struct StubClient;
+    struct StubProvider;
 
     #[async_trait::async_trait]
-    impl StreamClient for StubClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[Value],
-            _reasoning: Option<&ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>> {
-            Ok(Box::pin(futures_util::stream::iter(vec![
+    impl LlmProvider for StubProvider {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            Ok(ChatStream::new(Box::pin(futures_util::stream::iter(vec![
                 Ok(StreamChunk::Text("hello".to_string())),
                 Ok(StreamChunk::Stop {
                     finish_reason: Some("stop".to_string()),
                 }),
-            ])))
+            ]))))
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: "hello".to_string(),
+                tool_calls: vec![],
+                usage: UsageInfo::default(),
+                finish_reason: FinishReason::Stop,
+                raw: None,
+            })
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: LlmBackend::Custom("stub".to_string()),
+                version: None,
+            }
         }
     }
 
     fn runtime() -> AgentRuntime {
-        AgentBuilder::new(Arc::new(StubClient)).build().unwrap()
+        AgentBuilder::new(Arc::new(StubProvider)).build().unwrap()
     }
 
     async fn wait_for_terminal(handle: &mut AgentHandle) -> Option<RuntimeEvent> {

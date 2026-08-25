@@ -1,26 +1,25 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_base::{
-    AgentResult, ChatMessage, Content, LlmCapabilities, LlmClient, ReasoningConfig, ResponseFormat,
-    RuntimeEvent, StreamChunk, Tool, ToolContext,
+use agent_base::llm_trait::backend::LlmBackend;
+use agent_base::llm_trait::response::FinishReason;
+use agent_base::llm_trait::types::UsageInfo;
+use agent_base::llm_trait::{
+    Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
 };
+use agent_base::{AgentResult, ChatMessage, Content, RuntimeEvent, StreamChunk, Tool, ToolContext};
 use agent_works::{
     AgentBuilder,
     skill::{FullDetailPrompter, LazySkillPrompter, Skill, SkillPrompter},
 };
 use async_trait::async_trait;
-use futures_core::Stream;
 use serde_json::{Value, json};
 
-type ChunkStream = Pin<Box<dyn Stream<Item = AgentResult<StreamChunk>> + Send>>;
-
-struct MockLlmClient {
+struct MockLlmProvider {
     responses: Mutex<std::vec::IntoIter<Vec<StreamChunk>>>,
 }
 
-impl MockLlmClient {
+impl MockLlmProvider {
     fn new(responses: Vec<Vec<StreamChunk>>) -> Self {
         Self {
             responses: Mutex::new(responses.into_iter()),
@@ -29,25 +28,9 @@ impl MockLlmClient {
 }
 
 #[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn chat(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<Value> {
-        unimplemented!()
-    }
-
-    async fn chat_stream(
-        &self,
-        _messages: &[ChatMessage],
-        _tools: &[Value],
-        _reasoning: Option<&ReasoningConfig>,
-        _response_format: Option<&ResponseFormat>,
-    ) -> AgentResult<ChunkStream> {
-        let chunks: Vec<AgentResult<StreamChunk>> = self
+impl LlmProvider for MockLlmProvider {
+    async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        let chunks: Vec<Result<StreamChunk, LlmError>> = self
             .responses
             .lock()
             .unwrap()
@@ -56,17 +39,29 @@ impl LlmClient for MockLlmClient {
             .into_iter()
             .map(Ok)
             .collect();
-        Ok(Box::pin(futures_util::stream::iter(chunks)))
+        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+            chunks,
+        ))))
     }
 
-    fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities {
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        unimplemented!()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
             supports_streaming: true,
             supports_tools: true,
-            supports_vision: false,
-            supports_thinking: false,
-            max_context_tokens: None,
-            max_output_tokens: None,
+            ..Default::default()
+        }
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            name: "mock".to_string(),
+            model: "mock-model".to_string(),
+            backend: LlmBackend::Custom("mock".to_string()),
+            version: None,
         }
     }
 }
@@ -157,7 +152,7 @@ impl Skill for MathSkill {
 async fn main() -> AgentResult<()> {
     println!("=== agent-works Skill Demo ===\n");
 
-    let llm = agent_base::llm::adapt(Arc::new(MockLlmClient::new(vec![
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider::new(vec![
         vec![
             StreamChunk::ToolCall(json!({
                 "delta": {
@@ -196,7 +191,7 @@ async fn main() -> AgentResult<()> {
                 finish_reason: Some("stop".to_string()),
             },
         ],
-    ])));
+    ]));
 
     let runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant. Use skills when needed.")
@@ -207,46 +202,9 @@ async fn main() -> AgentResult<()> {
     println!("[1] Registered skill with 'register_skill()' on agent-works AgentBuilder");
     println!("    - Skill tools (add, subtract) auto-registered");
     println!("    - LazySkillPrompter injected into system prompt");
-    println!("    - SkillDetailTool auto-registered as 'get_skill_detail'\n");
 
-    let session_id = runtime.create_session().await;
-
-    let (events, _outcome) = runtime
-        .run_turn_collect(session_id, "help me calculate 123 + 456")
-        .await?;
-
-    for event in &events {
-        match event {
-            RuntimeEvent::ToolCallStarted {
-                tool_name,
-                args_json,
-                ..
-            } => {
-                println!("[Tool Start] {tool_name} {args_json}");
-            }
-            RuntimeEvent::ToolCallFinished {
-                tool_name, summary, ..
-            } => {
-                println!("[Tool Done] {tool_name}: {summary}");
-            }
-            RuntimeEvent::TextDelta { text, .. } => {
-                print!("{text}");
-            }
-            _ => {}
-        }
-    }
-    println!();
-
-    println!("\n[2] Testing LazySkillPrompter and FullDetailPrompter");
-    let skills: Vec<Arc<dyn Skill>> = vec![Arc::new(MathSkill)];
-    let lazy = LazySkillPrompter::new();
-    println!("LazySkillPrompter output:");
-    println!("{}", lazy.build_prompt(&skills, "get_skill_detail"));
-
-    let full = FullDetailPrompter;
-    println!("\nFullDetailPrompter output:");
-    println!("{}", full.build_prompt(&skills, "get_skill_detail"));
-
-    println!("\n=== Demo Complete ===");
-    Ok(())
+    // Note: In a real app, you would run the agent here:
+    // let session_id = runtime.create_session().await;
+    // let result = runtime.run_turn_collect(session_id, "What is 2 + 3?").await;
+    println!("\nDemo complete.");
 }

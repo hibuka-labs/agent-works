@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use agent_base::llm_trait::LlmProvider;
 use agent_base::{
     AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
     DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RunOutcome, RuntimeEvent,
-    SessionId, StreamClient, Tool, ToolPolicy,
+    SessionId, Tool, ToolPolicy,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -37,7 +38,7 @@ pub struct MultiAgentRuntime {
     mailbox: Arc<MailboxHub>,
 
     /// Shared LLM client (from parent agent).
-    client: Arc<dyn StreamClient>,
+    client: Arc<dyn LlmProvider>,
 
     /// Business tools to register on child agents (NOT the 6 multi-agent tools).
     business_tools: Vec<Arc<dyn Tool>>,
@@ -97,7 +98,7 @@ impl MultiAgentRuntime {
     #[allow(clippy::too_many_arguments)] // runtime fields are naturally positional
     pub fn new(
         config: MultiAgentConfig,
-        client: Arc<dyn StreamClient>,
+        client: Arc<dyn LlmProvider>,
         business_tools: Vec<Arc<dyn Tool>>,
         root_cancel: CancellationToken,
         error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
@@ -1108,48 +1109,39 @@ mod tests {
 
     // ── fork_history: resolve_fork_history ──
 
-    /// Mock LLM client for fork_history tests (minimal — never called).
+    /// Mock LLM provider for fork_history tests (minimal — never called).
     #[derive(Clone)]
-    struct NoopLlmClient;
+    struct NoopLlmProvider;
 
     #[async_trait::async_trait]
-    impl agent_base::LlmClient for NoopLlmClient {
+    impl agent_base::llm_trait::LlmProvider for NoopLlmProvider {
+        async fn stream(
+            &self,
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
+            unimplemented!()
+        }
+
         async fn chat(
             &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> agent_base::AgentResult<serde_json::Value> {
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
             unimplemented!()
         }
 
-        async fn chat_stream(
-            &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> agent_base::AgentResult<
-            std::pin::Pin<
-                Box<
-                    dyn futures_core::Stream<
-                            Item = agent_base::AgentResult<agent_base::StreamChunk>,
-                        > + Send,
-                >,
-            >,
-        > {
-            unimplemented!()
-        }
-
-        fn capabilities(&self) -> agent_base::LlmCapabilities {
-            agent_base::LlmCapabilities {
+        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
+            agent_base::llm_trait::Capabilities {
                 supports_streaming: true,
-                supports_tools: false,
-                supports_vision: false,
-                supports_thinking: false,
-                max_context_tokens: None,
-                max_output_tokens: None,
+                ..Default::default()
+            }
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "noop".to_string(),
+                model: "noop-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("noop".to_string()),
+                version: None,
             }
         }
     }
@@ -1160,7 +1152,7 @@ mod tests {
     ) -> (Arc<MultiAgentRuntime>, agent_base::SessionId) {
         use tokio_util::sync::CancellationToken;
 
-        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
+        let llm = Arc::new(NoopLlmProvider);
         let parent_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build parent runtime");
@@ -1179,7 +1171,7 @@ mod tests {
 
         let ma_runtime = Arc::new(MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
+            Arc::new(NoopLlmProvider),
             vec![],
             CancellationToken::new(),
             None,
@@ -1336,7 +1328,7 @@ mod tests {
 
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
+            Arc::new(NoopLlmProvider),
             vec![],
             CancellationToken::new(),
             None,
@@ -1367,7 +1359,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_user_and_assistant() {
-        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
+        let llm = Arc::new(NoopLlmProvider);
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1394,7 +1386,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
+            Arc::new(NoopLlmProvider),
             vec![],
             CancellationToken::new(),
             None,
@@ -1424,7 +1416,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_tool_call_only_skipped() {
-        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
+        let llm = Arc::new(NoopLlmProvider);
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1447,7 +1439,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
+            Arc::new(NoopLlmProvider),
             vec![],
             CancellationToken::new(),
             None,
@@ -1474,7 +1466,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefill_child_session_empty_vec_noop() {
-        let llm = agent_base::llm::adapt(Arc::new(NoopLlmClient));
+        let llm = Arc::new(NoopLlmProvider);
         let child_runtime = agent_base::AgentBuilder::new(llm)
             .build()
             .expect("build child runtime");
@@ -1483,7 +1475,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
         let ma_runtime = MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
-            agent_base::llm::adapt(Arc::new(NoopLlmClient)),
+            Arc::new(NoopLlmProvider),
             vec![],
             CancellationToken::new(),
             None,
@@ -1519,37 +1511,50 @@ mod tests {
     struct StreamingStub;
 
     #[async_trait::async_trait]
-    impl agent_base::StreamClient for StreamingStub {
+    impl agent_base::llm_trait::LlmProvider for StreamingStub {
         async fn stream(
             &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> agent_base::AgentResult<
-            std::pin::Pin<
-                Box<
-                    dyn futures_core::Stream<
-                            Item = agent_base::AgentResult<agent_base::StreamChunk>,
-                        > + Send,
-                >,
-            >,
-        > {
-            Ok(Box::pin(futures_util::stream::iter(vec![
-                Ok(agent_base::StreamChunk::Text("child ok".to_string())),
-                Ok(agent_base::StreamChunk::Stop {
-                    finish_reason: Some("stop".to_string()),
-                }),
-            ])))
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
+            Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
+                futures_util::stream::iter(vec![
+                    Ok(agent_base::StreamChunk::Text("child ok".to_string())),
+                    Ok(agent_base::StreamChunk::Stop {
+                        finish_reason: Some("stop".to_string()),
+                    }),
+                ]),
+            )))
         }
 
-        fn capabilities(&self) -> agent_base::LlmCapabilities {
-            agent_base::LlmCapabilities::default()
+        async fn chat(
+            &self,
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
+            Ok(agent_base::llm_trait::ChatResponse {
+                content: "child ok".to_string(),
+                tool_calls: vec![],
+                usage: agent_base::llm_trait::types::UsageInfo::default(),
+                finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
+                raw: None,
+            })
+        }
+
+        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
+            agent_base::llm_trait::Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("stub".to_string()),
+                version: None,
+            }
         }
     }
 
     fn make_ma_runtime() -> Arc<MultiAgentRuntime> {
-        let client: Arc<dyn agent_base::StreamClient> = Arc::new(StreamingStub);
+        let client: Arc<dyn agent_base::llm_trait::LlmProvider> = Arc::new(StreamingStub);
         Arc::new(MultiAgentRuntime::new(
             MultiAgentConfig::enabled(),
             client,
@@ -1878,55 +1883,69 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl agent_base::StreamClient for DenialScriptedClient {
+    impl agent_base::llm_trait::LlmProvider for DenialScriptedClient {
         async fn stream(
             &self,
-            _messages: &[agent_base::ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&agent_base::ResponseFormat>,
-        ) -> agent_base::AgentResult<
-            std::pin::Pin<
-                Box<
-                    dyn futures_core::Stream<
-                            Item = agent_base::AgentResult<agent_base::StreamChunk>,
-                        > + Send,
-                >,
-            >,
-        > {
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
             let n = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let chunks: Vec<agent_base::AgentResult<agent_base::StreamChunk>> = if n == 0 {
-                vec![
-                    Ok(agent_base::StreamChunk::ToolCall(serde_json::json!({
-                        "delta": {
-                            "tool_calls": [{
-                                "id": "call_1",
-                                "function": {
-                                    "name": "read_file",
-                                    "arguments": "{\"path\":\"/etc/passwd\"}"
-                                }
-                            }]
-                        }
-                    }))),
-                    Ok(agent_base::StreamChunk::Stop {
-                        finish_reason: Some("tool_calls".to_string()),
-                    }),
-                ]
-            } else {
-                vec![
-                    Ok(agent_base::StreamChunk::Text(
-                        "I lack permission.".to_string(),
-                    )),
-                    Ok(agent_base::StreamChunk::Stop {
-                        finish_reason: Some("stop".to_string()),
-                    }),
-                ]
-            };
-            Ok(Box::pin(futures_util::stream::iter(chunks)))
+            let chunks: Vec<Result<agent_base::StreamChunk, agent_base::llm_trait::LlmError>> =
+                if n == 0 {
+                    vec![
+                        Ok(agent_base::StreamChunk::ToolCall(serde_json::json!({
+                            "delta": {
+                                "tool_calls": [{
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"/etc/passwd\"}"
+                                    }
+                                }]
+                            }
+                        }))),
+                        Ok(agent_base::StreamChunk::Stop {
+                            finish_reason: Some("tool_calls".to_string()),
+                        }),
+                    ]
+                } else {
+                    vec![
+                        Ok(agent_base::StreamChunk::Text(
+                            "I lack permission.".to_string(),
+                        )),
+                        Ok(agent_base::StreamChunk::Stop {
+                            finish_reason: Some("stop".to_string()),
+                        }),
+                    ]
+                };
+            Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
+                futures_util::stream::iter(chunks),
+            )))
         }
 
-        fn capabilities(&self) -> agent_base::LlmCapabilities {
-            agent_base::LlmCapabilities::default()
+        async fn chat(
+            &self,
+            _request: agent_base::llm_trait::ChatRequest,
+        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
+            Ok(agent_base::llm_trait::ChatResponse {
+                content: "I lack permission.".to_string(),
+                tool_calls: vec![],
+                usage: agent_base::llm_trait::types::UsageInfo::default(),
+                finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
+                raw: None,
+            })
+        }
+
+        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
+            agent_base::llm_trait::Capabilities::default()
+        }
+
+        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+            agent_base::llm_trait::ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: agent_base::llm_trait::backend::LlmBackend::Custom("stub".to_string()),
+                version: None,
+            }
         }
     }
 

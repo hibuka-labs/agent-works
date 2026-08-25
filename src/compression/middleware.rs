@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agent_base::{AgentResult, ChatMessage, Middleware, PreLlmCtx, StreamClient};
+use agent_base::{AgentResult, ChatMessage, Middleware, PreLlmCtx};
 
 use crate::compression::compactor::{ContextCompactor, estimate_message_tokens};
 use crate::compression::config::CompressionConfig;
@@ -147,7 +147,10 @@ impl CompressionMiddleware {
     /// Create a new middleware with the given config and LLM client.
     ///
     /// Uses [`AutoCompressionPolicy`] (always compress when threshold is hit).
-    pub fn new(config: CompressionConfig, client: Arc<dyn StreamClient>) -> Self {
+    pub fn new(
+        config: CompressionConfig,
+        client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+    ) -> Self {
         Self {
             compactor: ContextCompactor::new(client, config),
             policy: Box::new(AutoCompressionPolicy),
@@ -169,7 +172,7 @@ impl CompressionMiddleware {
     /// Create a new middleware with a custom [`CompressionPolicy`].
     pub fn with_policy(
         config: CompressionConfig,
-        client: Arc<dyn StreamClient>,
+        client: Arc<dyn agent_base::llm_trait::LlmProvider>,
         policy: Box<dyn CompressionPolicy>,
     ) -> Self {
         Self {
@@ -365,10 +368,13 @@ mod tests {
     use super::*;
     use crate::compression::events::CompressionEvent;
     use crate::compression::policy::{CompressionPolicy, RateLimitPolicy};
-    use agent_base::{
-        AgentResult, ChatMessage, LlmCapabilities, Middleware, PreLlmCtx, ResponseFormat,
-        SessionId, StreamClient,
+    use agent_base::llm_trait::backend::LlmBackend;
+    use agent_base::llm_trait::response::FinishReason;
+    use agent_base::llm_trait::types::UsageInfo;
+    use agent_base::llm_trait::{
+        Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
     };
+    use agent_base::{ChatMessage, Middleware, PreLlmCtx, SessionId};
 
     // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -379,38 +385,37 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl StreamClient for MockClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<
-            std::pin::Pin<
-                Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
-            >,
-        > {
+    impl LlmProvider for MockClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let response = self.response.to_string();
-            Ok(Box::pin(futures_util::stream::once(async move {
-                Ok(agent_base::StreamChunk::Text(response))
-            })))
+            Ok(ChatStream::new(Box::pin(futures_util::stream::once(
+                async move { Ok(agent_base::StreamChunk::Text(response)) },
+            ))))
         }
 
-        async fn chat(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<String> {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(self.response.to_string())
+            Ok(ChatResponse {
+                content: self.response.to_string(),
+                tool_calls: vec![],
+                usage: UsageInfo::default(),
+                finish_reason: FinishReason::Stop,
+                raw: None,
+            })
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: LlmBackend::Custom("stub".to_string()),
+                version: None,
+            }
         }
     }
 
@@ -418,33 +423,26 @@ mod tests {
     struct FailingClient;
 
     #[async_trait::async_trait]
-    impl StreamClient for FailingClient {
-        async fn stream(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<
-            std::pin::Pin<
-                Box<dyn futures_core::Stream<Item = AgentResult<agent_base::StreamChunk>> + Send>,
-            >,
-        > {
-            Err(agent_base::AgentError::llm("summarisation failed"))
+    impl LlmProvider for FailingClient {
+        async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            Err(LlmError::llm("summarisation failed"))
         }
 
-        async fn chat(
-            &self,
-            _messages: &[ChatMessage],
-            _tools: &[serde_json::Value],
-            _reasoning: Option<&agent_base::ReasoningConfig>,
-            _response_format: Option<&ResponseFormat>,
-        ) -> AgentResult<String> {
-            Err(agent_base::AgentError::llm("summarisation failed"))
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Err(LlmError::llm("summarisation failed"))
         }
 
-        fn capabilities(&self) -> LlmCapabilities {
-            LlmCapabilities::default()
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                name: "stub".to_string(),
+                model: "stub-model".to_string(),
+                backend: LlmBackend::Custom("stub".to_string()),
+                version: None,
+            }
         }
     }
 
