@@ -478,6 +478,7 @@ fn message_content_len(msg: &ChatMessage) -> usize {
             content,
             reasoning_content,
             tool_calls,
+            thinking_signature: _,
         } => {
             let mut len = content.as_deref().map(|c| c.len()).unwrap_or(0);
             if let Some(rc) = reasoning_content {
@@ -493,6 +494,7 @@ fn message_content_len(msg: &ChatMessage) -> usize {
         ChatMessage::Tool {
             tool_call_id,
             content,
+            ..
         } => tool_call_id.len() + content.len(),
         ChatMessage::Custom { role, data } => role.len() + data.to_string().len(),
     }
@@ -539,6 +541,7 @@ pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> usize {
             content,
             reasoning_content,
             tool_calls,
+            thinking_signature: _,
         } => {
             let mut tokens = content
                 .as_deref()
@@ -559,6 +562,7 @@ pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> usize {
         ChatMessage::Tool {
             tool_call_id,
             content,
+            ..
         } => {
             ContextWindowManager::estimate_tokens(tool_call_id)
                 + ContextWindowManager::estimate_tokens(content)
@@ -618,6 +622,7 @@ pub fn serialize_block(messages: &[&ChatMessage], max_chars: usize) -> String {
             ChatMessage::Tool {
                 tool_call_id,
                 content,
+                ..
             } => format!(
                 "[tool:{}] {}",
                 truncate_str(tool_call_id, 50),
@@ -680,7 +685,6 @@ fn truncate_user_messages<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::llm_trait::backend::LlmBackend;
     use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
@@ -709,6 +713,8 @@ mod tests {
                 usage: UsageInfo::default(),
                 finish_reason: FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -720,7 +726,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }
@@ -750,6 +755,8 @@ mod tests {
                 usage: UsageInfo::default(),
                 finish_reason: FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -761,7 +768,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }
@@ -788,7 +794,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }
@@ -908,6 +913,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: long_arg,
             }]),
+            thinking_signature: None,
         }];
         let msg_refs: Vec<&ChatMessage> = msgs.iter().collect();
         let out = super::serialize_block(&msg_refs, 2000);
@@ -1316,5 +1322,118 @@ mod tests {
         // The rest of this test needs to be updated for the new LlmProvider API.
         // It previously used agent_base::llm::adapt(OpenAiClient::new(...)).
         // TODO: Use llm-unified factory to create a real provider for integration testing.
+    }
+
+    // ── proptest: truncate_str / safe_cut_index ──
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn truncate_str_chars_count_bounded(s in ".*", max in 0usize..500) {
+                let result = truncate_str(&s, max);
+                let char_count = result.chars().count();
+                let original_count = s.chars().count();
+                if original_count <= max {
+                    assert_eq!(char_count, original_count);
+                } else {
+                    // +1 for the '…' character
+                    assert!(char_count <= max + 1,
+                        "truncated {} chars > max {} + 1", char_count, max);
+                }
+            }
+
+            #[test]
+            fn truncate_str_short_string_unchanged(s in "[a-zA-Z\u{4e00}-\u{9fff}]{0,50}", max in 50usize..200) {
+                let result = truncate_str(&s, max);
+                assert_eq!(result, s, "short string should be unchanged");
+            }
+
+            #[test]
+            fn truncate_str_cjk_char_boundary_safe(s in "[\u{4e00}-\u{9fff}]{1,200}", max in 1usize..100) {
+                // Must not panic on char boundary
+                let result = truncate_str(&s, max);
+                assert!(result.chars().count() <= max + 1);
+            }
+
+            #[test]
+            fn truncate_str_result_is_valid_utf8(s in ".*", max in 0usize..500) {
+                let result = truncate_str(&s, max);
+                // Verify the result is valid UTF-8 and doesn't panic on string operations
+                assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+                let _ = result.len(); // byte length accessible
+                let _ = result.chars().count(); // char count accessible
+            }
+        }
+
+        /// Generate a simple message sequence for safe_cut_index testing.
+        fn arb_messages() -> impl Strategy<Value = Vec<ChatMessage>> {
+            prop::collection::vec(
+                prop_oneof![
+                    "[a-z ]{0,50}".prop_map(|s| ChatMessage::user(&s)),
+                    "[a-z ]{0,50}".prop_map(|s| ChatMessage::assistant(&s)),
+                    ("[a-z]{1,10}", "[a-z ]{0,50}").prop_map(|(id, content)| ChatMessage::tool(&id, &content)),
+                ],
+                0..15,
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn safe_cut_index_never_panics(
+                messages in arb_messages(),
+                start in 0usize..15,
+            ) {
+                if messages.is_empty() || start >= messages.len() {
+                    return Ok(());
+                }
+                let cut = start + (messages.len() - start) / 2;
+                if cut > messages.len() {
+                    return Ok(());
+                }
+                let _result = super::safe_cut_index(&messages, start, cut);
+            }
+
+            #[test]
+            fn safe_cut_index_result_in_bounds(
+                messages in arb_messages(),
+                start in 0usize..15,
+            ) {
+                if messages.is_empty() || start >= messages.len() {
+                    return Ok(());
+                }
+                let cut = start + (messages.len() - start) / 2;
+                if cut > messages.len() || cut < start {
+                    return Ok(());
+                }
+                let result = super::safe_cut_index(&messages, start, cut);
+                assert!(result >= start, "result {} < start {}", result, start);
+                assert!(result <= messages.len(), "result {} > len {}", result, messages.len());
+            }
+
+            #[test]
+            fn safe_cut_index_never_ends_on_tool_call(
+                messages in arb_messages(),
+                start in 0usize..15,
+            ) {
+                if messages.is_empty() || start >= messages.len() {
+                    return Ok(());
+                }
+                let cut = start + (messages.len() - start) / 2;
+                if cut > messages.len() || cut < start {
+                    return Ok(());
+                }
+                let result = super::safe_cut_index(&messages, start, cut);
+                // The message left of the cut should not be Assistant with tool_calls
+                if result > 0 && result < messages.len() {
+                    assert!(
+                        !matches!(&messages[result - 1], ChatMessage::Assistant { tool_calls: Some(_), .. }),
+                        "safe_cut left boundary should not be assistant with tool_calls"
+                    );
+                }
+            }
+        }
     }
 }

@@ -261,4 +261,58 @@ mod tests {
         assert!(a < b);
         assert!(a < a1);
     }
+
+    // ── proptest: AgentPath ──
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate a valid AgentPath by building from root + random segments.
+        fn arb_agent_path() -> impl Strategy<Value = AgentPath> {
+            prop::collection::vec(r"[a-zA-Z0-9_-]{1,20}", 0..5).prop_map(|segments| {
+                let mut path = AgentPath::root();
+                for seg in segments {
+                    path = path.join(&seg);
+                }
+                path
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn parse_never_panics(s in ".*") {
+                let _ = AgentPath::parse(&s);
+            }
+
+            #[test]
+            fn roundtrip_to_string_parse(path in arb_agent_path()) {
+                let s = path.to_string();
+                let reparsed = AgentPath::parse(&s).unwrap();
+                assert_eq!(path, reparsed, "roundtrip failed for {:?}", s);
+            }
+
+            #[test]
+            fn parsed_path_starts_with_root(s in "[a-zA-Z0-9/_-]{1,50}") {
+                if let Some(path) = AgentPath::parse(&s) {
+                    assert_eq!(path.segments()[0], "root",
+                        "parsed path must start with 'root', got {:?}", path.segments());
+                }
+            }
+
+            #[test]
+            fn depth_equals_segments_minus_1(path in arb_agent_path()) {
+                assert_eq!(path.depth(), path.segments().len() - 1);
+            }
+
+            #[test]
+            fn parent_of_non_root_is_some(path in arb_agent_path()) {
+                if !path.is_root() {
+                    let parent = path.parent().unwrap();
+                    assert_eq!(parent.depth(), path.depth() - 1);
+                    assert_eq!(parent.to_string().len() + 1 + path.name().len(), path.to_string().len());
+                }
+            }
+        }
+    }
 }

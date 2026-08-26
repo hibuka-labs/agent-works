@@ -299,4 +299,76 @@ mod tests {
         // "start" != "started", so this should fail — documenting the breaking change.
         assert!(result.is_err(), "\"start\" should not match \"started\"");
     }
+
+    // ── proptest: CompressionEvent serde roundtrip ──
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate a random CompressionTrigger.
+        fn arb_trigger() -> impl Strategy<Value = CompressionTrigger> {
+            prop_oneof![
+                Just(CompressionTrigger::Auto),
+                Just(CompressionTrigger::Manual),
+            ]
+        }
+
+        /// Generate a random CompressionEvent.
+        fn arb_event() -> impl Strategy<Value = CompressionEvent> {
+            prop_oneof![
+                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger())
+                    .prop_map(|(sid, tokens, msgs, trigger)| CompressionEvent::Preparing {
+                        session_id: sid, tokens_before: tokens, msg_count: msgs, trigger,
+                    }),
+                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger())
+                    .prop_map(|(sid, tokens, msgs, trigger)| CompressionEvent::Started {
+                        session_id: sid, tokens_before: tokens, msg_count: msgs, trigger,
+                    }),
+                (0u64..10000, 0usize..100000)
+                    .prop_map(|(sid, chars)| CompressionEvent::Progress {
+                        session_id: sid, chars,
+                    }),
+                (0u64..10000, 0usize..100000, 0usize..100000, -100i32..100, 0usize..1000, 0usize..1000, arb_trigger())
+                    .prop_map(|(sid, tb, ta, pct, mb, ma, trigger)| CompressionEvent::Completed {
+                        session_id: sid, tokens_before: tb, tokens_after: ta,
+                        reduction_pct: pct, msg_count_before: mb, msg_count_after: ma, trigger,
+                    }),
+                (0u64..10000, "[a-z ]{0,50}", arb_trigger())
+                    .prop_map(|(sid, err, trigger)| CompressionEvent::Failed {
+                        session_id: sid, error: err, trigger,
+                    }),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn serde_roundtrip(event in arb_event()) {
+                let json = serde_json::to_value(&event).unwrap();
+                let reparsed: CompressionEvent = serde_json::from_value(json).unwrap();
+                assert_eq!(event, reparsed, "serde roundtrip failed");
+            }
+
+            #[test]
+            fn json_keys_are_snake_case(event in arb_event()) {
+                let json = serde_json::to_value(&event).unwrap();
+                if let Some(obj) = json.as_object() {
+                    for key in obj.keys() {
+                        // No uppercase letters in keys (camelCase would have them)
+                        assert!(!key.chars().any(|c| c.is_ascii_uppercase()),
+                            "key {:?} is not snake_case in {:?}", key, json);
+                    }
+                }
+            }
+
+            #[test]
+            fn phase_tag_always_present(event in arb_event()) {
+                let json = serde_json::to_value(&event).unwrap();
+                assert!(json.get("phase").is_some(),
+                    "missing 'phase' tag in {:?}", json);
+                assert!(json["phase"].is_string(),
+                    "'phase' should be a string in {:?}", json);
+            }
+        }
+    }
 }

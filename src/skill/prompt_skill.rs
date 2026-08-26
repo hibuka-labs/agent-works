@@ -888,4 +888,51 @@ Arguments: $ARGUMENTS
             resolved
         );
     }
+
+    // ── proptest: split_frontmatter / from_markdown ──
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn from_markdown_never_panics(content in ".*") {
+                let _ = PromptSkill::from_markdown(&content);
+            }
+
+            #[test]
+            fn split_frontmatter_valid_input(
+                fm_content in r"[a-z: \n]{5,100}",
+                body_content in r"[a-zA-Z0-9 .,\n]{0,200}"
+            ) {
+                // Build valid markdown with frontmatter
+                let name = "test-skill";
+                let desc = "test description";
+                let input = format!("---\nname: {}\ndescription: {}\n{}\n---\n{}", name, desc, fm_content, body_content);
+                let result = split_frontmatter(&input);
+                if let Ok((fm, body)) = result {
+                    assert!(fm.contains("test-skill"), "frontmatter should contain name");
+                    assert!(fm.contains("test description"), "frontmatter should contain description");
+                    // Body should not contain the closing ---
+                    assert!(!body.starts_with("---"), "body should not start with ---");
+                }
+            }
+
+            #[test]
+            fn from_markdown_preserves_body(
+                body_text in r"[a-zA-Z0-9 .,\n]{1,200}"
+            ) {
+                let input = format!("---\nname: test-skill\ndescription: test desc\n---\n{}", body_text);
+                if let Ok(skill) = PromptSkill::from_markdown(&input) {
+                    // Body should contain the original text (trimmed)
+                    let trimmed_body = body_text.trim();
+                    if !trimmed_body.is_empty() {
+                        assert!(skill.body().contains(trimmed_body),
+                            "body {:?} should contain {:?}", skill.body(), trimmed_body);
+                    }
+                }
+            }
+        }
+    }
 }

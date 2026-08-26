@@ -397,4 +397,56 @@ description: A knowledge skill
         let err = skill.substitute_json(&value, &HashMap::new()).unwrap_err();
         assert!(err.contains("Unresolved template variable"));
     }
+
+    // ── proptest: substitute ──
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn substitute_replaces_known_vars(
+                var_value in r"[a-z]{1,30}"
+            ) {
+                let skill = YamlSkill::from_yaml(TEST_SKILL).unwrap();
+                let template = "run {{service_name}} on host";
+                let mut params = HashMap::new();
+                params.insert("service_name".to_string(), var_value.clone());
+                let result = skill.substitute(template, &params).unwrap();
+                assert!(result.contains(&var_value),
+                    "result {:?} should contain {:?}", result, var_value);
+                assert!(!result.contains("{{service_name}}"),
+                    "placeholder should be replaced");
+            }
+
+            #[test]
+            fn substitute_no_vars_unchanged(
+                template in r"[a-z {}]{0,50}",
+            ) {
+                // Only test templates with no {{ }} patterns
+                if template.contains("{{") {
+                    return Ok(());
+                }
+                let skill = YamlSkill::from_yaml(TEST_SKILL).unwrap();
+                let result = skill.substitute(&template, &HashMap::new()).unwrap();
+                assert_eq!(result, template, "no vars → unchanged");
+            }
+
+            #[test]
+            fn substitute_unresolved_returns_err(
+                var_name in r"[a-z]{1,20}",
+                template_prefix in r"[a-z ]{0,20}",
+            ) {
+                // Skip if var_name happens to be one of the known params
+                if ["target_host", "service_name"].contains(&var_name.as_str()) {
+                    return Ok(());
+                }
+                let template = format!("{}{{{{{}}}}}", template_prefix, var_name);
+                let skill = YamlSkill::from_yaml(TEST_SKILL).unwrap();
+                let result = skill.substitute(&template, &HashMap::new());
+                assert!(result.is_err(), "unresolved {{{{ {} }}}} should return Err", var_name);
+            }
+        }
+    }
 }
