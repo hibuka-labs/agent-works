@@ -56,6 +56,8 @@ pub struct AgentBuilder {
     list_skills_tool_factory: Option<ListSkillsToolFactory>,
     #[cfg(feature = "skill")]
     disable_skill_prompt_injection: bool,
+    /// Optional inline context compactor for the react loop.
+    context_compactor: Option<Arc<dyn agent_base::ContextCompaction>>,
 }
 
 impl AgentBuilder {
@@ -84,6 +86,7 @@ impl AgentBuilder {
             list_skills_tool_factory: None,
             #[cfg(feature = "skill")]
             disable_skill_prompt_injection: false,
+            context_compactor: None,
         }
     }
 
@@ -312,6 +315,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Set an inline context compactor for the react loop.
+    ///
+    /// When set, the react loop will check token count after each tool turn
+    /// and compact the session if it exceeds the configured threshold.
+    pub fn context_compactor(mut self, compactor: Arc<dyn agent_base::ContextCompaction>) -> Self {
+        self.context_compactor = Some(compactor);
+        self
+    }
+
     pub fn event_bus_capacity(self, capacity: usize) -> Self {
         Self {
             inner: self.inner.event_bus_capacity(capacity),
@@ -422,6 +434,11 @@ impl AgentBuilder {
                 None => ma_prompt,
             };
             self.inner = self.inner.system_prompt(new_prompt);
+        }
+
+        // Inject inline context compactor if set
+        if let Some(compactor) = self.context_compactor.take() {
+            self.inner = self.inner.context_compactor(compactor);
         }
 
         let runtime = self.inner.build()?;
@@ -552,6 +569,11 @@ impl AgentBuilder {
                 None => ma_prompt,
             };
             ab = ab.system_prompt(new_prompt);
+        }
+
+        // Inject inline context compactor if set
+        if let Some(compactor) = self.context_compactor.take() {
+            ab = ab.context_compactor(compactor);
         }
 
         let runtime = ab.build()?;

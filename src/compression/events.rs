@@ -17,6 +17,8 @@ pub enum CompressionTrigger {
     Auto,
     /// Manual compression via /compact command.
     Manual,
+    /// Inline compaction within the react loop (after tool execution).
+    InlineCompaction,
 }
 
 /// Context compression lifecycle events.
@@ -311,6 +313,7 @@ mod tests {
             prop_oneof![
                 Just(CompressionTrigger::Auto),
                 Just(CompressionTrigger::Manual),
+                Just(CompressionTrigger::InlineCompaction),
             ]
         }
 

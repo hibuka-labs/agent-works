@@ -680,6 +680,45 @@ fn truncate_user_messages<'a>(
     result
 }
 
+// ── ContextCompaction trait implementation ──────────────────────────────────
+
+/// Implement the agent-base `ContextCompaction` trait so the react loop
+/// can trigger inline compaction without depending on agent-works directly.
+#[async_trait::async_trait]
+impl agent_base::ContextCompaction for ContextCompactor {
+    async fn compact(
+        &self,
+        session_id: &SessionId,
+        messages: &[ChatMessage],
+    ) -> Option<Vec<ChatMessage>> {
+        // Delegate to the existing compact() method with InlineCompaction trigger
+        match self
+            .compact(
+                session_id.id,
+                messages,
+                CompressionTrigger::InlineCompaction,
+                None,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = session_id.id,
+                    error = %e,
+                    "inline compaction failed"
+                );
+                None
+            }
+        }
+    }
+
+    fn token_count_hint(&self, _session_id: &SessionId) -> Option<usize> {
+        // The react loop uses ContextWindowManager for estimation
+        None
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

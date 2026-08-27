@@ -17,6 +17,7 @@ pub mod multi_agent;
 pub mod compression;
 
 pub mod guard;
+pub mod prompt;
 
 mod builder;
 pub mod handle;
@@ -29,6 +30,9 @@ pub use crate::builder::{
     MultiAgentToolFactory, build_multi_agent_system_prompt, setup_multi_agent,
 };
 pub use crate::handle::{AgentHandle, SendError};
+pub use crate::prompt::{
+    DynamicToolsFragment, EnvironmentFragment, FragmentContext, PromptFragment, compose_fragments,
+};
 
 #[cfg(feature = "skill")]
 pub use skill::{

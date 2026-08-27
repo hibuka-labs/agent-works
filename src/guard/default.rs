@@ -3,7 +3,7 @@ use agent_base::llm_trait::LlmProvider;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::config::DefaultGuardConfig;
+use super::config::{DefaultGuardConfig, ReasoningOnlyAction};
 use super::judge::call_completion_judge;
 
 /// Default guard implementation
@@ -35,14 +35,41 @@ impl DefaultGuard {
     async fn handle_reasoning_only(&self, ctx: &GuardCtx) -> GuardDecision {
         let strikes = ctx.reasoning_only_strikes;
 
-        if strikes >= self.config.reasoning_only_max_strikes {
-            return GuardDecision::Fail {
-                error: "model produced only reasoning across multiple turns".to_string(),
-            };
-        }
+        match self.config.reasoning_only_action {
+            ReasoningOnlyAction::Fail => {
+                // Default behavior: fail after max strikes
+                if strikes >= self.config.reasoning_only_max_strikes {
+                    return GuardDecision::Fail {
+                        error: "model produced only reasoning across multiple turns".to_string(),
+                    };
+                }
 
-        GuardDecision::Continue {
-            nudge: Some(self.config.reasoning_only_nudge.clone()),
+                GuardDecision::Continue {
+                    nudge: Some(self.config.reasoning_only_nudge.clone()),
+                }
+            }
+            ReasoningOnlyAction::DisableThinking => {
+                // New behavior: disable thinking after max strikes
+                if strikes >= self.config.reasoning_only_max_strikes {
+                    // Check if thinking is already disabled
+                    if ctx.thinking_disabled {
+                        // Thinking is already disabled but still reasoning-only → fail
+                        return GuardDecision::Fail {
+                            error: "model produced only reasoning even after thinking was disabled"
+                                .to_string(),
+                        };
+                    }
+
+                    // Disable thinking and continue
+                    return GuardDecision::DisableThinking {
+                        nudge: self.config.disable_thinking_nudge.clone(),
+                    };
+                }
+
+                GuardDecision::Continue {
+                    nudge: Some(self.config.reasoning_only_nudge.clone()),
+                }
+            }
         }
     }
 
@@ -220,5 +247,22 @@ impl ReactLoopGuard for DefaultGuard {
         } else {
             GuardDecision::Complete
         }
+    }
+
+    async fn on_tool_call(&self, ctx: &GuardCtx) -> GuardDecision {
+        // Restore thinking when:
+        // 1. Thinking is currently disabled (by guard)
+        // 2. Original thinking was enabled (user wanted thinking)
+        // 3. Model calls a tool (showing it's working again)
+        if ctx.thinking_disabled && ctx.original_thinking_enabled {
+            tracing::info!(
+                session_id = ctx.session_id.id,
+                turn = ctx.turn_count,
+                "tool call detected while thinking disabled, restoring thinking"
+            );
+            return GuardDecision::RestoreThinking;
+        }
+
+        GuardDecision::Complete
     }
 }

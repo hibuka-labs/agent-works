@@ -1,13 +1,43 @@
+/// Reasoning-only handling strategy
+#[derive(Debug, Clone)]
+pub enum ReasoningOnlyAction {
+    /// Default: fail after N nudges
+    Fail,
+    /// New: disable thinking after N nudges, continue running
+    DisableThinking,
+}
+
+impl Default for ReasoningOnlyAction {
+    fn default() -> Self {
+        Self::Fail
+    }
+}
+
 /// Default guard configuration
 pub struct DefaultGuardConfig {
+    // ─── reasoning-only configuration ─────────────────────────
+
     /// Maximum retries for reasoning-only responses
     pub reasoning_only_max_strikes: usize,
-    /// Maximum retries for empty responses
-    pub empty_response_max_strikes: usize,
     /// Nudge message for reasoning-only responses
     pub reasoning_only_nudge: String,
+    /// Reasoning-only handling strategy
+    pub reasoning_only_action: ReasoningOnlyAction,
+
+    // ─── thinking guard configuration (for DisableThinking strategy) ──
+
+    /// Nudge message when disabling thinking
+    pub disable_thinking_nudge: String,
+
+    // ─── empty-response configuration ─────────────────────────
+
+    /// Maximum retries for empty responses
+    pub empty_response_max_strikes: usize,
     /// Nudge message for empty responses
     pub empty_response_nudge: String,
+
+    // ─── text-only configuration ─────────────────────────────
+
     /// Whether to use LLM judge for text-only after tools
     pub use_llm_judge: bool,
     /// Timeout in seconds for the LLM judge call
@@ -36,15 +66,27 @@ pub struct DefaultGuardConfig {
 impl Default for DefaultGuardConfig {
     fn default() -> Self {
         Self {
+            // reasoning-only
             reasoning_only_max_strikes: 3,
-            empty_response_max_strikes: 3,
             reasoning_only_nudge: "You produced internal reasoning but no tool call \
                 and no final answer. Make a decision now: call a tool to make progress, \
                 or write your final answer as plain text."
                 .to_string(),
+            reasoning_only_action: ReasoningOnlyAction::Fail,
+
+            // thinking guard
+            disable_thinking_nudge: "Thinking has been disabled due to excessive reasoning. \
+                You MUST now either call a tool or write your final answer. \
+                Do NOT attempt to reason further."
+                .to_string(),
+
+            // empty-response
+            empty_response_max_strikes: 3,
             empty_response_nudge: "Your response was empty. Please provide a response \
                 with either a tool call or your final answer."
                 .to_string(),
+
+            // text-only
             use_llm_judge: true,
             judge_timeout_secs: 10,
             judge_skip_threshold: 256,

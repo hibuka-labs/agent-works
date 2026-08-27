@@ -4,7 +4,7 @@ mod judge;
 #[cfg(test)]
 mod tests;
 
-pub use config::DefaultGuardConfig;
+pub use config::{DefaultGuardConfig, ReasoningOnlyAction};
 pub use default::DefaultGuard;
 
 // Re-export guard types from agent-base for convenience.

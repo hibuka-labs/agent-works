@@ -222,5 +222,6 @@ fn make_test_ctx(
         is_empty_response,
         is_text_only,
         thinking_disabled: false,
+        original_thinking_enabled: true,
     }
 }
