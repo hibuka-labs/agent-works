@@ -238,6 +238,27 @@ impl DefaultGuard {
 #[async_trait]
 impl ReactLoopGuard for DefaultGuard {
     async fn on_turn(&self, ctx: &GuardCtx) -> GuardDecision {
+        // Check if approaching max turns threshold
+        if self.config.max_turns_nudge_threshold > 0
+            && ctx.remaining_turns <= self.config.max_turns_nudge_threshold
+        {
+            tracing::info!(
+                session_id = ctx.session_id.id,
+                turn = ctx.turn_count,
+                remaining_turns = ctx.remaining_turns,
+                threshold = self.config.max_turns_nudge_threshold,
+                "approaching max turns, nudging model to wrap up"
+            );
+            return GuardDecision::Continue {
+                nudge: Some(format!(
+                    "{}\n\n[Remaining turns: {}/{}]",
+                    self.config.max_turns_nudge,
+                    ctx.remaining_turns,
+                    ctx.turn_count + ctx.remaining_turns,
+                )),
+            };
+        }
+
         if ctx.is_reasoning_only {
             self.handle_reasoning_only(ctx).await
         } else if ctx.is_empty_response {

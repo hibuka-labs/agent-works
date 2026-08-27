@@ -38,6 +38,7 @@ fn make_ctx(
         is_text_only,
         thinking_disabled: false,
         original_thinking_enabled: true,
+        remaining_turns: 50,
     }
 }
 
@@ -67,6 +68,7 @@ fn make_ctx_with_text(
         is_text_only,
         thinking_disabled: false,
         original_thinking_enabled: true,
+        remaining_turns: 50,
     }
 }
 
