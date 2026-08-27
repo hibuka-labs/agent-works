@@ -61,18 +61,6 @@ pub struct DefaultGuardConfig {
     /// Number of recent user messages to include in the judge prompt.
     /// Helps the judge understand context like "继续" after a multi-turn discussion.
     pub recent_user_count: usize,
-
-    // ─── max turns nudge configuration ─────────────────────
-
-    /// Threshold for nudging when approaching max turns
-    ///
-    /// When remaining_turns <= this value, inject a nudge to encourage the model
-    /// to wrap up and provide a final answer.
-    /// Set to 0 to disable max turns nudging.
-    pub max_turns_nudge_threshold: u32,
-
-    /// Nudge message when approaching max turns
-    pub max_turns_nudge: String,
 }
 
 impl Default for DefaultGuardConfig {
@@ -110,13 +98,6 @@ impl Default for DefaultGuardConfig {
                 you may need to continue."
                 .to_string(),
             recent_user_count: 5,
-
-            // max turns nudge
-            max_turns_nudge_threshold: 0, // disabled by default
-            max_turns_nudge: "You are approaching the maximum number of turns. \
-                Please summarize your progress and provide a final answer soon. \
-                Wrap up any ongoing work and report what you've accomplished."
-                .to_string(),
         }
     }
 }

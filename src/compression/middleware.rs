@@ -483,6 +483,8 @@ mod tests {
             messages,
             tools: vec![],
             emit_fn: None,
+            turn_count: 1,
+            max_turns: 50,
         }
     }
 
@@ -500,6 +502,8 @@ mod tests {
                     events_clone.lock().unwrap().push(ev);
                 }
             })),
+            turn_count: 1,
+            max_turns: 50,
         }
     }
 
