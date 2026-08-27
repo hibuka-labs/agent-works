@@ -7,7 +7,7 @@
 
 **Batteries-included Agent toolbox built on [agent-base](https://github.com/hibuka-labs/agent-base).**
 
-`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: MCP multi-server management, Skills with progressive disclosure, a Focus module for structured LLM extraction, multi-agent orchestration with fork_history, and a CLI REPL loop — all behind feature flags. Pick what you need.
+`agent-works` adds production-ready capabilities on top of the `agent-base` runtime kernel: loop guards for model misbehavior, MCP multi-server management, Skills with progressive disclosure, a Focus module for structured LLM extraction, multi-agent orchestration with fork_history, and a CLI REPL loop — all behind feature flags. Pick what you need.
 
 ## Relationship with agent-base
 
@@ -240,9 +240,56 @@ let runtime = AgentBuilder::new(llm)
     .build()?;
 ```
 
+### Guard — Loop Protection
+
+Guards protect the agent loop from model misbehavior (reasoning-only responses, empty responses, incomplete answers). Without a guard the runtime still works; with one it's smarter.
+
+```rust
+use agent_works::guard::{DefaultGuard, DefaultGuardConfig};
+
+// No guard — NoopGuard injected automatically, no intervention
+let runtime = AgentBuilder::new(llm).build()?;
+
+// DefaultGuard with defaults — handles reasoning_only, empty_response, text_only
+let runtime = AgentBuilder::new(llm)
+    .guard(DefaultGuard::new(DefaultGuardConfig::default()))
+    .build()?;
+
+// DefaultGuard with LLM judge — verifies task completion on text-only responses
+let config = DefaultGuardConfig {
+    use_llm_judge: true,
+    judge_fail_open: true,  // trust model if judge fails
+    ..Default::default()
+};
+let runtime = AgentBuilder::new(llm.clone())
+    .guard(DefaultGuard::with_llm_client(config, llm))
+    .build()?;
+```
+
+Custom guards implement the `ReactLoopGuard` trait:
+
+```rust
+use agent_works::guard::{GuardCtx, GuardDecision, ReactLoopGuard};
+
+struct StrictGuard;
+
+#[async_trait]
+impl ReactLoopGuard for StrictGuard {
+    async fn on_turn(&self, ctx: &GuardCtx) -> GuardDecision {
+        if !ctx.run_has_tool_calls {
+            return GuardDecision::Fail { error: "no tool calls".into() };
+        }
+        GuardDecision::Complete
+    }
+}
+```
+
 ## Examples
 
 ```bash
+# Guard system — DefaultGuard, NoopGuard, custom guards
+cargo run --example guard_demo
+
 # Skills with progressive disclosure
 cargo run --example skill_demo --features skill
 
@@ -260,6 +307,7 @@ src/
 ├── lib.rs              # Re-exports agent-base + feature-gated modules
 ├── builder.rs          # AgentBuilder wrapper with skill integration
 ├── handle.rs           # AgentHandle — high-level agent lifecycle
+├── guard/              # DefaultGuard + ReactLoopGuard trait
 ├── mcp/                # McpHUb + McpClient (HTTP + stdio transport)
 ├── skill/              # Skill trait + prompter strategies + detail tool
 ├── focus/              # Focus — structured LLM extraction

@@ -1,6 +1,5 @@
 //! Benchmarks: AgentBuilder construction in agent-works.
 
-use agent_base::llm_trait::backend::LlmBackend;
 use agent_base::llm_trait::response::FinishReason;
 use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
@@ -21,6 +20,8 @@ impl LlmProvider for BenchLlmProvider {
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
         Ok(ChatResponse {
             content: String::new(),
+            reasoning_content: None,
+            thinking_signature: None,
             tool_calls: vec![],
             usage: UsageInfo::default(),
             finish_reason: FinishReason::Stop,
@@ -41,7 +42,6 @@ impl LlmProvider for BenchLlmProvider {
         ProviderInfo {
             name: "bench".to_string(),
             model: "bench-model".to_string(),
-            backend: LlmBackend::Custom("bench".to_string()),
             version: None,
         }
     }
