@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_base::llm_trait::backend::LlmBackend;
 use agent_base::llm_trait::response::FinishReason;
 use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
@@ -62,7 +61,6 @@ impl LlmProvider for MockLlmProvider {
         ProviderInfo {
             name: "mock".to_string(),
             model: "mock-model".to_string(),
-            backend: LlmBackend::Custom("mock".to_string()),
             version: None,
         }
     }
@@ -121,4 +119,5 @@ async fn main() -> AgentResult<()> {
     println!(
         "\nDemo complete. In a real app, call repl.run().await to start the interactive loop."
     );
+    Ok(())
 }

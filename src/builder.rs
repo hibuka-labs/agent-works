@@ -745,13 +745,11 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
 mod tests {
     use super::*;
     use agent_base::Content;
-    use agent_base::llm_trait::backend::LlmBackend;
     use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
         Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
     };
-    
 
     // ── Stub LLM provider ──
 
@@ -778,6 +776,8 @@ mod tests {
                 usage: UsageInfo::default(),
                 finish_reason: FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -793,7 +793,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }

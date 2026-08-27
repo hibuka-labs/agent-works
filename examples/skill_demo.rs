@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_base::llm_trait::backend::LlmBackend;
 use agent_base::llm_trait::response::FinishReason;
 use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
@@ -60,7 +59,6 @@ impl LlmProvider for MockLlmProvider {
         ProviderInfo {
             name: "mock".to_string(),
             model: "mock-model".to_string(),
-            backend: LlmBackend::Custom("mock".to_string()),
             version: None,
         }
     }
@@ -207,4 +205,5 @@ async fn main() -> AgentResult<()> {
     // let session_id = runtime.create_session().await;
     // let result = runtime.run_turn_collect(session_id, "What is 2 + 3?").await;
     println!("\nDemo complete.");
+    Ok(())
 }

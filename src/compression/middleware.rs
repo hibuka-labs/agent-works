@@ -368,7 +368,6 @@ mod tests {
     use super::*;
     use crate::compression::events::CompressionEvent;
     use crate::compression::policy::{CompressionPolicy, RateLimitPolicy};
-    use agent_base::llm_trait::backend::LlmBackend;
     use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
@@ -402,6 +401,8 @@ mod tests {
                 usage: UsageInfo::default(),
                 finish_reason: FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -413,7 +414,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }
@@ -440,7 +440,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }

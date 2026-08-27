@@ -499,6 +499,14 @@ impl Skill for PromptSkill {
     }
 }
 
+// ── Fuzz exports ──
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports {
+    pub fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
+        super::split_frontmatter(content)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

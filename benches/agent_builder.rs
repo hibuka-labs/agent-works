@@ -6,10 +6,7 @@ use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
     Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
 };
-use agent_base::{
-    AgentResult, Content, Tool,
-    ToolContext, ToolMetadata,
-};
+use agent_base::{AgentResult, Content, Tool, ToolContext, ToolMetadata};
 use agent_works::AgentBuilder;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;

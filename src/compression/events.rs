@@ -317,27 +317,53 @@ mod tests {
         /// Generate a random CompressionEvent.
         fn arb_event() -> impl Strategy<Value = CompressionEvent> {
             prop_oneof![
-                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger())
-                    .prop_map(|(sid, tokens, msgs, trigger)| CompressionEvent::Preparing {
-                        session_id: sid, tokens_before: tokens, msg_count: msgs, trigger,
+                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger()).prop_map(
+                    |(sid, tokens, msgs, trigger)| CompressionEvent::Preparing {
+                        session_id: sid,
+                        tokens_before: tokens,
+                        msg_count: msgs,
+                        trigger,
+                    }
+                ),
+                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger()).prop_map(
+                    |(sid, tokens, msgs, trigger)| CompressionEvent::Started {
+                        session_id: sid,
+                        tokens_before: tokens,
+                        msg_count: msgs,
+                        trigger,
+                    }
+                ),
+                (0u64..10000, 0usize..100000).prop_map(|(sid, chars)| CompressionEvent::Progress {
+                    session_id: sid,
+                    chars,
+                }),
+                (
+                    0u64..10000,
+                    0usize..100000,
+                    0usize..100000,
+                    -100i32..100,
+                    0usize..1000,
+                    0usize..1000,
+                    arb_trigger()
+                )
+                    .prop_map(|(sid, tb, ta, pct, mb, ma, trigger)| {
+                        CompressionEvent::Completed {
+                            session_id: sid,
+                            tokens_before: tb,
+                            tokens_after: ta,
+                            reduction_pct: pct,
+                            msg_count_before: mb,
+                            msg_count_after: ma,
+                            trigger,
+                        }
                     }),
-                (0u64..10000, 0usize..100000, 0usize..1000, arb_trigger())
-                    .prop_map(|(sid, tokens, msgs, trigger)| CompressionEvent::Started {
-                        session_id: sid, tokens_before: tokens, msg_count: msgs, trigger,
-                    }),
-                (0u64..10000, 0usize..100000)
-                    .prop_map(|(sid, chars)| CompressionEvent::Progress {
-                        session_id: sid, chars,
-                    }),
-                (0u64..10000, 0usize..100000, 0usize..100000, -100i32..100, 0usize..1000, 0usize..1000, arb_trigger())
-                    .prop_map(|(sid, tb, ta, pct, mb, ma, trigger)| CompressionEvent::Completed {
-                        session_id: sid, tokens_before: tb, tokens_after: ta,
-                        reduction_pct: pct, msg_count_before: mb, msg_count_after: ma, trigger,
-                    }),
-                (0u64..10000, "[a-z ]{0,50}", arb_trigger())
-                    .prop_map(|(sid, err, trigger)| CompressionEvent::Failed {
-                        session_id: sid, error: err, trigger,
-                    }),
+                (0u64..10000, "[a-z ]{0,50}", arb_trigger()).prop_map(|(sid, err, trigger)| {
+                    CompressionEvent::Failed {
+                        session_id: sid,
+                        error: err,
+                        trigger,
+                    }
+                }),
             ]
         }
 

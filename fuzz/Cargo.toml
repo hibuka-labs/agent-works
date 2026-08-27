@@ -1,0 +1,40 @@
+[package]
+name = "agent-works-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.agent-works]
+path = ".."
+features = ["fuzzing"]
+
+[patch.crates-io]
+agent-base = { path = "../../agent-base" }
+
+[[bin]]
+name = "agent_path_fuzz"
+path = "fuzz_targets/agent_path_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frontmatter_fuzz"
+path = "fuzz_targets/frontmatter_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_rpc_fuzz"
+path = "fuzz_targets/json_rpc_fuzz.rs"
+test = false
+doc = false
+bench = false

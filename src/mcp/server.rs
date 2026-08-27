@@ -541,13 +541,33 @@ impl McpServer {
     }
 }
 
+// ── Fuzz exports ──
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports {
+    use serde::Deserialize;
+    use serde_json::Value;
+
+    #[derive(Debug, Deserialize)]
+    pub struct JsonRpcRequest {
+        pub jsonrpc: String,
+        #[serde(default)]
+        pub id: Option<Value>,
+        pub method: String,
+        #[serde(default)]
+        pub params: Option<Value>,
+    }
+
+    pub fn parse_json_rpc(json_str: &str) -> Result<JsonRpcRequest, serde_json::Error> {
+        serde_json::from_str(json_str)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::pin::Pin;
     use std::sync::Arc;
 
-    use agent_base::llm_trait::backend::LlmBackend;
     use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
@@ -578,6 +598,8 @@ mod tests {
                 usage: UsageInfo::default(),
                 finish_reason: FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -589,7 +611,6 @@ mod tests {
             ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }

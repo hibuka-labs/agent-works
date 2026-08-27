@@ -689,6 +689,7 @@ impl MultiAgentRuntime {
                 ChatMessage::Tool {
                     tool_call_id,
                     content,
+                    ..
                 } => {
                     child_runtime
                         .add_system_message(
@@ -1140,7 +1141,6 @@ mod tests {
             agent_base::llm_trait::ProviderInfo {
                 name: "noop".to_string(),
                 model: "noop-model".to_string(),
-                backend: agent_base::llm_trait::backend::LlmBackend::Custom("noop".to_string()),
                 version: None,
             }
         }
@@ -1215,6 +1215,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("answer 1".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
             agent_base::ChatMessage::User {
@@ -1225,6 +1226,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("answer 2".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
         ];
@@ -1260,6 +1262,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("a1".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
             agent_base::ChatMessage::User {
@@ -1270,6 +1273,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("a2".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
             agent_base::ChatMessage::User {
@@ -1280,6 +1284,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("a3".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
         ];
@@ -1374,10 +1379,12 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: Some("assistant reply".into()),
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: None,
             },
             agent_base::ChatMessage::Tool {
                 tool_call_id: "call_123".into(),
+                name: None,
                 content: "tool output".into(),
             },
         ];
@@ -1432,6 +1439,7 @@ mod tests {
             agent_base::ChatMessage::Assistant {
                 content: None, // no text — tool call only
                 reasoning_content: None,
+                thinking_signature: None,
                 tool_calls: Some(vec![]),
             },
         ];
@@ -1536,6 +1544,8 @@ mod tests {
                 usage: agent_base::llm_trait::types::UsageInfo::default(),
                 finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -1547,7 +1557,6 @@ mod tests {
             agent_base::llm_trait::ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: agent_base::llm_trait::backend::LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }
@@ -1932,6 +1941,8 @@ mod tests {
                 usage: agent_base::llm_trait::types::UsageInfo::default(),
                 finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
                 raw: None,
+                reasoning_content: None,
+                thinking_signature: None,
             })
         }
 
@@ -1943,7 +1954,6 @@ mod tests {
             agent_base::llm_trait::ProviderInfo {
                 name: "stub".to_string(),
                 model: "stub-model".to_string(),
-                backend: agent_base::llm_trait::backend::LlmBackend::Custom("stub".to_string()),
                 version: None,
             }
         }

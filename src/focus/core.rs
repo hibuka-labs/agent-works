@@ -249,7 +249,6 @@ impl std::error::Error for FocusError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::llm_trait::backend::LlmBackend;
     use agent_base::llm_trait::response::{FinishReason, StreamChunk};
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
@@ -296,6 +295,8 @@ mod tests {
                     usage: UsageInfo::default(),
                     finish_reason: FinishReason::Stop,
                     raw: None,
+                    reasoning_content: None,
+                    thinking_signature: None,
                 }),
                 Some(Err(e)) => Err(LlmError::llm(e)),
                 None => Ok(ChatResponse {
@@ -304,6 +305,8 @@ mod tests {
                     usage: UsageInfo::default(),
                     finish_reason: FinishReason::Stop,
                     raw: None,
+                    reasoning_content: None,
+                    thinking_signature: None,
                 }),
             }
         }
@@ -316,7 +319,6 @@ mod tests {
             agent_base::llm_trait::ProviderInfo {
                 name: "mock".to_string(),
                 model: "mock-model".to_string(),
-                backend: LlmBackend::Custom("mock".to_string()),
                 version: None,
             }
         }

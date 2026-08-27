@@ -5,9 +5,7 @@ use agent_base::llm_trait::response::FinishReason as LlmFinishReason;
 use agent_base::llm_trait::{
     Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider,
 };
-use agent_base::{
-    AgentResult, Content, RunOutcome, StreamChunk, Tool, ToolContext,
-};
+use agent_base::{AgentResult, Content, RunOutcome, StreamChunk, Tool, ToolContext};
 use agent_works::AgentBuilder;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -55,6 +53,8 @@ impl LlmProvider for MockLlmClient {
             usage: agent_base::UsageInfo::default(),
             finish_reason: LlmFinishReason::Stop,
             raw: None,
+            reasoning_content: None,
+            thinking_signature: None,
         })
     }
 
@@ -73,7 +73,6 @@ impl LlmProvider for MockLlmClient {
         agent_base::llm_trait::ProviderInfo {
             name: "mock".to_string(),
             model: "mock-model".to_string(),
-            backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
             version: None,
         }
     }
@@ -275,6 +274,115 @@ async fn test_tool_enforcement_available_via_works() {
     let session_id = runtime.create_session().await;
     let result = runtime.run_turn_collect(session_id, "do something").await;
     assert!(result.is_ok(), "Expected ok: {result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Guard integration tests (Phase 3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_guard_default_noop_text_reply() {
+    // Default (NoopGuard): text reply → Completed
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
+        StreamChunk::Text("Hello!".to_string()),
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
+    ]]));
+
+    let runtime = AgentBuilder::new(llm)
+        .system_prompt("You are helpful")
+        .build()
+        .unwrap();
+
+    let session_id = runtime.create_session().await;
+    let result = runtime.run_turn_collect(session_id, "Hi").await;
+    assert!(result.is_ok(), "Expected ok: {result:?}");
+    let (_events, outcome) = result.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+}
+
+#[tokio::test]
+async fn test_guard_default_noop_with_tool() {
+    // Default (NoopGuard): tool call + text → Completed
+    let llm = Arc::new(MockLlmClient::new(vec![
+        vec![
+            StreamChunk::ToolCall(json!({
+                "delta": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\": \"hello\"}"
+                        }
+                    }]
+                }
+            })),
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
+        ],
+        vec![
+            StreamChunk::Text("Done!".to_string()),
+            StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            },
+        ],
+    ]));
+
+    let runtime = AgentBuilder::new(llm)
+        .register_tool(EchoTool)
+        .build()
+        .unwrap();
+
+    let session_id = runtime.create_session().await;
+    let result = runtime.run_turn_collect(session_id, "Echo hello").await;
+    assert!(result.is_ok(), "Expected ok: {result:?}");
+    let (_events, outcome) = result.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+}
+
+#[tokio::test]
+async fn test_guard_explicit_default_guard() {
+    use agent_works::guard::{DefaultGuard, DefaultGuardConfig};
+
+    // Explicitly set DefaultGuard — text reply should Complete
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
+        StreamChunk::Text("response".to_string()),
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
+    ]]));
+
+    let guard = DefaultGuard::new(DefaultGuardConfig::default());
+    let runtime = AgentBuilder::new(llm).guard(guard).build().unwrap();
+
+    let session_id = runtime.create_session().await;
+    let result = runtime.run_turn_collect(session_id, "test").await;
+    assert!(result.is_ok(), "Expected ok: {result:?}");
+    let (_events, outcome) = result.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
+}
+
+#[tokio::test]
+async fn test_guard_explicit_noop_guard() {
+    use agent_works::guard::NoopGuard;
+
+    // Explicitly set NoopGuard
+    let llm = Arc::new(MockLlmClient::new(vec![vec![
+        StreamChunk::Text("reply".to_string()),
+        StreamChunk::Stop {
+            finish_reason: Some("stop".to_string()),
+        },
+    ]]));
+
+    let runtime = AgentBuilder::new(llm).guard(NoopGuard).build().unwrap();
+
+    let session_id = runtime.create_session().await;
+    let result = runtime.run_turn_collect(session_id, "test").await;
+    assert!(result.is_ok(), "Expected ok: {result:?}");
+    let (_events, outcome) = result.unwrap();
+    assert_eq!(outcome, RunOutcome::Completed);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +820,8 @@ mod agent_handle_tests {
     #[tokio::test]
     async fn test_handle_cancel() {
         // Create a mock that uses a channel-based stream that blocks
-        type BlockingTx = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Result<StreamChunk, LlmError>>>>>;
+        type BlockingTx =
+            Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Result<StreamChunk, LlmError>>>>>;
         struct BlockingLlm {
             tx: BlockingTx,
         }
@@ -738,9 +847,6 @@ mod agent_handle_tests {
                 agent_base::llm_trait::ProviderInfo {
                     name: "blocking".to_string(),
                     model: "blocking-model".to_string(),
-                    backend: agent_base::llm_trait::backend::LlmBackend::Custom(
-                        "blocking".to_string(),
-                    ),
                     version: None,
                 }
             }
@@ -810,7 +916,6 @@ mod agent_handle_tests {
                 agent_base::llm_trait::ProviderInfo {
                     name: "error-mock".to_string(),
                     model: "error-model".to_string(),
-                    backend: agent_base::llm_trait::backend::LlmBackend::Custom("mock".to_string()),
                     version: None,
                 }
             }

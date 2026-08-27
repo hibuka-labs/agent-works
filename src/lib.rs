@@ -41,3 +41,11 @@ pub use skill::prompt_skill::PromptSkill;
 
 #[cfg(feature = "yaml_skill")]
 pub use skill::yaml_skill::YamlSkill;
+
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    #[cfg(feature = "mcp")]
+    pub use super::mcp::server::fuzz_exports as mcp_server;
+    #[cfg(feature = "skill")]
+    pub use super::skill::prompt_skill::fuzz_exports as prompt_skill;
+}

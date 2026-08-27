@@ -685,12 +685,12 @@ fn truncate_user_messages<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_base::ToolCallMessage;
     use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
         Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
     };
-    use agent_base::ToolCallMessage;
 
     // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -1374,7 +1374,8 @@ mod tests {
                 prop_oneof![
                     "[a-z ]{0,50}".prop_map(|s| ChatMessage::user(&s)),
                     "[a-z ]{0,50}".prop_map(|s| ChatMessage::assistant(&s)),
-                    ("[a-z]{1,10}", "[a-z ]{0,50}").prop_map(|(id, content)| ChatMessage::tool(&id, &content)),
+                    ("[a-z]{1,10}", "[a-z ]{0,50}")
+                        .prop_map(|(id, content)| ChatMessage::tool(&id, &content)),
                 ],
                 0..15,
             )
