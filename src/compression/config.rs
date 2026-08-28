@@ -1,5 +1,7 @@
 //! Compression configuration.
 
+use tracing;
+
 /// Tuning knobs for context compression.
 ///
 /// Controls when and how the conversation history is compressed to fit within
@@ -11,7 +13,7 @@
 /// | Field | Default | Purpose |
 /// |-------|---------|---------|
 /// | `enabled` | `true` | Master switch |
-/// | `trigger_tokens` | 160 000 | Skip compression when estimated tokens are below this |
+/// | `trigger_tokens` | 256 000 | Skip compression when estimated tokens are below this |
 /// | `keep_recent_messages` | 16 | Number of most-recent messages kept verbatim |
 /// | `max_summary_chars` | 10 240 (10 KB) | Hard cap on the generated summary length |
 /// | `max_transcript_chars` | 20 480 (20 KB) | Max chars of old messages sent to the summarizer |
@@ -37,7 +39,7 @@ impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            trigger_tokens: 160_000,
+            trigger_tokens: 256_000,
             keep_recent_messages: 16,
             max_summary_chars: 10 * 1024,    // 10 KB
             max_transcript_chars: 20 * 1024, // 20 KB
@@ -77,6 +79,20 @@ impl CompressionConfig {
         self.max_transcript_chars = chars;
         self
     }
+
+    /// Validate that `trigger_tokens` is less than the model's context window.
+    /// Logs a warning and clamps if violated. Returns the (possibly clamped) config.
+    pub fn validate_context_window(mut self, context_window: usize) -> Self {
+        if self.trigger_tokens >= context_window {
+            tracing::warn!(
+                trigger_tokens = self.trigger_tokens,
+                context_window,
+                "trigger_tokens >= context_window, clamping to 50% of context_window"
+            );
+            self.trigger_tokens = context_window / 2;
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -87,7 +103,7 @@ mod tests {
     fn test_default_values() {
         let cfg = CompressionConfig::default();
         assert!(cfg.enabled);
-        assert_eq!(cfg.trigger_tokens, 160_000);
+        assert_eq!(cfg.trigger_tokens, 256_000);
         assert_eq!(cfg.keep_recent_messages, 16);
         assert_eq!(cfg.max_summary_chars, 10 * 1024);
         assert_eq!(cfg.max_transcript_chars, 20 * 1024);

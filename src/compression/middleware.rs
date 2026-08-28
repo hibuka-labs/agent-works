@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use agent_base::{AgentResult, ChatMessage, Middleware, PreLlmCtx};
 
 use crate::compression::compactor::{ContextCompactor, estimate_message_tokens};
+use std::sync::Once;
+
 use crate::compression::config::CompressionConfig;
 use crate::compression::events::{CompressionEvent, CompressionTrigger};
 use crate::compression::filter::is_summary_message;
@@ -239,6 +241,18 @@ impl Middleware for CompressionMiddleware {
         // Quick check — below threshold, skip entirely.
         if tokens_before <= self.config().trigger_tokens {
             return Ok(());
+        }
+
+        // Defensive: warn once if trigger_tokens >= 1M.
+        // The caller should ensure trigger_tokens < context_window.
+        static TRIGGER_WARN: Once = Once::new();
+        if self.config().trigger_tokens >= 1_000_000 {
+            TRIGGER_WARN.call_once(|| {
+                tracing::warn!(
+                    trigger_tokens = self.config().trigger_tokens,
+                    "trigger_tokens >= 1M — likely exceeds context_window; compression may never fire efficiently"
+                );
+            });
         }
 
         tracing::info!(
