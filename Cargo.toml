@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -21,10 +21,12 @@ focus = []
 compression = []
 multi_agent = []
 full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
+fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.3.1" }
+agent-base = { version = "0.4.0", path = "../agent-base" }
 async-trait = "0.1"
+dyn-clone = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +45,7 @@ tempfile = "3"
 serial_test = "3"
 tokio-util = "0.7"
 wiremock = "0.6"
+proptest = "1"
 
 [[bench]]
 name = "agent_builder"
@@ -57,5 +60,11 @@ name = "cli_demo"
 required-features = ["cli"]
 
 [[example]]
+name = "guard_demo"
+
+[[example]]
 name = "mcp_demo"
 required-features = ["mcp"]
+
+[patch.crates-io]
+agent-base = { path = "../agent-base" }

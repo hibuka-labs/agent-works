@@ -217,6 +217,7 @@ fn make_test_ctx(
         reasoning_only_strikes: reasoning_strikes,
         empty_response_strikes: empty_strikes,
         run_has_tool_calls,
+        remaining_turns: 100,
         all_user_inputs: vec!["test input".into()],
         is_reasoning_only,
         is_empty_response,

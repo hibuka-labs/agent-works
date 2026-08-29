@@ -1,22 +1,16 @@
 /// Reasoning-only handling strategy
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum ReasoningOnlyAction {
     /// Default: fail after N nudges
+    #[default]
     Fail,
     /// New: disable thinking after N nudges, continue running
     DisableThinking,
 }
 
-impl Default for ReasoningOnlyAction {
-    fn default() -> Self {
-        Self::Fail
-    }
-}
-
 /// Default guard configuration
 pub struct DefaultGuardConfig {
     // ─── reasoning-only configuration ─────────────────────────
-
     /// Maximum retries for reasoning-only responses
     pub reasoning_only_max_strikes: usize,
     /// Nudge message for reasoning-only responses
@@ -25,19 +19,16 @@ pub struct DefaultGuardConfig {
     pub reasoning_only_action: ReasoningOnlyAction,
 
     // ─── thinking guard configuration (for DisableThinking strategy) ──
-
     /// Nudge message when disabling thinking
     pub disable_thinking_nudge: String,
 
     // ─── empty-response configuration ─────────────────────────
-
     /// Maximum retries for empty responses
     pub empty_response_max_strikes: usize,
     /// Nudge message for empty responses
     pub empty_response_nudge: String,
 
     // ─── text-only configuration ─────────────────────────────
-
     /// Whether to use LLM judge for text-only after tools
     pub use_llm_judge: bool,
     /// Timeout in seconds for the LLM judge call
