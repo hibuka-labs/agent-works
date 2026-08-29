@@ -249,7 +249,7 @@ impl std::error::Error for FocusError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_base::llm_trait::response::{FinishReason, StreamChunk};
+    use agent_base::llm_trait::response::FinishReason;
     use agent_base::llm_trait::types::UsageInfo;
     use agent_base::llm_trait::{
         Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider,

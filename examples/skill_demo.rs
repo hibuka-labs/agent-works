@@ -1,16 +1,11 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_base::llm_trait::response::FinishReason;
-use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
     Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
 };
-use agent_base::{AgentResult, ChatMessage, Content, RuntimeEvent, StreamChunk, Tool, ToolContext};
-use agent_works::{
-    AgentBuilder,
-    skill::{FullDetailPrompter, LazySkillPrompter, Skill, SkillPrompter},
-};
+use agent_base::{AgentResult, Content, StreamChunk, Tool, ToolContext};
+use agent_works::{AgentBuilder, skill::Skill};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -191,7 +186,7 @@ async fn main() -> AgentResult<()> {
         ],
     ]));
 
-    let runtime = AgentBuilder::new(llm)
+    let _runtime = AgentBuilder::new(llm)
         .system_prompt("You are a helpful assistant. Use skills when needed.")
         .register_skill(MathSkill)
         .build()

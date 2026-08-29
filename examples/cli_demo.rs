@@ -1,18 +1,11 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_base::llm_trait::response::FinishReason;
-use agent_base::llm_trait::types::UsageInfo;
 use agent_base::llm_trait::{
     Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
 };
-use agent_base::{
-    AgentResult, ChatMessage, Content, RuntimeEvent, SessionId, StreamChunk, Tool, ToolContext,
-};
-use agent_works::{
-    AgentBuilder,
-    cli::{CliEventPrinter, CliRepl},
-};
+use agent_base::{AgentResult, Content, StreamChunk, Tool, ToolContext};
+use agent_works::{AgentBuilder, cli::CliRepl};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -111,7 +104,7 @@ async fn main() -> AgentResult<()> {
     println!("    - EchoTool registered");
     println!();
 
-    let mut repl = CliRepl::new(runtime);
+    let _repl = CliRepl::new(runtime);
     println!("[2] CliRepl created from AgentRuntime");
 
     // Note: repl.run() is not called here since this is just a demo

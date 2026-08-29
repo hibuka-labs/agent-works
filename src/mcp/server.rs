@@ -565,7 +565,6 @@ pub mod fuzz_exports {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
     use std::sync::Arc;
 
     use agent_base::llm_trait::response::FinishReason;
@@ -573,10 +572,7 @@ mod tests {
     use agent_base::llm_trait::{
         Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, ProviderInfo,
     };
-    use agent_base::{
-        AgentBuilder, AgentResult, ChatMessage, ReasoningConfig, ResponseFormat, StreamChunk,
-    };
-    use futures_core::Stream;
+    use agent_base::{AgentBuilder, StreamChunk};
 
     struct StubProvider;
 
