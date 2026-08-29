@@ -24,7 +24,7 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.4.0", path = "../agent-base" }
+agent-base = { version = "0.4.0" }
 async-trait = "0.1"
 dyn-clone = "1"
 futures-core = "0.3"
@@ -65,6 +65,3 @@ name = "guard_demo"
 [[example]]
 name = "mcp_demo"
 required-features = ["mcp"]
-
-[patch.crates-io]
-agent-base = { path = "../agent-base" }
