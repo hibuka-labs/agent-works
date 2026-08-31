@@ -92,7 +92,7 @@ impl AgentBuilder {
 
     /// Enable multi-agent support with the given configuration.
     ///
-    /// Also sets the tool factory to create the 6 multi-agent tools.
+    /// Also sets the tool factory to create the 5 multi-agent tools.
     /// Callers should use `phi_kernel_tools::multi_agent::create_all_tools` as the factory.
     #[cfg(feature = "multi_agent")]
     pub fn with_multi_agent(mut self, config: MultiAgentConfig) -> Self {
@@ -672,9 +672,8 @@ pub fn build_multi_agent_system_prompt() -> String {
 
 You have the ability to spawn sub-agents to execute tasks concurrently. Use these tools to delegate work:
 
-- `spawn_agent`: Create a new sub-agent with a specific role. The agent runs independently.
-- `send_message`: Send a message to a sub-agent without triggering execution.
-- `followup_task`: Assign a task to a sub-agent and trigger its execution. Returns immediately.
+- `spawn_agent`: Create a sub-agent — a `name`, a role via `preset` (researcher | coder | reviewer | tester) or a custom `system_prompt`, and optionally the initial `task`. Returns the agent path plus the tools the child actually received. A rejected spawn (e.g. sub-agent limit) returns an error, not a child.
+- `send_message`: Send context to a sub-agent without triggering execution; set `trigger: true` to hand it over as a new task.
 - `wait_agent`: Wait for a sub-agent's result. Blocks until the agent completes or timeout.
 - `list_agents`: List all active sub-agents and their status.
 - `close_agent`: Close a sub-agent and release its resources.
@@ -693,9 +692,9 @@ You have the ability to spawn sub-agents to execute tasks concurrently. Use thes
 
 ### Communication Pattern
 
-1. `spawn_agent` → create the sub-agent
-2. `followup_task` → assign work (can call multiple times)
-3. `wait_agent` → collect results
+1. `spawn_agent` → create the sub-agent, optionally with its first task
+2. `wait_agent` → collect the result
+3. `send_message` with `trigger: true` → assign follow-up work (can call multiple times)
 4. `close_agent` → clean up when done"#
         .to_string()
 }
@@ -846,7 +845,7 @@ mod tests {
         );
         assert!(result.is_ok());
         let ma_runtime = result.unwrap();
-        // Verify no tools were registered (the 6 multi-agent tools are absent)
+        // Verify no tools were registered (the 5 multi-agent tools are absent)
         let agents = ma_runtime.list_agents();
         assert!(agents.is_empty());
     }
@@ -1096,10 +1095,13 @@ mod tests {
         let prompt = build_multi_agent_system_prompt();
         assert!(prompt.contains("spawn_agent"));
         assert!(prompt.contains("send_message"));
-        assert!(prompt.contains("followup_task"));
+        assert!(prompt.contains("trigger"));
         assert!(prompt.contains("wait_agent"));
         assert!(prompt.contains("list_agents"));
         assert!(prompt.contains("close_agent"));
+        // followup_task is gone (§8.3) — guidance must not advertise a tool
+        // the factory no longer registers.
+        assert!(!prompt.contains("followup_task"));
     }
 
     #[cfg(feature = "multi_agent")]

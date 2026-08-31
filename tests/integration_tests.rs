@@ -1078,6 +1078,7 @@ mod multi_agent_tests {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            control: Default::default(),
         };
 
         let runtime = AgentBuilder::new(llm)
@@ -1153,7 +1154,16 @@ mod multi_agent_tests {
         assert!(close_result.closed);
         assert_eq!(close_result.message, "agent closed");
 
-        // Verify closed
+        // Verify closed. `close_agent` is "cancel + deferred cleanup"
+        // (design doc §4/§5.2): the ChildCleanup drop-guard releases the
+        // registry slot once the child loop returns, so the empty listing is
+        // eventually — not synchronously — true.
+        for _ in 0..200 {
+            if runtime.list_agents().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let agents = runtime.list_agents();
         assert!(agents.is_empty());
     }
@@ -1173,6 +1183,7 @@ mod multi_agent_tests {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            control: Default::default(),
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(
@@ -1223,6 +1234,7 @@ mod multi_agent_tests {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            control: Default::default(),
         };
 
         let runtime = Arc::new(MultiAgentRuntime::new(

@@ -4,7 +4,91 @@
 //! Multi-agent is enabled by default — users who don't need it can disable via
 //! `.without_multi_agent()` or feature gate.
 
+use std::time::Duration;
+
 use agent_base::ReasoningEffort;
+
+/// Deployment autonomy mode (design doc §7.5, v3.2).
+///
+/// A **deployment-level** bit — it is deliberately *not* in `ChildConfig`:
+/// the LLM must not choose its own autonomy level (same attack-surface logic
+/// as B4 removing `depth`/`full_permission`). `Manual` expands at the spawn
+/// gate into the three existing layers (§9.3) — hard exclusion, approval
+/// floor, read-only nudge — and never into a fourth permission mechanism.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentAutonomy {
+    /// Children may write: mutating tools are available per the normal
+    /// layers, and writes follow `ChildPermissionMode` (≈ today's
+    /// `enabled()` defaults). The default — behaviour unchanged.
+    #[default]
+    Auto,
+    /// Children are hard read-only: [`ControlConfig::write_tools`] is merged
+    /// into the exclusion set for every child, effective permission is
+    /// forced to `None`-mode semantics (policy with the parent, approvals up
+    /// to the parent handler, DenyAll otherwise), and the read-only nudge is
+    /// forced on. All mutations belong to the parent (human-in-the-loop at
+    /// the parent's approval layer).
+    Manual,
+}
+
+/// Session-level control-plane configuration (see design doc §7.4 / §7.5).
+///
+/// Every budget/limit knob is `Option`: `None` means "not enabled", which
+/// keeps behaviour byte-identical to the pre-multi-agent-API runtime.
+/// Defaults are all `None` by design — the control plane never silently
+/// tightens a deployment.
+///
+/// Note on overlap with [`MultiAgentConfig::max_sub_agents`] (§7.3): both the
+/// registry gate and `max_concurrency` count *live* (spawned-but-not-closed)
+/// children. `max_sub_agents` stays the primary count/depth gate;
+/// `max_concurrency` is a separate session-level knob for temporarily
+/// tightening concurrency without touching deployment config.
+#[derive(Clone, Debug)]
+pub struct ControlConfig {
+    /// Token budget for **child** agents (the parent's own usage is not
+    /// metered). `None` = unlimited (current behaviour).
+    pub child_max_tokens: Option<u64>,
+
+    /// Cumulative spawn count allowed in a rollout. `None` = only bounded by
+    /// `max_sub_agents` (live count), a different dimension (§7.2).
+    pub max_spawns: Option<usize>,
+
+    /// Live-concurrency cap (children alive, not tasks executing).
+    /// `None` = gate not enabled (§7.3).
+    pub max_concurrency: Option<usize>,
+
+    /// Per-task execution timeout for a child's `run_turn` (§9.2).
+    /// `None` = no timeout.
+    pub task_timeout: Option<Duration>,
+
+    /// Deployment autonomy mode (§7.5). `Auto` (default) keeps the layers
+    /// independent, exactly as today; `Manual` hard-read-only-izes every
+    /// child at the spawn gate.
+    pub autonomy: AgentAutonomy,
+
+    /// The mutating-tool set that `Manual` mode excludes from every child.
+    ///
+    /// Read/write classification is **deployment knowledge** (§9.3 killed v2's
+    /// `PermissionChecker` for guessing tool names — guessing is a hole,
+    /// declaring is a policy). The default covers the phi-kernel-tools write
+    /// set (`write_file` / `edit_file` / `execute_command`); deployments with
+    /// custom mutating tools add them here. In `Auto` mode this list is
+    /// unused.
+    pub write_tools: Vec<String>,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            child_max_tokens: None,
+            max_spawns: None,
+            max_concurrency: None,
+            task_timeout: None,
+            autonomy: AgentAutonomy::default(),
+            write_tools: super::preset::default_write_tools(),
+        }
+    }
+}
 
 /// Permission mode for spawned child agents.
 ///
@@ -49,8 +133,10 @@ pub enum ChildPermissionMode {
 pub struct MultiAgentConfig {
     /// Enable multi-agent capabilities.
     ///
-    /// When `true` (default): all 6 multi-agent tools are registered, and the main
-    /// agent's system prompt is augmented with usage guidance.
+    /// When `true` (default): the multi-agent tools are registered (via the
+    /// tool factory — 5 with the reference factory, `followup_task` deprecated
+    /// per §8.3), and the main agent's system prompt is augmented with usage
+    /// guidance.
     ///
     /// When `false`: no multi-agent tools are registered, and the system
     /// prompt does not mention multi-agent capabilities.
@@ -105,6 +191,11 @@ pub struct MultiAgentConfig {
     /// read-only, it cannot enforce it. Set this to `false` when children are
     /// meant to write (the codex-style symmetric model).
     pub child_read_only: bool,
+
+    /// Control-plane limits (token budget, cumulative spawns, live
+    /// concurrency, per-task timeout). All `None` by default — behaviour
+    /// unchanged unless a knob is explicitly set (see [`ControlConfig`]).
+    pub control: ControlConfig,
 }
 
 impl Default for MultiAgentConfig {
@@ -117,6 +208,7 @@ impl Default for MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            control: ControlConfig::default(),
         }
     }
 }
@@ -140,6 +232,7 @@ impl MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            control: ControlConfig::default(),
         }
     }
 }
@@ -193,5 +286,34 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.max_sub_agents, 4);
         assert_eq!(config.max_agent_depth, 2);
+    }
+
+    #[test]
+    fn control_defaults_to_all_none() {
+        let c = ControlConfig::default();
+        assert!(c.child_max_tokens.is_none());
+        assert!(c.max_spawns.is_none());
+        assert!(c.max_concurrency.is_none());
+        assert!(c.task_timeout.is_none());
+        // MultiAgentConfig default carries all-None control → behaviour
+        // unchanged (design doc §7.4).
+        assert!(
+            MultiAgentConfig::default()
+                .control
+                .max_concurrency
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn multi_agent_config_carries_control() {
+        let config = MultiAgentConfig {
+            control: ControlConfig {
+                max_concurrency: Some(3),
+                ..Default::default()
+            },
+            ..MultiAgentConfig::enabled()
+        };
+        assert_eq!(config.control.max_concurrency, Some(3));
     }
 }

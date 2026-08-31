@@ -146,7 +146,17 @@ impl MailboxHub {
 
     /// Unregister an agent mailbox.
     ///
-    /// Posts a `Closed` result first (to wake any waiters), then removes the entry.
+    /// Bumps the global sequence number (to wake waiters), then removes the
+    /// entry — discarding any results still queued in it.
+    ///
+    /// It does **not** post a `Closed` result itself (the old doc-comment
+    /// claimed otherwise while the code never did — defect K1 in the design
+    /// doc §2.3). Producers that need waiters to observe a terminal `Closed`
+    /// must `post_result(Closed)` **before** unregistering — which is exactly
+    /// what `ChildCleanup::drop` does (`runtime.rs`); waiters that only poll
+    /// after removal fall back to the registry-based "closed" synthesis in
+    /// `MultiAgentRuntime::wait_for_result`.
+    ///
     /// Returns `true` if the agent was registered.
     pub fn unregister(&self, agent_path: &AgentPath) -> bool {
         let mut entries = self.entries.lock().unwrap();

@@ -44,7 +44,11 @@ agent-works = { version = "0.1.7", features = ["mcp", "skill"] }
 | `yaml_skill` | `YamlSkill` — skill definitions from YAML files | `serde_yaml` |
 | `hot-reload` | Hot-reload skill definitions on file change | `notify`, `prompt_skill` |
 | `cli` | `CliRepl` (generic REPL loop) + `CliEventPrinter` (terminal event output) | — |
-| `full` | All of the above | — |
+| `focus` | Structured LLM extraction modules | — |
+| `compression` | Context-compression presets for the react loop | — |
+| `multi_agent` | `MultiAgentRuntime`: child lifecycle, mailboxes, control-plane gates | — |
+| `loom-check` | Swap the control-plane atomics for `loom` and run model checks (`cargo test --features multi_agent,loom-check --lib loom`) | `loom` |
+| `full` | All of the above (except `loom-check`) | — |
 
 All types from `agent-base` are re-exported (`AgentBuilder`, `AgentRuntime`, `Tool`, `Middleware`, ...), so you only need to depend on `agent-works`.
 
@@ -144,40 +148,60 @@ let output = focus
 println!("Status: {}, Priority: {}", output.result.status, output.result.priority);
 ```
 
-### Multi-Agent with fork_history
+### Multi-Agent (`multi_agent`)
 
-Spawn child agents that inherit conversation context:
+`MultiAgentRuntime` coordinates child agents: a lifecycle registry, per-child
+mailboxes, event bridging to the parent bus, and control-plane gates (spawn
+budget, live concurrency, token spend). The LLM-facing tools — `spawn_agent`,
+`send_message`, `wait_agent`, `list_agents`, `close_agent` — ship in
+`phi-kernel-tools`; this is the layer directly beneath them:
 
 ```rust
-use agent_works::{MultiAgentRuntime, MultiAgentConfig};
+use std::time::Duration;
+use agent_works::multi_agent::{ChildOutcome, MultiAgentConfig, MultiAgentRuntime};
 
-let mut runtime = MultiAgentRuntime::new(client, MultiAgentConfig::enabled());
+let runtime = std::sync::Arc::new(MultiAgentRuntime::new(
+    MultiAgentConfig::enabled(), // 8 live children by default, one nesting level
+    client,                      // Arc<dyn LlmProvider>, shared with children
+    business_tools,              // tools the children get (not the 5 orchestration tools)
+    cancel_token,
+    None,                        // error recovery
+    agent_base::Language::En,
+    None, None,                  // parent tool policy / approval handler
+));
 
-// Spawn a child agent with full parent history
-let child_id = runtime
-    .spawn_child_with_history(
-        "math-expert",
-        "gpt-4o",
-        "You are a math expert.",
-        "all",  // fork_history: "none" | "all" | N (last N turns)
-        None,   // reasoning_effort
-        None,   // agent_type
-    )
+// Spawn: a rejected spawn (limit, duplicate name, no identity) is an Err.
+let child = runtime.child()
+    .system_prompt("You are a researcher. Answer briefly.")
+    .spawn("scout")
     .await?;
+println!("{} got tools {:?}", child.agent_path(), child.spawned_tools());
 
-// Send a message and collect the result
-let events = runtime.send_input(child_id, "What is 2+2?").await?;
+// Work order, then the child's answer.
+child.task("survey the crate structure")?;
+match child.wait(Duration::from_secs(30)).await {
+    ChildOutcome::Ok { text, denied_tools, .. } => { /* the child's answer */ }
+    ChildOutcome::Timeout => { /* deadline elapsed; the child stays live */ }
+    other => { /* Failed / Closed */ }
+}
+child.close()?; // teardown is async: slot + mailbox release on task exit
 ```
 
-`AgentHandle` provides a higher-level wrapper for agent lifecycle management:
+- **Identity**: `preset` (`researcher` / `coder` / `reviewer` / `tester`, see
+  `ChildPreset`) or `system_prompt`; presets carry a prompt *and* a tool
+  whitelist. Legacy `task_name`/`message`/`agent_type` call shapes still parse
+  (serde aliases).
+- **Context bridge**: `.fork_history("all" | "3" | "none", parent_session)`
+  inherits the parent conversation into the child session.
+- **Control plane** (`MultiAgentConfig::control`): `max_spawns` (cumulative,
+  with commit/rollback tickets), `max_concurrency` (live), `child_max_tokens`,
+  `task_timeout`, `autonomy` (`Auto` | `Manual` — `Manual` floors permissions
+  and excludes write tools), `write_tools`.
+- **Permissions are deployment config**, not LLM choices:
+  `child_permission_mode`, `child_excluded_tools`, `child_read_only`.
 
-```rust
-use agent_works::AgentHandle;
-
-let handle = AgentHandle::spawn(runtime, "researcher", "gpt-4o", "You are a researcher.")?;
-handle.send("Research the history of Rust.").await?;
-// Events stream from handle.events()
-```
+Runnable and offline end to end:
+`cargo run --example multi_agent --features multi_agent`.
 
 ### MCP Multi-Server
 
@@ -298,6 +322,9 @@ cargo run --example mcp_demo --features mcp
 
 # CLI REPL + event printer
 cargo run --example cli_demo --features cli
+
+# Multi-agent fan-out / collect / teardown (offline, stub LLM)
+cargo run --example multi_agent --features multi_agent
 ```
 
 ## Module Structure
@@ -311,7 +338,7 @@ src/
 ├── mcp/                # McpHUb + McpClient (HTTP + stdio transport)
 ├── skill/              # Skill trait + prompter strategies + detail tool
 ├── focus/              # Focus — structured LLM extraction
-├── multi_agent/        # MultiAgentRuntime + fork_history support
+├── multi_agent/        # MultiAgentRuntime + control plane (gates, mailbox, presets)
 └── cli/                # CliRepl + CliEventPrinter<W>
 ```
 

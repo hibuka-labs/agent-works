@@ -2,24 +2,44 @@
 //! cancellation.
 //!
 //! The [`MultiAgentRuntime`] is the central coordinator. It is created once during
-//! builder setup and shared via `Arc` to all 6 multi-agent tools.
+//! builder setup and shared via `Arc` to all 5 multi-agent tools.
+//!
+//! This file holds the struct itself, its construction, the parent-facing
+//! surface (messaging, waiting, closing, listing, accessors), and the result
+//! types. The heavier machinery lives in sibling modules of this one: `spawn`
+//! (the gate-ordered spawn chain, the `ChildCleanup` drop-guard, and the
+//! child event loop), `build` (child runtime assembly and permission
+//! resolution, §5.4/§7.5), `fork` (the `fork_history` context bridge), and
+//! `outcome` (result formatting). All child modules see this file's items via
+//! `use super::*` — the external path `multi_agent::runtime::*` is unchanged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_base::llm_trait::LlmProvider;
 use agent_base::{
-    AgentBuilder, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
-    DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RunOutcome, RuntimeEvent,
-    SessionId, Tool, ToolPolicy,
+    AgentBuilder, AgentError, AgentResult, AgentRuntime, AllowAllApprovalHandler, ApprovalHandler,
+    DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RuntimeEvent, SessionId,
+    Tool, ToolPolicy,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::config::{ChildPermissionMode, MultiAgentConfig};
-use super::mailbox::{ChildMailbox, MailboxHub, MailboxResult, MailboxStatus, MailboxTask};
+use super::budget::{SpawnTicket, usage_total};
+use super::child_builder::ChildBuilder;
+use super::child_config::ChildConfig;
+use super::config::{AgentAutonomy, ChildPermissionMode, MultiAgentConfig};
+use super::control::AgentControl;
+use super::limiter::{AgentExecutionLimiter, ExecutionSlot};
+use super::mailbox::{ChildMailbox, MailboxHub, MailboxResult, MailboxStatus};
 use super::path::AgentPath;
 use super::registry::{AgentRegistry, AgentStatus};
+
+mod build;
+mod fork;
+mod outcome;
+mod spawn;
 
 // ---------------------------------------------------------------------------
 // MultiAgentRuntime
@@ -27,20 +47,39 @@ use super::registry::{AgentRegistry, AgentStatus};
 
 /// Coordinates sub-agent lifecycle, event bridging, and cancellation.
 ///
-/// Created once during builder setup and shared via `Arc` to all 6 multi-agent
+/// Created once during builder setup and shared via `Arc` to all 5 multi-agent
 /// tools. Each tool calls methods on the runtime to spawn, communicate with, or
 /// close sub-agents.
 pub struct MultiAgentRuntime {
     /// Agent lifecycle registry (spawn/close/query).
-    registry: Mutex<AgentRegistry>,
+    ///
+    /// `Arc`-wrapped so the child task's `ChildCleanup` (in `spawn`) can hold
+    /// the same registry the runtime does — without holding an
+    /// `Arc<MultiAgentRuntime>`
+    /// itself (a task-side strong ref would keep the runtime alive forever and
+    /// `Drop`/`cancel_all` could never run — the reference cycle would defeat
+    /// the very abort path §4 of the design doc relies on).
+    registry: Arc<Mutex<AgentRegistry>>,
 
     /// Inter-agent message hub.
     mailbox: Arc<MailboxHub>,
 
+    /// Session control plane (design §7.1): the rollout budget plus the
+    /// live-concurrency limiter, as one `Arc`. The [`limiter`](Self::limiter)
+    /// field below is an `Arc` **mirror** of `control.limiter()` — one gate
+    /// object, two names (the spawn chain and status reads keep reaching it
+    /// directly).
+    control: Arc<AgentControl>,
+
+    /// Live-concurrency gate (design doc §7.3). Unlimited by default
+    /// (`ControlConfig::max_concurrency = None`); still tracks `current`
+    /// so the slot conservation is observable either way.
+    limiter: Arc<AgentExecutionLimiter>,
+
     /// Shared LLM client (from parent agent).
     client: Arc<dyn LlmProvider>,
 
-    /// Business tools to register on child agents (NOT the 6 multi-agent tools).
+    /// Business tools to register on child agents (NOT the 5 multi-agent tools).
     business_tools: Vec<Arc<dyn Tool>>,
 
     /// Business tool names to exclude from child agents (root-level orchestration
@@ -55,6 +94,22 @@ pub struct MultiAgentRuntime {
     /// [`MultiAgentConfig::child_read_only`]).
     child_read_only: bool,
 
+    /// Deployment autonomy mode (design §7.5). Drives the `Manual`
+    /// three-layer expansion in `spawn_permission`,
+    /// `effective_read_only_nudge` (both in `build`), and
+    /// the exclusion merge in `build_child_runtime_with_config`. `Auto`
+    /// (default) keeps every layer exactly as configured.
+    autonomy: AgentAutonomy,
+
+    /// Mutating-tool set excluded from every child under `Manual` (§7.5).
+    /// Read from [`super::config::ControlConfig::write_tools`]; unused in
+    /// `Auto` mode.
+    write_tools: Vec<String>,
+
+    /// Per-task execution timeout for child `run_turn` (§9.2). `None` = no
+    /// timeout (current behaviour).
+    task_timeout: Option<Duration>,
+
     /// Channel to the bridge task that emits events on parent's event bus.
     event_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>>,
 
@@ -64,8 +119,10 @@ pub struct MultiAgentRuntime {
     /// JoinSet tracking all child agent tasks.
     join_set: Mutex<JoinSet<()>>,
 
-    /// Per-child cancellation tokens.
-    child_cancels: Mutex<HashMap<AgentPath, CancellationToken>>,
+    /// Per-child cancellation tokens (`Arc` for the same reason as
+    /// [`Self::registry`]: `ChildCleanup` removes the entry on every exit
+    /// path without borrowing the runtime).
+    child_cancels: Arc<Mutex<HashMap<AgentPath, CancellationToken>>>,
 
     /// Error recovery strategy (inherited from parent).
     error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
@@ -110,18 +167,31 @@ impl MultiAgentRuntime {
         let child_excluded_tools = config.child_excluded_tools.clone();
         let child_reasoning_effort = config.child_reasoning_effort.clone();
         let child_read_only = config.child_read_only;
+        // Control plane: the config knobs land in `AgentControl` (budget +
+        // limiter). `None` knobs → unlimited gates that still count (§7.2).
+        let control = Arc::new(AgentControl::new(&config.control));
+        let limiter = Arc::clone(control.limiter());
+        let autonomy = config.control.autonomy;
+        let write_tools = config.control.write_tools.clone();
+        let task_timeout = config.control.task_timeout;
+        let registry = Arc::new(Mutex::new(AgentRegistry::new(config)));
         Self {
-            registry: Mutex::new(AgentRegistry::new(config)),
+            registry,
             mailbox: Arc::new(MailboxHub::new()),
+            control,
+            limiter,
             client,
             business_tools,
             child_excluded_tools,
             child_reasoning_effort,
             child_read_only,
+            autonomy,
+            write_tools,
+            task_timeout,
             event_tx: Mutex::new(None),
             root_cancel,
             join_set: Mutex::new(JoinSet::new()),
-            child_cancels: Mutex::new(HashMap::new()),
+            child_cancels: Arc::new(Mutex::new(HashMap::new())),
             error_recovery,
             language,
             child_permission_mode,
@@ -145,211 +215,6 @@ impl MultiAgentRuntime {
         *self.session_manager.lock().unwrap() = Some(session_manager);
     }
 
-    /// Spawn a child agent at the given path with a specific system prompt.
-    ///
-    /// This is called by the `spawn_agent` tool. It:
-    /// 1. Checks spawn limits
-    /// 2. Registers the agent in the registry
-    /// 3. Creates a mailbox
-    /// 4. Builds a child AgentRuntime
-    /// 5. Spawns a tokio task for the child's event loop
-    /// 6. Returns the AgentPath
-    ///
-    /// `parent_messages` optionally provides context from the parent session
-    /// for fork_history support.
-    ///
-    /// # Errors
-    ///
-    /// Returns a string error message if spawning fails (limits exceeded, etc.).
-    pub async fn spawn_child(
-        &self,
-        name: &str,
-        system_prompt: String,
-        depth: i32,
-        tool_count: usize,
-        full_permission: bool,
-        parent_messages: Vec<agent_base::ChatMessage>,
-    ) -> Result<String, String> {
-        let path = AgentPath::root().join(name);
-
-        // 1. Check limits and register
-        {
-            let mut registry = self.registry.lock().unwrap();
-            registry.can_spawn(depth).map_err(|e| e.to_string())?;
-            registry
-                .register(&path, depth, tool_count)
-                .map_err(|e| e.to_string())?;
-        }
-
-        // 2. Create mailbox
-        let child_mailbox = self
-            .mailbox
-            .register(&path)
-            .ok_or_else(|| "mailbox already exists".to_string())?;
-
-        // 3. Build child AgentRuntime (roll back registry+mailbox on failure)
-        let child_runtime = self
-            .build_child_runtime(system_prompt, self.effective_permission(full_permission))
-            .await
-            .map_err(|e| {
-                self.registry.lock().unwrap().close(&path);
-                self.mailbox.unregister(&path);
-                format!("failed to build child runtime: {}", e)
-            })?;
-
-        // 4. Create session for child and pre-fill with parent context
-        let session_id = child_runtime.create_session().await;
-        self.prefill_child_session(&child_runtime, &session_id, &parent_messages)
-            .await
-            .map_err(|e| {
-                self.registry.lock().unwrap().close(&path);
-                self.mailbox.unregister(&path);
-                format!("failed to prefill child session: {}", e)
-            })?;
-
-        // 5. Create child cancellation token
-        let child_cancel = self.root_cancel.child_token();
-        {
-            let mut cancels = self.child_cancels.lock().unwrap();
-            cancels.insert(path.clone(), child_cancel.clone());
-        }
-
-        // 6. Spawn child agent event loop
-        let agent_path = path.clone();
-        let mailbox_for_task = self.mailbox.clone();
-        let mailbox_for_close = self.mailbox.clone();
-        let event_tx = self.event_tx.lock().unwrap().clone();
-        let registry_agent_path = path.clone();
-
-        self.join_set.lock().unwrap().spawn(async move {
-            run_child_loop(
-                child_mailbox,
-                child_runtime,
-                session_id,
-                agent_path.clone(),
-                mailbox_for_task,
-                event_tx,
-                child_cancel,
-            )
-            .await;
-
-            // Post close notification when loop exits
-            mailbox_for_close.post_result(MailboxResult {
-                agent_path,
-                status: MailboxStatus::Closed,
-                result: None,
-                denied_tools: vec![],
-            });
-        });
-
-        self.registry
-            .lock()
-            .unwrap()
-            .set_status(&registry_agent_path, AgentStatus::Idle);
-
-        Ok(path.to_string())
-    }
-
-    /// Spawn a child agent with fork_history support.
-    ///
-    /// `fork_history`: "none" (default), "all", or a number N for last N turns.
-    /// `parent_session_id`: the parent agent's session ID.
-    #[allow(clippy::too_many_arguments)] // spawn config is naturally positional
-    pub async fn spawn_child_with_history(
-        &self,
-        name: &str,
-        system_prompt: String,
-        depth: i32,
-        tool_count: usize,
-        full_permission: bool,
-        fork_history: Option<String>,
-        parent_session_id: &SessionId,
-    ) -> Result<String, String> {
-        let parent_messages = self
-            .resolve_fork_history(fork_history, parent_session_id)
-            .await;
-        self.spawn_child(
-            name,
-            system_prompt,
-            depth,
-            tool_count,
-            full_permission,
-            parent_messages,
-        )
-        .await
-    }
-
-    /// Resolve fork_history parameter into a list of parent ChatMessages.
-    pub(crate) async fn resolve_fork_history(
-        &self,
-        fork_history: Option<String>,
-        parent_session_id: &SessionId,
-    ) -> Vec<agent_base::ChatMessage> {
-        use agent_base::ChatMessage;
-        let mode = match fork_history.as_deref() {
-            None | Some("none") => return vec![],
-            Some(s) => s,
-        };
-
-        let sm = match self.session_manager.lock().unwrap().as_ref() {
-            Some(sm) => sm.clone(),
-            None => {
-                tracing::warn!("fork_history requested but no session_manager set");
-                return vec![];
-            }
-        };
-
-        // Get all messages from parent session
-        let all_messages = match sm.session_or_err(parent_session_id).await {
-            Ok(session) => session.chat_messages().to_vec(),
-            Err(e) => {
-                tracing::warn!(session_id = parent_session_id.id, error = %e, "failed to load parent session for fork_history");
-                return vec![];
-            }
-        };
-
-        if all_messages.is_empty() {
-            return vec![];
-        }
-
-        // Filter out system messages (child has its own system prompt)
-        let non_system: Vec<ChatMessage> = all_messages
-            .into_iter()
-            .filter(|m| !matches!(m, ChatMessage::System { .. }))
-            .collect();
-
-        match mode {
-            "all" => non_system,
-            n_str => {
-                // Parse N: number of recent user/assistant message pairs (turns)
-                let n: usize = match n_str.parse() {
-                    Ok(n) if n > 0 => n,
-                    _ => {
-                        tracing::warn!(
-                            fork_history = n_str,
-                            "invalid fork_history value, treating as 'none'"
-                        );
-                        return vec![];
-                    }
-                };
-
-                // Count turns from the end (each turn = user message followed by response)
-                let mut turns = 0usize;
-                let mut cutoff = non_system.len();
-                for (i, msg) in non_system.iter().enumerate().rev() {
-                    if matches!(msg, ChatMessage::User { .. }) {
-                        turns += 1;
-                        if turns >= n {
-                            cutoff = i;
-                            break;
-                        }
-                    }
-                }
-                non_system[cutoff..].to_vec()
-            }
-        }
-    }
-
     /// Send a message to a child agent (no execution trigger).
     ///
     /// Called by `send_message` tool.
@@ -360,7 +225,8 @@ impl MultiAgentRuntime {
 
     /// Send a task to a child agent (triggers execution).
     ///
-    /// Called by `followup_task` tool. Updates status to Running.
+    /// Called by `send_message` with `trigger=true` (and the deprecated
+    /// `followup_task` shim). Updates status to Running.
     pub fn send_task(
         &self,
         agent_path: &str,
@@ -384,6 +250,13 @@ impl MultiAgentRuntime {
     /// Wait for a result from any or a specific child agent.
     ///
     /// Called by `wait_agent` tool. Blocks until a result arrives or timeout.
+    ///
+    /// For a specific path, once the agent is gone from **both** the mailbox
+    /// and the registry it reports `"closed"` immediately instead of spinning
+    /// to the timeout — the registry entry's removal is the terminal state
+    /// (design §9.2, K3), and `ChildCleanup` releases the registry slot before
+    /// the mailbox entry disappears, which makes the close→wait contract
+    /// (§5.2: close 后 wait 得到 Closed) race-free for late pollers.
     pub async fn wait_for_result(&self, agent_path: Option<&str>, timeout_ms: u64) -> WaitResult {
         let filter_path = match agent_path {
             Some(s) => match AgentPath::parse(s) {
@@ -427,6 +300,25 @@ impl MultiAgentRuntime {
                 };
             }
 
+            // Terminal-state synthesis for a filtered path: gone from the
+            // mailbox AND the registry ⇒ closed (see method docs). Checked
+            // after draining real results so a posted Closed / Ok result still
+            // wins; checked before the deadline so waiters don't have to race
+            // the drop-guard's lock sequence.
+            if let Some(path) = &filter_path {
+                let gone =
+                    !self.mailbox.contains(path) && !self.registry.lock().unwrap().contains(path);
+                if gone {
+                    return WaitResult {
+                        status: "closed".to_string(),
+                        result: None,
+                        agent_path: Some(path.to_string()),
+                        has_more: false,
+                        denied_tools: vec![],
+                    };
+                }
+            }
+
             // Wait for sequence number change or timeout
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -458,14 +350,21 @@ impl MultiAgentRuntime {
         }
     }
 
-    /// Close a child agent.
+    /// Close a child agent — cancel now, clean up on the child's exit.
     ///
-    /// Called by `close_agent` tool. Cancels the child's task, removes from
-    /// registry, and posts a Closed result.
+    /// Called by `close_agent` tool. Performs only the cancellation; the
+    /// actual teardown (post Closed → registry release → mailbox unregister →
+    /// concurrency slot return) runs in the child task's `ChildCleanup::drop`
+    /// when its future ends (design §4/§5.2 — same exit as panic and abort).
+    ///
+    /// Returns `closed == true` if an agent was live at this moment (idempotent:
+    /// a second close while the first child is still winding down reports
+    /// `false`). A `wait_for_result` on this path afterwards yields `"closed"`.
     pub fn close_agent(&self, agent_path: &str) -> Result<CloseResult, String> {
         let path = self.parse_path(agent_path)?;
 
-        // Get previous status
+        // Get previous status (before the cancellation, while the entry is
+        // still in its last live state).
         let previous_status = {
             let registry = self.registry.lock().unwrap();
             registry
@@ -474,24 +373,29 @@ impl MultiAgentRuntime {
                 .unwrap_or_else(|| "unknown".to_string())
         };
 
-        // Cancel child token
-        {
-            let mut cancels = self.child_cancels.lock().unwrap();
-            if let Some(token) = cancels.remove(&path) {
-                token.cancel();
+        // Cancel only — do NOT remove the token or touch registry/mailbox:
+        // ChildCleanup is the single removal point on all exit paths.
+        let closed = {
+            let cancels = self.child_cancels.lock().unwrap();
+            match cancels.get(&path) {
+                Some(token) => {
+                    if token.is_cancelled() {
+                        // Already cancelled and the future hasn't unwound to
+                        // its guard yet — a close is in flight, not "live".
+                        false
+                    } else {
+                        token.cancel();
+                        true
+                    }
+                }
+                None => false,
             }
-        }
-
-        // Close in registry
-        let existed = { self.registry.lock().unwrap().close(&path).is_some() };
-
-        // Unregister mailbox
-        self.mailbox.unregister(&path);
+        };
 
         Ok(CloseResult {
-            closed: existed,
+            closed,
             previous_status,
-            message: if existed {
+            message: if closed {
                 "agent closed".to_string()
             } else {
                 "agent not found".to_string()
@@ -525,6 +429,13 @@ impl MultiAgentRuntime {
         &self.registry
     }
 
+    /// The session control plane (§7.1): rollout budget + concurrency
+    /// limiter + status reads. Tools/operators reach gates through here
+    /// without touching runtime internals.
+    pub fn control(&self) -> &Arc<AgentControl> {
+        &self.control
+    }
+
     /// Cancel all child agents.
     pub fn cancel_all(&self) {
         let mut cancels = self.child_cancels.lock().unwrap();
@@ -555,154 +466,6 @@ impl Drop for MultiAgentRuntime {
 impl MultiAgentRuntime {
     fn parse_path(&self, s: &str) -> Result<AgentPath, String> {
         AgentPath::parse(s).ok_or_else(|| format!("invalid agent path: '{}'", s))
-    }
-
-    async fn build_child_runtime(
-        &self,
-        system_prompt: String,
-        full_permission: bool,
-    ) -> AgentResult<AgentRuntime> {
-        // Read-only nudge (framework layer). The framework cannot classify which
-        // business tools mutate state, so this is a *suggestion* only — it does
-        // not gate any tool. The business layer hard-gates mutating tools via
-        // `child_excluded_tools` when it needs a guarantee. This is orthogonal to
-        // `full_permission` (approval vs. deny): even a full-permission child is
-        // nudged not to write when `child_read_only` is set.
-        let system_prompt = if self.child_read_only {
-            format!(
-                "{}\n\nYou are a read-only sub-agent: investigate, analyze, and report your findings in your final answer. Do not modify the workspace, mutate state, or run side-effecting commands — the parent agent owns all changes and will apply them based on your report.",
-                system_prompt
-            )
-        } else {
-            system_prompt
-        };
-
-        let (prompt, policy, approval): (
-            String,
-            Option<Arc<dyn ToolPolicy>>,
-            Arc<dyn ApprovalHandler>,
-        ) = if full_permission {
-            // Full: no tool policy → every tool auto-approves (= current behaviour).
-            (system_prompt, None, Arc::new(AllowAllApprovalHandler))
-        } else {
-            // None: policy = parent's (if any) or DenyAllToolPolicy fallback.
-            let note = "If a tool call is rejected for lack of permission, explain in your final answer that you lacked permission for that action.";
-            let policy: Arc<dyn ToolPolicy> = match &self.tool_policy {
-                Some(p) => p.clone(),
-                None => Arc::new(DenyAllToolPolicy),
-            };
-            // Codex-style delegation: rather than hard-denying the child's own
-            // approval requests, route the decision up to the parent's approval
-            // handler (human-in-the-loop / auto). Falls back to DenyAll only when
-            // the parent itself carries no handler — which keeps the "no policy,
-            // no handler → read-only" invariant intact.
-            let approval: Arc<dyn ApprovalHandler> = match &self.approval_handler {
-                Some(h) => h.clone(),
-                None => Arc::new(DenyAllApprovalHandler),
-            };
-            (
-                format!("{}\n\n{}", system_prompt, note),
-                Some(policy),
-                approval,
-            )
-        };
-
-        let mut builder = AgentBuilder::new(self.client.clone())
-            .system_prompt(prompt)
-            .approval_handler(approval)
-            .language(self.language.clone());
-
-        if let Some(p) = policy {
-            builder = builder.tool_policy(p);
-        }
-
-        // Register business tools (NOT multi-agent tools), skipping any
-        // root-level orchestration tools the child should not inherit (e.g.
-        // `decompose`/`merge` — a leaf agent that can't spawn sub-agents would
-        // plan work it cannot execute).
-        for tool in &self.business_tools {
-            if self.child_excluded_tools.contains(&tool.name().to_string()) {
-                tracing::debug!(
-                    tool = tool.name(),
-                    "skipping excluded business tool for child runtime"
-                );
-                continue;
-            }
-            builder = builder.register_tool_arc(tool.clone());
-        }
-
-        if let Some(ref recovery) = self.error_recovery {
-            builder = builder.error_recovery(recovery.clone());
-        }
-
-        let child = builder.build()?;
-        if let Some(effort) = self.child_reasoning_effort.clone() {
-            child.set_reasoning_effort(effort).await;
-        }
-        Ok(child)
-    }
-
-    /// Resolve the effective full-permission flag for a spawn, applying the
-    /// configured [`ChildPermissionMode`]. `Full`/`None` override the LLM-supplied
-    /// flag; `PerSpawn` lets the LLM decide.
-    fn effective_permission(&self, full_permission: bool) -> bool {
-        match self.child_permission_mode {
-            ChildPermissionMode::Full => true,
-            ChildPermissionMode::None => false,
-            ChildPermissionMode::PerSpawn => full_permission,
-        }
-    }
-
-    /// Pre-fill a child session with parent conversation context (fork_history).
-    ///
-    /// Skips system messages and tool-call-only assistant messages. Assistant text
-    /// responses and tool results are stored as system messages with labels so the
-    /// child sees the context without confusing role semantics.
-    pub(crate) async fn prefill_child_session(
-        &self,
-        child_runtime: &AgentRuntime,
-        session_id: &SessionId,
-        parent_messages: &[agent_base::ChatMessage],
-    ) -> AgentResult<()> {
-        use agent_base::ChatMessage;
-
-        for msg in parent_messages {
-            match msg {
-                ChatMessage::User { content, .. } => {
-                    child_runtime.add_user_message(session_id, content).await?;
-                }
-                ChatMessage::Assistant {
-                    content: Some(text),
-                    ..
-                } => {
-                    child_runtime
-                        .add_system_message(
-                            session_id,
-                            format!("[Parent assistant response]: {}", text),
-                        )
-                        .await?;
-                }
-                ChatMessage::Assistant { tool_calls, .. } if tool_calls.is_some() => {
-                    // Skip tool-call-only messages — parent's tool decisions
-                    // don't make sense in the child's context.
-                }
-                ChatMessage::Tool {
-                    tool_call_id,
-                    content,
-                    ..
-                } => {
-                    child_runtime
-                        .add_system_message(
-                            session_id,
-                            format!("[Parent tool result ({}): {}]", tool_call_id, content),
-                        )
-                        .await?;
-                }
-                _ => {} // Skip system messages and empty assistant
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -738,1267 +501,8 @@ pub struct AgentInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Child agent event loop
-// ---------------------------------------------------------------------------
-
-/// Run the child agent's main event loop.
-///
-/// This function runs inside a tokio task spawned by [`MultiAgentRuntime::spawn_child`].
-/// It:
-/// 1. Subscribes to child agent events and bridges them to parent
-/// 2. Listens for tasks from the mailbox
-/// 3. Executes each task via `run_turn`
-/// 4. Posts results back via the mailbox
-async fn run_child_loop(
-    child_mailbox: ChildMailbox,
-    child_runtime: AgentRuntime,
-    session_id: SessionId,
-    agent_path: AgentPath,
-    mailbox: Arc<MailboxHub>,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
-    child_cancel: CancellationToken,
-) {
-    let mut task_rx = child_mailbox.task_rx;
-
-    // Spawn event bridging: forward child events to parent, tagging agent_id
-    if let Some(tx) = event_tx {
-        let mut child_events = child_runtime.subscribe_runtime_events();
-        let bridge_path = agent_path.to_string();
-        let bridge_cancel = child_cancel.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = bridge_cancel.cancelled() => break,
-                    event = child_events.recv() => {
-                        match event {
-                            Ok(event) => {
-                                if matches!(event,
-                                    RuntimeEvent::RunFinished { .. }
-                                    | RuntimeEvent::RunCancelled { .. }
-                                    | RuntimeEvent::AwaitingApproval { .. }) {
-                                    continue;
-                                }
-                                let _ = tx.send(event.with_agent_id(bridge_path.as_str()));
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    subagent = %bridge_path,
-                                    lagged = n,
-                                    "child event bridge lagged"
-                                );
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // Main task loop
-    loop {
-        tokio::select! {
-            _ = child_cancel.cancelled() => {
-                break;
-            }
-            task = task_rx.recv() => {
-                match task {
-                    Some(task) => {
-                        let input = build_child_input(&task);
-                        let result = child_runtime.run_turn_collect(
-                            session_id.clone(),
-                            &input,
-                        ).await;
-
-                        match result {
-                            Ok((events, outcome)) => {
-                                let result_text = build_child_result(&outcome, &events);
-                                let denied_tools = collect_denied_tools(&events);
-                                mailbox.post_result(MailboxResult {
-                                    agent_path: agent_path.clone(),
-                                    status: MailboxStatus::Ok,
-                                    result: Some(result_text),
-                                    denied_tools,
-                                });
-                            }
-                            Err(e) => {
-                                mailbox.post_result(MailboxResult {
-                                    agent_path: agent_path.clone(),
-                                    status: MailboxStatus::Error,
-                                    result: Some(e.to_string()),
-                                    denied_tools: vec![],
-                                });
-                            }
-                        }
-                    }
-                    None => break, // task channel closed
-                }
-            }
-        }
-    }
-}
-
-/// Build the input text for a child agent from a mailbox task.
-fn build_child_input(task: &MailboxTask) -> String {
-    if task.pending_messages.is_empty() {
-        task.task.clone()
-    } else {
-        let mut parts: Vec<String> = Vec::new();
-        for msg in &task.pending_messages {
-            parts.push(format!("[Message]: {}", msg));
-        }
-        parts.push(format!("[Task]: {}", task.task));
-        parts.join("\n\n")
-    }
-}
-
-/// Extract a human-readable summary from a run outcome.
-fn summarize_outcome(outcome: &RunOutcome) -> String {
-    match outcome {
-        RunOutcome::Completed => "task completed".to_string(),
-        RunOutcome::Continuing => "continuing".to_string(),
-        RunOutcome::Failed { error } => format!("task failed: {}", error),
-        RunOutcome::MaxTurnsExceeded { turns } => {
-            format!("max turns exceeded ({} turns)", turns)
-        }
-        RunOutcome::Cancelled => "cancelled".to_string(),
-    }
-}
-
-/// Extract the child agent's own assistant text from its collected events.
-///
-/// Excludes sub-sub-agent text (events tagged with an `agent_id`), so the parent
-/// only sees this child's direct answer.
-fn extract_assistant_text(events: &[RuntimeEvent]) -> String {
-    let mut text = String::new();
-    for event in events {
-        if let RuntimeEvent::TextDelta {
-            text: delta,
-            agent_id,
-            ..
-        } = event
-            && agent_id.is_none()
-        {
-            text.push_str(delta);
-        }
-    }
-    text
-}
-
-/// Collect the names of tools the child attempted but was denied permission to
-/// call, from a run's collected events.
-///
-/// Filters to the child's own events (`agent_id == None`) so grandchild denials
-/// — if children ever gain multi-agent tools — are not mis-attributed to the
-/// child. Only the child's direct denials matter to the parent.
-fn collect_denied_tools(events: &[RuntimeEvent]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|e| match e {
-            RuntimeEvent::ToolCallFinished {
-                tool_name,
-                denied: true,
-                agent_id: None,
-                ..
-            } => Some(tool_name.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Build the result string posted back to the parent via the mailbox.
-///
-/// For a completed task this returns the child's actual final answer (so the
-/// parent learns what the child concluded — e.g. "no permission" reports) rather
-/// than a coarse "task completed". Other outcomes keep the coarse summary.
-fn build_child_result(outcome: &RunOutcome, events: &[RuntimeEvent]) -> String {
-    match outcome {
-        RunOutcome::Completed => {
-            let text = extract_assistant_text(events);
-            if text.trim().is_empty() {
-                summarize_outcome(outcome)
-            } else {
-                text
-            }
-        }
-        _ => summarize_outcome(outcome),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use agent_base::RunOutcome;
-
-    // ── summarize_outcome ──
-
-    #[test]
-    fn test_summarize_completed() {
-        let s = summarize_outcome(&RunOutcome::Completed);
-        assert_eq!(s, "task completed");
-    }
-
-    #[test]
-    fn test_summarize_failed() {
-        let outcome = RunOutcome::Failed {
-            error: "connection refused".to_string(),
-        };
-        let s = summarize_outcome(&outcome);
-        assert_eq!(s, "task failed: connection refused");
-    }
-
-    #[test]
-    fn test_summarize_max_turns() {
-        let outcome = RunOutcome::MaxTurnsExceeded { turns: 42 };
-        let s = summarize_outcome(&outcome);
-        assert!(s.contains("max turns exceeded"));
-        assert!(s.contains("42"));
-    }
-
-    #[test]
-    fn test_summarize_cancelled() {
-        let s = summarize_outcome(&RunOutcome::Cancelled);
-        assert_eq!(s, "cancelled");
-    }
-
-    // ── build_child_result / extract_assistant_text ──
-
-    fn text_delta(text: &str, agent_id: Option<&str>) -> agent_base::RuntimeEvent {
-        agent_base::RuntimeEvent::TextDelta {
-            session_id: agent_base::SessionId::new(1),
-            text: text.to_string(),
-            agent_id: agent_id.map(|s| s.to_string()),
-            trace_id: None,
-        }
-    }
-
-    #[test]
-    fn test_build_child_result_completed_returns_final_text() {
-        let events = vec![text_delta("I couldn't ", None), text_delta("delete.", None)];
-        assert_eq!(
-            build_child_result(&RunOutcome::Completed, &events),
-            "I couldn't delete."
-        );
-    }
-
-    #[test]
-    fn test_build_child_result_completed_falls_back_when_no_text() {
-        assert_eq!(
-            build_child_result(&RunOutcome::Completed, &[]),
-            "task completed"
-        );
-    }
-
-    #[test]
-    fn test_extract_assistant_text_ignores_subagent_text() {
-        let events = vec![
-            text_delta("root answer", None),
-            text_delta("grandchild", Some("root/child/grandchild")),
-        ];
-        assert_eq!(extract_assistant_text(&events), "root answer");
-    }
-
-    #[test]
-    fn test_build_child_result_failed_keeps_error() {
-        let outcome = RunOutcome::Failed {
-            error: "boom".to_string(),
-        };
-        assert_eq!(build_child_result(&outcome, &[]), "task failed: boom");
-    }
-
-    // ── collect_denied_tools ──
-
-    fn tool_finished(tool_name: &str, denied: bool) -> agent_base::RuntimeEvent {
-        agent_base::RuntimeEvent::ToolCallFinished {
-            session_id: agent_base::SessionId::new(1),
-            tool_name: tool_name.to_string(),
-            summary: "summary".to_string(),
-            agent_id: None,
-            trace_id: None,
-            denied,
-        }
-    }
-
-    #[test]
-    fn test_collect_denied_tools_filters_denied_only() {
-        let events = vec![
-            tool_finished("read_file", false),
-            tool_finished("delete_file", true),
-            tool_finished("shell", true),
-        ];
-        assert_eq!(
-            collect_denied_tools(&events),
-            vec!["delete_file".to_string(), "shell".to_string()]
-        );
-    }
-
-    #[test]
-    fn test_collect_denied_tools_empty_when_no_denials() {
-        let events = vec![
-            tool_finished("read_file", false),
-            text_delta("all good", None),
-        ];
-        assert!(collect_denied_tools(&events).is_empty());
-    }
-
-    #[test]
-    fn test_collect_denied_tools_excludes_grandchild_denials() {
-        // A grandchild's denial carries an agent_id and must not be attributed to
-        // the child.
-        let events = vec![
-            agent_base::RuntimeEvent::ToolCallFinished {
-                session_id: agent_base::SessionId::new(1),
-                tool_name: "grandchild_tool".to_string(),
-                summary: "summary".to_string(),
-                agent_id: Some("root/child/grandchild".to_string()),
-                trace_id: None,
-                denied: true,
-            },
-            tool_finished("child_tool", true),
-        ];
-        assert_eq!(
-            collect_denied_tools(&events),
-            vec!["child_tool".to_string()]
-        );
-    }
-
-    // ── build_child_input ──
-
-    #[test]
-    fn test_build_child_input_task_only() {
-        let task = MailboxTask {
-            task: "do work".into(),
-            interrupt: true,
-            pending_messages: vec![],
-        };
-        let out = build_child_input(&task);
-        assert_eq!(out, "do work");
-    }
-
-    #[test]
-    fn test_build_child_input_with_pending_messages() {
-        let task = MailboxTask {
-            task: "do work".into(),
-            interrupt: false,
-            pending_messages: vec!["context 1".into(), "context 2".into()],
-        };
-        let out = build_child_input(&task);
-        assert!(out.contains("[Message]: context 1"));
-        assert!(out.contains("[Message]: context 2"));
-        assert!(out.contains("[Task]: do work"));
-        // Messages come before task
-        let msg_pos = out.find("[Message]:").unwrap();
-        let task_pos = out.find("[Task]:").unwrap();
-        assert!(msg_pos < task_pos, "messages should precede task");
-    }
-
-    #[test]
-    fn test_build_child_input_single_message() {
-        let task = MailboxTask {
-            task: "final task".into(),
-            interrupt: true,
-            pending_messages: vec!["hint".into()],
-        };
-        let out = build_child_input(&task);
-        assert_eq!(out, "[Message]: hint\n\n[Task]: final task");
-    }
-
-    // ── fork_history: resolve_fork_history ──
-
-    /// Mock LLM provider for fork_history tests (minimal — never called).
-    #[derive(Clone)]
-    struct NoopLlmProvider;
-
-    #[async_trait::async_trait]
-    impl agent_base::llm_trait::LlmProvider for NoopLlmProvider {
-        async fn stream(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
-            unimplemented!()
-        }
-
-        async fn chat(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
-            unimplemented!()
-        }
-
-        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
-            agent_base::llm_trait::Capabilities {
-                supports_streaming: true,
-                ..Default::default()
-            }
-        }
-
-        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
-            agent_base::llm_trait::ProviderInfo {
-                name: "noop".to_string(),
-                model: "noop-model".to_string(),
-                version: None,
-            }
-        }
-    }
-
-    /// Build a MultiAgentRuntime with a parent runtime that has a populated session.
-    async fn setup_fork_history_test(
-        parent_messages: Vec<agent_base::ChatMessage>,
-    ) -> (Arc<MultiAgentRuntime>, agent_base::SessionId) {
-        use tokio_util::sync::CancellationToken;
-
-        let llm = Arc::new(NoopLlmProvider);
-        let parent_runtime = agent_base::AgentBuilder::new(llm)
-            .build()
-            .expect("build parent runtime");
-        let parent_sid = parent_runtime.create_session().await;
-
-        // Push messages directly into the session's chat_messages vector so
-        // we can use proper Assistant/Tool variants (not just System).
-        parent_runtime
-            .with_session_mut(&parent_sid, |session| {
-                session.chat_messages_mut().extend(parent_messages.clone());
-            })
-            .await
-            .unwrap();
-
-        let session_manager = Arc::new(parent_runtime.session_manager().clone());
-
-        let ma_runtime = Arc::new(MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmProvider),
-            vec![],
-            CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        ));
-        ma_runtime.set_session_manager(session_manager);
-
-        (ma_runtime, parent_sid)
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_none_returns_empty() {
-        let messages = vec![agent_base::ChatMessage::User {
-            content: "hello".into(),
-            images: vec![],
-            ephemeral: false,
-        }];
-        let (ma, parent_sid) = setup_fork_history_test(messages).await;
-
-        // None
-        let result = ma.resolve_fork_history(None, &parent_sid).await;
-        assert!(result.is_empty());
-
-        // Some("none")
-        let result = ma
-            .resolve_fork_history(Some("none".to_string()), &parent_sid)
-            .await;
-        assert!(result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_all_returns_all_non_system() {
-        let messages = vec![
-            agent_base::ChatMessage::User {
-                content: "question 1".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("answer 1".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-            agent_base::ChatMessage::User {
-                content: "question 2".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("answer 2".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-        ];
-        let (ma, parent_sid) = setup_fork_history_test(messages).await;
-
-        let result = ma
-            .resolve_fork_history(Some("all".to_string()), &parent_sid)
-            .await;
-
-        // Should have 4 messages (2 user + 2 assistant) — system messages are filtered out
-        assert_eq!(result.len(), 4);
-        assert!(matches!(result[0], agent_base::ChatMessage::User { .. }));
-        assert!(matches!(
-            result[1],
-            agent_base::ChatMessage::Assistant { .. }
-        ));
-        assert!(matches!(result[2], agent_base::ChatMessage::User { .. }));
-        assert!(matches!(
-            result[3],
-            agent_base::ChatMessage::Assistant { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_n_turns() {
-        // 3 turns: 3 user messages, 3 assistant responses
-        let messages = vec![
-            agent_base::ChatMessage::User {
-                content: "q1".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("a1".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-            agent_base::ChatMessage::User {
-                content: "q2".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("a2".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-            agent_base::ChatMessage::User {
-                content: "q3".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("a3".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-        ];
-        let (ma, parent_sid) = setup_fork_history_test(messages).await;
-
-        // Last 1 turn
-        let result = ma
-            .resolve_fork_history(Some("1".to_string()), &parent_sid)
-            .await;
-        assert_eq!(result.len(), 2, "1 turn = user q3 + assistant a3");
-        assert!(matches!(result[0], agent_base::ChatMessage::User { .. }));
-        assert_eq!(extract_user_content(&result[0]), "q3");
-
-        // Last 2 turns
-        let result = ma
-            .resolve_fork_history(Some("2".to_string()), &parent_sid)
-            .await;
-        assert_eq!(result.len(), 4, "2 turns = q2,a2,q3,a3");
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_invalid_number_treats_as_none() {
-        let messages = vec![agent_base::ChatMessage::User {
-            content: "hello".into(),
-            images: vec![],
-            ephemeral: false,
-        }];
-        let (ma, parent_sid) = setup_fork_history_test(messages).await;
-
-        // Invalid number → empty
-        let result = ma
-            .resolve_fork_history(Some("not-a-number".to_string()), &parent_sid)
-            .await;
-        assert!(result.is_empty());
-
-        // Zero → empty
-        let result = ma
-            .resolve_fork_history(Some("0".to_string()), &parent_sid)
-            .await;
-        assert!(result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_no_session_manager_returns_empty() {
-        use tokio_util::sync::CancellationToken;
-
-        let ma_runtime = MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmProvider),
-            vec![],
-            CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        );
-        // session_manager is NOT set
-
-        let sid = agent_base::SessionId::new(9999);
-        let result = ma_runtime
-            .resolve_fork_history(Some("all".to_string()), &sid)
-            .await;
-        assert!(result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn resolve_fork_history_empty_session_returns_empty() {
-        let (ma, parent_sid) = setup_fork_history_test(vec![]).await;
-
-        let result = ma
-            .resolve_fork_history(Some("all".to_string()), &parent_sid)
-            .await;
-        assert!(result.is_empty());
-    }
-
-    // ── fork_history: prefill_child_session ──
-
-    #[tokio::test]
-    async fn prefill_child_session_user_and_assistant() {
-        let llm = Arc::new(NoopLlmProvider);
-        let child_runtime = agent_base::AgentBuilder::new(llm)
-            .build()
-            .expect("build child runtime");
-        let child_sid = child_runtime.create_session().await;
-
-        let parent_messages = vec![
-            agent_base::ChatMessage::User {
-                content: "user question".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: Some("assistant reply".into()),
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: None,
-            },
-            agent_base::ChatMessage::Tool {
-                tool_call_id: "call_123".into(),
-                name: None,
-                content: "tool output".into(),
-            },
-        ];
-
-        // Create a minimal MultiAgentRuntime just to call prefill_child_session
-        use tokio_util::sync::CancellationToken;
-        let ma_runtime = MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmProvider),
-            vec![],
-            CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        );
-
-        ma_runtime
-            .prefill_child_session(&child_runtime, &child_sid, &parent_messages)
-            .await
-            .expect("prefill should succeed");
-
-        // Verify the child session contains the pre-filled messages
-        let session = child_runtime
-            .session(&child_sid)
-            .await
-            .expect("session exists");
-        let msgs = session.chat_messages().to_vec();
-
-        // Should have: user msg + system msg (assistant) + system msg (tool)
-        assert_eq!(msgs.len(), 3);
-        assert!(matches!(msgs[0], agent_base::ChatMessage::User { .. }));
-        assert!(matches!(msgs[1], agent_base::ChatMessage::System { .. }));
-        assert!(matches!(msgs[2], agent_base::ChatMessage::System { .. }));
-    }
-
-    #[tokio::test]
-    async fn prefill_child_session_tool_call_only_skipped() {
-        let llm = Arc::new(NoopLlmProvider);
-        let child_runtime = agent_base::AgentBuilder::new(llm)
-            .build()
-            .expect("build child runtime");
-        let child_sid = child_runtime.create_session().await;
-
-        // Assistant message with only tool_calls (no text content) should be skipped
-        let parent_messages = vec![
-            agent_base::ChatMessage::User {
-                content: "do something".into(),
-                images: vec![],
-                ephemeral: false,
-            },
-            agent_base::ChatMessage::Assistant {
-                content: None, // no text — tool call only
-                reasoning_content: None,
-                thinking_signature: None,
-                tool_calls: Some(vec![]),
-            },
-        ];
-
-        use tokio_util::sync::CancellationToken;
-        let ma_runtime = MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmProvider),
-            vec![],
-            CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        );
-
-        ma_runtime
-            .prefill_child_session(&child_runtime, &child_sid, &parent_messages)
-            .await
-            .expect("prefill should succeed");
-
-        let session = child_runtime
-            .session(&child_sid)
-            .await
-            .expect("session exists");
-        let msgs = session.chat_messages().to_vec();
-
-        // Only the user message — tool-call-only assistant should be skipped
-        assert_eq!(msgs.len(), 1);
-        assert!(matches!(msgs[0], agent_base::ChatMessage::User { .. }));
-    }
-
-    #[tokio::test]
-    async fn prefill_child_session_empty_vec_noop() {
-        let llm = Arc::new(NoopLlmProvider);
-        let child_runtime = agent_base::AgentBuilder::new(llm)
-            .build()
-            .expect("build child runtime");
-        let child_sid = child_runtime.create_session().await;
-
-        use tokio_util::sync::CancellationToken;
-        let ma_runtime = MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            Arc::new(NoopLlmProvider),
-            vec![],
-            CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        );
-
-        ma_runtime
-            .prefill_child_session(&child_runtime, &child_sid, &[])
-            .await
-            .expect("prefill should succeed");
-
-        let session = child_runtime
-            .session(&child_sid)
-            .await
-            .expect("session exists");
-        let msgs = session.chat_messages().to_vec();
-
-        // System prompt is added but we don't assert exact count — just that no user/injected msgs
-        assert!(msgs.is_empty() || matches!(msgs[0], agent_base::ChatMessage::System { .. }));
-    }
-
-    fn extract_user_content(msg: &agent_base::ChatMessage) -> &str {
-        match msg {
-            agent_base::ChatMessage::User { content, .. } => content.as_str(),
-            _ => "",
-        }
-    }
-
-    // ── lifecycle: spawn / send / wait / close ──
-
-    struct StreamingStub;
-
-    #[async_trait::async_trait]
-    impl agent_base::llm_trait::LlmProvider for StreamingStub {
-        async fn stream(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
-            Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
-                futures_util::stream::iter(vec![
-                    Ok(agent_base::StreamChunk::Text("child ok".to_string())),
-                    Ok(agent_base::StreamChunk::Stop {
-                        finish_reason: Some("stop".to_string()),
-                    }),
-                ]),
-            )))
-        }
-
-        async fn chat(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
-            Ok(agent_base::llm_trait::ChatResponse {
-                content: "child ok".to_string(),
-                tool_calls: vec![],
-                usage: agent_base::llm_trait::types::UsageInfo::default(),
-                finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
-                raw: None,
-                reasoning_content: None,
-                thinking_signature: None,
-            })
-        }
-
-        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
-            agent_base::llm_trait::Capabilities::default()
-        }
-
-        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
-            agent_base::llm_trait::ProviderInfo {
-                name: "stub".to_string(),
-                model: "stub-model".to_string(),
-                version: None,
-            }
-        }
-    }
-
-    fn make_ma_runtime() -> Arc<MultiAgentRuntime> {
-        let client: Arc<dyn agent_base::llm_trait::LlmProvider> = Arc::new(StreamingStub);
-        Arc::new(MultiAgentRuntime::new(
-            MultiAgentConfig::enabled(),
-            client,
-            vec![],
-            tokio_util::sync::CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        ))
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_spawn_send_task_wait_close_lifecycle() {
-        let ma = make_ma_runtime();
-
-        let path = ma
-            .spawn_child(
-                "worker",
-                "child system prompt".to_string(),
-                0,
-                0,
-                false,
-                vec![],
-            )
-            .await
-            .expect("spawn child");
-        assert_eq!(path, "root/worker");
-
-        let agents = ma.list_agents();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].agent_path, "root/worker");
-
-        // send_message posts a pending message (no execution trigger).
-        assert!(
-            ma.send_message("root/worker", "heads up".to_string())
-                .unwrap()
-        );
-
-        // send_task triggers execution; the child completes via the stub stream.
-        assert!(
-            ma.send_task("root/worker", "do the thing".to_string(), false)
-                .unwrap()
-        );
-
-        let result = ma.wait_for_result(Some("root/worker"), 2000).await;
-        assert_eq!(result.status, "ok");
-        assert_eq!(result.result.as_deref(), Some("child ok"));
-
-        let close = ma.close_agent("root/worker").unwrap();
-        assert!(close.closed);
-        assert_eq!(close.message, "agent closed");
-
-        // Closing a second time reports not found.
-        let close2 = ma.close_agent("root/worker").unwrap();
-        assert!(!close2.closed);
-        assert_eq!(close2.message, "agent not found");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_spawn_child_with_history_defaults_to_none() {
-        let ma = make_ma_runtime();
-        // No session manager set → fork_history resolves to empty; spawn still succeeds.
-        let path = ma
-            .spawn_child_with_history(
-                "w2",
-                "prompt".to_string(),
-                0,
-                0,
-                false,
-                None,
-                &agent_base::SessionId::new(0),
-            )
-            .await
-            .expect("spawn with history");
-        assert_eq!(path, "root/w2");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_error_paths() {
-        let ma = make_ma_runtime();
-
-        // Valid path, unknown agent → "agent not found".
-        assert_eq!(
-            ma.send_task("root/ghost", "x".to_string(), false)
-                .unwrap_err(),
-            "agent not found"
-        );
-
-        // Invalid paths (must start with "root", no empty segments).
-        assert!(ma.send_message("worker", "x".to_string()).is_err());
-        assert!(ma.send_message("", "x".to_string()).is_err());
-
-        // wait_for_result with invalid path.
-        let r = ma.wait_for_result(Some("worker"), 10).await;
-        assert_eq!(r.status, "error");
-
-        // wait_for_result with no results times out.
-        let r2 = ma.wait_for_result(None, 50).await;
-        assert_eq!(r2.status, "timeout");
-
-        // cancel_all is a no-op when no children are running.
-        ma.cancel_all();
-    }
-
-    // ── child permission mode ──
-
-    fn make_runtime_full(
-        mode: ChildPermissionMode,
-        policy: Option<Arc<dyn ToolPolicy>>,
-    ) -> Arc<MultiAgentRuntime> {
-        make_runtime_full_with_approval(mode, policy, None)
-    }
-
-    fn make_runtime_full_with_approval(
-        mode: ChildPermissionMode,
-        policy: Option<Arc<dyn ToolPolicy>>,
-        approval: Option<Arc<dyn ApprovalHandler>>,
-    ) -> Arc<MultiAgentRuntime> {
-        let config = MultiAgentConfig {
-            child_permission_mode: mode,
-            ..MultiAgentConfig::enabled()
-        };
-        Arc::new(MultiAgentRuntime::new(
-            config,
-            Arc::new(StreamingStub),
-            vec![],
-            tokio_util::sync::CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            policy,
-            approval,
-        ))
-    }
-
-    #[test]
-    fn effective_permission_respects_mode() {
-        let full = make_runtime_full(ChildPermissionMode::Full, None);
-        assert!(full.effective_permission(false));
-        assert!(full.effective_permission(true));
-
-        let none = make_runtime_full(ChildPermissionMode::None, None);
-        assert!(!none.effective_permission(false));
-        assert!(!none.effective_permission(true));
-
-        let per_spawn = make_runtime_full(ChildPermissionMode::PerSpawn, None);
-        assert!(per_spawn.effective_permission(true));
-        assert!(!per_spawn.effective_permission(false));
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_full_carries_no_policy() {
-        let ma = make_ma_runtime();
-        let child = ma
-            .build_child_runtime("prompt".to_string(), true)
-            .await
-            .expect("build child");
-        assert!(child.tool_policy().is_none());
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_none_falls_back_to_deny_all() {
-        // Parent has no tool policy → child falls back to DenyAllToolPolicy.
-        let ma = make_ma_runtime();
-        let child = ma
-            .build_child_runtime("prompt".to_string(), false)
-            .await
-            .expect("build child");
-        assert!(child.tool_policy().is_some());
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_none_inherits_parent_policy() {
-        // Parent has a tool policy → child inherits the same allocation.
-        let parent_policy: Arc<dyn ToolPolicy> = Arc::new(DenyAllToolPolicy);
-        let ma = make_runtime_full(ChildPermissionMode::None, Some(parent_policy.clone()));
-        let child = ma
-            .build_child_runtime("prompt".to_string(), false)
-            .await
-            .expect("build child");
-        let child_policy = child.tool_policy().expect("child should carry a policy");
-        assert!(Arc::ptr_eq(&parent_policy, child_policy));
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
-        // Codex-style: a restricted child routes the approval decision up to the
-        // parent's handler (human-in-the-loop / auto) rather than hard-denying
-        // locally. This is what makes `ask` mode coherent for sub-agents.
-        let parent_handler: Arc<dyn ApprovalHandler> = Arc::new(AllowAllApprovalHandler);
-        let ma = make_runtime_full_with_approval(
-            ChildPermissionMode::None,
-            None,
-            Some(parent_handler.clone()),
-        );
-        let child = ma
-            .build_child_runtime("prompt".to_string(), false)
-            .await
-            .expect("build child");
-        let child_handler = child
-            .approval_handler()
-            .expect("child should carry an approval handler");
-        assert!(Arc::ptr_eq(child_handler, &parent_handler));
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_none_denies_when_parent_has_no_handler() {
-        // Parent carries no handler → the child must remain read-only (DenyAll),
-        // preserving the "no policy, no handler → nothing can happen" invariant.
-        let ma = make_runtime_full(ChildPermissionMode::None, None);
-        let child = ma
-            .build_child_runtime("prompt".to_string(), false)
-            .await
-            .expect("build child");
-        let child_handler = child
-            .approval_handler()
-            .expect("child should carry a fallback DenyAll handler");
-        let decision = child_handler
-            .approve(
-                agent_base::ApprovalRequest {
-                    title: "x".into(),
-                    message: "x".into(),
-                    action_key: None,
-                    risk_level: agent_base::RiskLevel::Sensitive,
-                    raw: None,
-                },
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-            .expect("DenyAll approves without error");
-        assert_eq!(decision, agent_base::ApprovalDecision::Deny);
-    }
-
-    #[tokio::test]
-    async fn build_child_runtime_excludes_root_level_tools() {
-        struct NoopDecomposeTool;
-        #[async_trait::async_trait]
-        impl Tool for NoopDecomposeTool {
-            fn name(&self) -> &'static str {
-                "decompose"
-            }
-
-            fn description(&self) -> &'static str {
-                "split a task into parallel slices"
-            }
-
-            fn schema(&self) -> serde_json::Value {
-                serde_json::json!({ "type": "object", "properties": {} })
-            }
-
-            async fn call(
-                &self,
-                _args: &serde_json::Value,
-                _ctx: &agent_base::ToolContext,
-            ) -> agent_base::AgentResult<Vec<agent_base::Content>> {
-                Ok(vec![agent_base::Content::text("serial")])
-            }
-        }
-
-        let config = MultiAgentConfig {
-            child_excluded_tools: vec!["decompose".to_string()],
-            ..MultiAgentConfig::default()
-        };
-        let ma = Arc::new(MultiAgentRuntime::new(
-            config,
-            Arc::new(StreamingStub),
-            vec![Arc::new(NoopDecomposeTool), Arc::new(NoopReadFileTool)],
-            tokio_util::sync::CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        ));
-
-        let child = ma
-            .build_child_runtime("prompt".to_string(), true)
-            .await
-            .expect("build child");
-
-        let registry = child.tools_mut();
-        let registry = registry.read().await;
-        assert!(
-            registry.get("decompose").is_none(),
-            "decompose must be excluded from child runtimes"
-        );
-        assert!(
-            registry.get("read_file").is_some(),
-            "non-excluded tools must still be inherited"
-        );
-    }
-
-    // ── end-to-end: denied_tools flows child → parent ──
-
-    struct NoopReadFileTool;
-
-    #[async_trait::async_trait]
-    impl Tool for NoopReadFileTool {
-        fn name(&self) -> &'static str {
-            "read_file"
-        }
-
-        fn description(&self) -> &'static str {
-            "Read a file's contents"
-        }
-
-        fn schema(&self) -> serde_json::Value {
-            serde_json::json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } }
-            })
-        }
-
-        async fn call(
-            &self,
-            _args: &serde_json::Value,
-            _ctx: &agent_base::ToolContext,
-        ) -> agent_base::AgentResult<Vec<agent_base::Content>> {
-            Ok(vec![agent_base::Content::text("contents")])
-        }
-    }
-
-    /// Scripted client: the first turn requests the `read_file` tool (which the
-    /// child is denied); any later turn emits a plain text answer.
-    struct DenialScriptedClient {
-        turn: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl agent_base::llm_trait::LlmProvider for DenialScriptedClient {
-        async fn stream(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
-            let n = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let chunks: Vec<Result<agent_base::StreamChunk, agent_base::llm_trait::LlmError>> =
-                if n == 0 {
-                    vec![
-                        Ok(agent_base::StreamChunk::ToolCall(serde_json::json!({
-                            "delta": {
-                                "tool_calls": [{
-                                    "id": "call_1",
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": "{\"path\":\"/etc/passwd\"}"
-                                    }
-                                }]
-                            }
-                        }))),
-                        Ok(agent_base::StreamChunk::Stop {
-                            finish_reason: Some("tool_calls".to_string()),
-                        }),
-                    ]
-                } else {
-                    vec![
-                        Ok(agent_base::StreamChunk::Text(
-                            "I lack permission.".to_string(),
-                        )),
-                        Ok(agent_base::StreamChunk::Stop {
-                            finish_reason: Some("stop".to_string()),
-                        }),
-                    ]
-                };
-            Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
-                futures_util::stream::iter(chunks),
-            )))
-        }
-
-        async fn chat(
-            &self,
-            _request: agent_base::llm_trait::ChatRequest,
-        ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
-            Ok(agent_base::llm_trait::ChatResponse {
-                content: "I lack permission.".to_string(),
-                tool_calls: vec![],
-                usage: agent_base::llm_trait::types::UsageInfo::default(),
-                finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
-                raw: None,
-                reasoning_content: None,
-                thinking_signature: None,
-            })
-        }
-
-        fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
-            agent_base::llm_trait::Capabilities::default()
-        }
-
-        fn info(&self) -> agent_base::llm_trait::ProviderInfo {
-            agent_base::llm_trait::ProviderInfo {
-                name: "stub".to_string(),
-                model: "stub-model".to_string(),
-                version: None,
-            }
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_child_denied_tool_reaches_parent_via_wait() {
-        // `None` mode + no parent policy → child carries DenyAllToolPolicy, so
-        // every tool it attempts is denied. Assert the denied tool name flows
-        // end-to-end: collect_denied_tools → mailbox → wait_for_result.
-        let config = MultiAgentConfig {
-            child_permission_mode: ChildPermissionMode::None,
-            ..MultiAgentConfig::enabled()
-        };
-        let ma = Arc::new(MultiAgentRuntime::new(
-            config,
-            Arc::new(DenialScriptedClient {
-                turn: std::sync::atomic::AtomicUsize::new(0),
-            }),
-            vec![Arc::new(NoopReadFileTool) as Arc<dyn Tool>],
-            tokio_util::sync::CancellationToken::new(),
-            None,
-            agent_base::Language::En,
-            None,
-            None,
-        ));
-
-        let path = ma
-            .spawn_child(
-                "worker",
-                "child system prompt".to_string(),
-                0,
-                1,
-                false,
-                vec![],
-            )
-            .await
-            .expect("spawn child");
-        assert_eq!(path, "root/worker");
-
-        ma.send_task("root/worker", "read the file".to_string(), false)
-            .unwrap();
-
-        let result = ma.wait_for_result(Some("root/worker"), 3000).await;
-        assert_eq!(result.status, "ok");
-        assert_eq!(result.denied_tools, vec!["read_file".to_string()]);
-    }
-}
+mod tests;

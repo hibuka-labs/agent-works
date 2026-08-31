@@ -78,7 +78,7 @@ impl std::fmt::Display for SpawnError {
 ///
 /// ```text
 /// register() → status=Idle
-///   → set_status(Running) on followup_task
+///   → set_status(Running) on send_message(trigger=true)
 ///     → set_status(Done) on completion
 ///       → close() removes from registry
 /// ```
