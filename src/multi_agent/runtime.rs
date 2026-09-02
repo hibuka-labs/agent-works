@@ -201,6 +201,13 @@ impl MultiAgentRuntime {
         }
     }
 
+    /// Get the shared LLM client.
+    ///
+    /// Used by tools that need to make LLM calls (e.g., Focus-based prompt generation).
+    pub fn client(&self) -> &Arc<dyn LlmProvider> {
+        &self.client
+    }
+
     /// Set the event sender for bridging child events to parent.
     ///
     /// Called by the builder after creating the bridge channel.

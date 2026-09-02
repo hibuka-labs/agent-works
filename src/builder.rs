@@ -670,32 +670,29 @@ pub fn setup_multi_agent(
 pub fn build_multi_agent_system_prompt() -> String {
     r#"## Multi-Agent Capabilities
 
-You have the ability to spawn sub-agents to execute tasks concurrently. Use these tools to delegate work:
+You can spawn sub-agents to work on tasks concurrently. Each sub-agent is an independent assistant with its own tools (repo_map, read_file, list_files, execute_command, etc.) and can reason through problems autonomously.
 
-- `spawn_agent`: Create a sub-agent — a `name`, a role via `preset` (researcher | coder | reviewer | tester) or a custom `system_prompt`, and optionally the initial `task`. Returns the agent path plus the tools the child actually received. A rejected spawn (e.g. sub-agent limit) returns an error, not a child.
-- `send_message`: Send context to a sub-agent without triggering execution; set `trigger: true` to hand it over as a new task.
-- `wait_agent`: Wait for a sub-agent's result. Blocks until the agent completes or timeout.
-- `list_agents`: List all active sub-agents and their status.
-- `close_agent`: Close a sub-agent and release its resources.
+### Tools
+
+- `spawn_agent`: Create a sub-agent. Use the `task` field to describe what you want done — the sub-agent will figure out the steps. Example: `spawn_agent({task_name: "analyze-codex", task: "analyze the codex project structure and output a structured report", message: "start analysis"})`.
+- `wait_agent`: Wait for a sub-agent's result.
+- `send_message`: Send follow-up context or tasks to a sub-agent.
+- `list_agents`: List active sub-agents and their status.
+- `close_agent`: Close a sub-agent when done.
+
+### How Sub-Agents Work
+
+Sub-agents are capable — they can explore codebases, read files, run commands, and produce structured analysis. You don't need to plan their steps or specify which tools to use. Just describe the goal in `task`, and the sub-agent handles the rest.
 
 ### When to Spawn
 
-- Tasks that can run independently and in parallel (e.g., "research X and Y simultaneously")
-- Long-running tasks where you want to check intermediate results
-- Decomposing complex tasks into sub-tasks for focused execution
+- Parallel tasks: analyze multiple codebases, compare implementations, etc.
+- Tasks you want to delegate while you continue other work
 
 ### When NOT to Spawn
 
-- Simple lookups or single-tool calls (just use the tool directly)
-- Sequential dependencies where the next step requires the previous result
-- Tasks that need your full context or reasoning
-
-### Communication Pattern
-
-1. `spawn_agent` → create the sub-agent, optionally with its first task
-2. `wait_agent` → collect the result
-3. `send_message` with `trigger: true` → assign follow-up work (can call multiple times)
-4. `close_agent` → clean up when done"#
+- Simple lookups (just use read_file or repo_map directly)
+- Tasks that need your current conversation context"#
         .to_string()
 }
 
