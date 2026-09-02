@@ -34,13 +34,23 @@ fn test_summarize_cancelled() {
     assert_eq!(s, "cancelled");
 }
 
-// ── build_child_result / extract_assistant_text ──
+// ── build_child_result / extract_last_assistant_message ──
 
 fn text_delta(text: &str, agent_id: Option<&str>) -> agent_base::RuntimeEvent {
     agent_base::RuntimeEvent::TextDelta {
         session_id: agent_base::SessionId::new(1),
         text: text.to_string(),
         agent_id: agent_id.map(|s| s.to_string()),
+        trace_id: None,
+    }
+}
+
+fn tool_started(tool_name: &str) -> agent_base::RuntimeEvent {
+    agent_base::RuntimeEvent::ToolCallStarted {
+        session_id: agent_base::SessionId::new(1),
+        tool_name: tool_name.to_string(),
+        args_json: "{}".to_string(),
+        agent_id: None,
         trace_id: None,
     }
 }
@@ -63,12 +73,37 @@ fn test_build_child_result_completed_falls_back_when_no_text() {
 }
 
 #[test]
-fn test_extract_assistant_text_ignores_subagent_text() {
+fn test_extract_last_assistant_message_ignores_subagent_text() {
     let events = vec![
+        tool_started("read_file"),
         text_delta("root answer", None),
         text_delta("grandchild", Some("root/child/grandchild")),
     ];
-    assert_eq!(extract_assistant_text(&events), "root answer");
+    assert_eq!(extract_last_assistant_message(&events), "root answer");
+}
+
+#[test]
+fn test_extract_last_assistant_message_skips_earlier_turns() {
+    // Simulate: assistant text → tool call → assistant text (final report)
+    let events = vec![
+        text_delta("thinking about this...", None),
+        tool_started("read_file"),
+        text_delta("Here is my final analysis.", None),
+    ];
+    assert_eq!(
+        extract_last_assistant_message(&events),
+        "Here is my final analysis."
+    );
+}
+
+#[test]
+fn test_extract_last_assistant_message_no_tool_calls() {
+    // No tool calls → returns all text (single-turn agent)
+    let events = vec![text_delta("I couldn't ", None), text_delta("delete.", None)];
+    assert_eq!(
+        extract_last_assistant_message(&events),
+        "I couldn't delete."
+    );
 }
 
 #[test]
