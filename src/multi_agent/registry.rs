@@ -14,7 +14,16 @@
 //! queue_len      : tasks enqueued but not yet dequeued (send_task / dequeue)
 //! in_flight      : a dequeued task is executing and its result is unposted
 //! results_posted : monotonic count of results this agent has delivered
+//! results_handed_over : results included in a fired fan-in batch
 //! ```
+//!
+//! `results_posted` vs `results_handed_over` is the **delivery gap**: how
+//! many of an agent's reports exist but have not reached the parent yet.
+//! Session 20260904_841ed65b: a mid-turn parent saw `done` children but no
+//! reports (Progress never wakes the parent; the batch flushes at turn end)
+//! and concluded "the system didn't deliver" — then re-did the work itself.
+//! Surfacing the gap through `list_agents` turns that blind faith into a
+//! checkable fact.
 //!
 //! | Fact change      | Maintained by       | Timing                          |
 //! |------------------|---------------------|---------------------------------|
@@ -135,6 +144,13 @@ pub struct AgentEntry {
     /// fan-in delivery-completeness clause — a registered agent with zero
     /// deliveries (spawn→send window) can never be part of a settled batch.
     pub results_posted: usize,
+    /// Results already included in a fired batch (see field docs).
+    pub results_handed_over: usize,
+    /// Results of this agent that have been included in a fired fan-in
+    /// batch (the watcher stamps every batch member when it drains). The
+    /// delivery gap `results_posted - results_handed_over` is what
+    /// `list_agents` surfaces as `pending_results`: reports that exist but
+    /// have not reached the parent yet.
     /// Tool calls the agent has actually executed (monotonic). Surfaced by
     /// `list_agents` so the parent can distinguish "working" from "stalled":
     /// a live agent's count grows; a frozen count with a stale
@@ -204,6 +220,9 @@ pub struct AgentSnapshot {
     pub tool_calls: usize,
     /// What the agent was asked to do (first task wins).
     pub task: Option<String>,
+    /// Reports that exist but have not been included in a fired batch yet
+    /// (`results_posted - results_handed_over`). Zero is the common case.
+    pub pending_results: usize,
 }
 
 /// Errors that can occur during spawn attempts.
@@ -325,6 +344,7 @@ impl AgentRegistry {
                 in_flight: false,
                 running_since: None,
                 results_posted: 0,
+                results_handed_over: 0,
                 tool_calls: 0,
                 last_activity: None,
                 task: None,
@@ -428,6 +448,26 @@ impl AgentRegistry {
         self.transition(path, "task_send_failed", |e| {
             e.queue_len = e.queue_len.saturating_sub(1);
         })
+    }
+
+    /// Record that every result this agent has posted so far was included in
+    /// a fired fan-in batch (the watcher stamps each batch member at drain
+    /// time). This closes the agent's delivery gap: `pending_results` drops
+    /// to zero until it posts again (e.g. a follow-up task's answer).
+    ///
+    /// Deliberately not a `transition`: the derived status does not move, so
+    /// no lifecycle event is emitted — but the snapshot is republished so
+    /// watch consumers see the delivery gap close promptly.
+    ///
+    /// Returns `true` if the agent was found (closed agents are a no-op:
+    /// their entries are gone, and their pending reports left with them).
+    pub fn note_batch_handed_over(&mut self, path: &AgentPath) -> bool {
+        let Some(entry) = self.agents.get_mut(path) else {
+            return false;
+        };
+        entry.results_handed_over = entry.results_posted;
+        self.publish_snapshot();
+        true
     }
 
     /// Record the agent's assigned task (first write wins).
@@ -548,6 +588,7 @@ impl AgentRegistry {
                     last_activity_secs: e.last_activity.map(|t| t.elapsed().as_secs()),
                     tool_calls: e.tool_calls,
                     task: e.task.clone(),
+                    pending_results: e.results_posted.saturating_sub(e.results_handed_over),
                 })
                 .collect(),
         }
@@ -867,6 +908,34 @@ mod tests {
         // A queued follow-up re-blocks quiescence even though b delivered.
         assert!(reg.note_enqueued(&b));
         assert!(!reg.quiescent(), "queued work blocks the batch");
+    }
+
+    #[test]
+    fn batch_handover_closes_and_reopens_the_delivery_gap() {
+        // Session 20260904_841ed65b: a mid-turn parent saw `done` children
+        // with no reports and concluded "the system didn't deliver" — the
+        // gap must be visible as a fact, and handover must close it.
+        let (mut reg, path) = registered(test_config(), "worker");
+
+        reg.note_enqueued(&path);
+        reg.note_dequeued(&path);
+        reg.note_posted(&path);
+        let snap = |reg: &AgentRegistry| reg.snapshot().agents[0].pending_results;
+        assert_eq!(snap(&reg), 1, "posted but no batch has fired yet");
+
+        // The watcher stamps the batch member at drain time.
+        assert!(reg.note_batch_handed_over(&path));
+        assert_eq!(snap(&reg), 0, "handed over — no longer pending");
+
+        // A follow-up post (nudge answer) reopens the gap.
+        reg.note_enqueued(&path);
+        reg.note_dequeued(&path);
+        reg.note_posted(&path);
+        assert_eq!(snap(&reg), 1, "new post is pending until the next batch");
+
+        // Ghost paths stay a no-op, and handover never goes backwards.
+        assert!(!reg.note_batch_handed_over(&test_path("ghost")));
+        assert_eq!(reg.get(&path).unwrap().results_handed_over, 1);
     }
 
     #[test]

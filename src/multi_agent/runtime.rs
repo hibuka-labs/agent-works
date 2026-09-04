@@ -562,6 +562,7 @@ impl MultiAgentRuntime {
                 running_secs: a.running_secs,
                 last_activity_secs: a.last_activity_secs,
                 task: a.task,
+                pending_results: a.pending_results,
             })
             .collect()
     }
@@ -685,6 +686,15 @@ pub struct AgentInfo {
     pub last_activity_secs: Option<u64>,
     /// What the agent was asked to do (None until the first task is sent).
     pub task: Option<String>,
+    /// Results the agent has posted that no fired batch has handed to the
+    /// parent yet. `done` + nonzero = the report exists and is en route in a
+    /// future batch — do not redo the work, end the turn to receive it.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub pending_results: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use super::outcome::format_child_result;
 use crate::focus::ProgressSummarizer;
 use crate::multi_agent::mailbox::{MailboxHub, MailboxResult, MailboxStatus};
+use crate::multi_agent::path::AgentPath;
 use crate::multi_agent::registry::AgentRegistry;
 
 /// One child's final report — the full conclusion, never the child's
@@ -257,6 +258,24 @@ pub fn spawn_watcher(
                         batch.clear();
                         continue;
                     }
+                    // Stamp the delivery fact BEFORE draining: everything in
+                    // this batch is now handed over, so `pending_results` on
+                    // list_agents drops to zero the moment the batch fires.
+                    let batch_paths: Vec<AgentPath> = {
+                        let mut seen = std::collections::BTreeSet::new();
+                        batch
+                            .iter()
+                            .filter(|r| !matches!(r.status, MailboxStatus::Closed))
+                            .filter(|r| seen.insert(r.agent_path.to_string()))
+                            .map(|r| r.agent_path.clone())
+                            .collect()
+                    };
+                    {
+                        let mut reg = registry.lock().unwrap();
+                        for path in &batch_paths {
+                            reg.note_batch_handed_over(path);
+                        }
+                    }
                     let reports = batch
                         .drain(..)
                         .map(|r| format_child_result(&r))
@@ -462,6 +481,48 @@ mod tests {
             }
             other => panic!("expected Batch, got {other:?}"),
         }
+        fx.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn batch_fire_clears_pending_results() {
+        // Session 20260904_841ed65b fix: the moment a batch fires, its
+        // members are "handed over" — list_agents must read pending_results
+        // == 0 from then on, or a mid-turn parent would keep seeing a
+        // delivery gap that has already been closed. The stamp happens
+        // BEFORE tx.send, so reading the registry after receiving the Batch
+        // is deterministic.
+        let mut fx = fixture();
+        for name in ["a", "b"] {
+            spawn_running(&fx, name);
+        }
+        let pending = |fx: &Fixture, name: &str| {
+            fx.registry
+                .lock()
+                .unwrap()
+                .snapshot()
+                .agents
+                .into_iter()
+                .find(|a| a.path == format!("root/{name}"))
+                .expect("agent registered")
+                .pending_results
+        };
+
+        finish_and_post(&fx, "a", MailboxStatus::Ok, Some("a done"));
+        finish_and_post(&fx, "b", MailboxStatus::Ok, Some("b done"));
+        // Both Progress notices come first. (The pre-batch pending==1 state
+        // is asserted in registry.rs — here the watcher may legitimately
+        // have stamped+sent the batch before we get scheduled, so only the
+        // post-Batch state is deterministic.)
+        next_event(&mut fx).await;
+        next_event(&mut fx).await;
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => assert_eq!(reports.len(), 2),
+            other => panic!("expected Batch, got {other:?}"),
+        }
+        assert_eq!(pending(&fx, "a"), 0, "handed over with the batch");
+        assert_eq!(pending(&fx, "b"), 0, "handed over with the batch");
         fx.cancel.cancel();
     }
 
