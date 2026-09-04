@@ -24,6 +24,7 @@ use agent_base::{
     Tool, ToolPolicy,
 };
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +36,7 @@ use super::control::AgentControl;
 use super::limiter::{AgentExecutionLimiter, ExecutionSlot};
 use super::mailbox::{ChildMailbox, MailboxHub, MailboxResult, MailboxStatus};
 use super::path::AgentPath;
-use super::registry::{AgentRegistry, AgentStatus};
+use super::registry::{AgentLifecycleEvent, AgentRegistry, RegistrySnapshot};
 pub use super::runtime::watcher::{ChildReport, ChildResultEvent};
 
 mod build;
@@ -251,7 +252,18 @@ impl MultiAgentRuntime {
     /// Send a task to a child agent (triggers execution).
     ///
     /// Called by `send_message` with `trigger=true` (and the deprecated
-    /// `followup_task` shim). Updates status to Running.
+    /// `followup_task` shim). Records the enqueue fact — the derived status
+    /// becomes `Queued` (or stays `Running` if a task is already executing);
+    /// the child loop's dequeue turns it `Running`. No marker to forget.
+    ///
+    /// Ordering is load-bearing: the enqueue fact is recorded **before**
+    /// `mailbox.send_task` makes the task receivable. The send bumps the
+    /// mailbox sequence and wakes the child loop, so noting afterwards would
+    /// let the child's `note_dequeued` win the registry lock first — the
+    /// late enqueue note would resurrect an already-consumed task as a
+    /// phantom `queue_len`, blocking quiescence forever. A failed send rolls
+    /// the note back (`note_send_failed`) so the fact cannot outlive the
+    /// task it describes.
     pub fn send_task(
         &self,
         agent_path: &str,
@@ -262,12 +274,14 @@ impl MultiAgentRuntime {
         if !self.mailbox.contains(&path) {
             return Err("agent not found".to_string());
         }
-        let sent = self.mailbox.send_task(&path, task.clone(), interrupt);
-        if sent {
-            let mut registry = self.registry.lock().unwrap();
-            registry.set_task(&path, task);
-            registry.set_status(&path, AgentStatus::Running);
-            registry.touch(&path);
+        let mut registry = self.registry.lock().unwrap();
+        registry.set_task(&path, task.clone());
+        registry.touch(&path);
+        let tracked = registry.note_enqueued(&path);
+        drop(registry);
+        let sent = self.mailbox.send_task(&path, task, interrupt);
+        if !sent && tracked {
+            self.registry.lock().unwrap().note_send_failed(&path);
         }
         Ok(sent)
     }
@@ -495,7 +509,7 @@ impl MultiAgentRuntime {
             let registry = self.registry.lock().unwrap();
             registry
                 .get(&path)
-                .map(|e| format!("{:?}", e.status).to_lowercase())
+                .map(|e| e.status().name().to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         };
 
@@ -531,28 +545,48 @@ impl MultiAgentRuntime {
 
     /// List all active sub-agents.
     ///
-    /// Called by `list_agents` tool.
+    /// Called by `list_agents` tool. Reads the registry's derived snapshot —
+    /// the same view the lifecycle watch channel publishes — so the tool and
+    /// any UI consumer always see one identical truth.
     pub fn list_agents(&self) -> Vec<AgentInfo> {
-        let registry = self.registry.lock().unwrap();
-        registry
-            .list()
+        self.registry
+            .lock()
+            .unwrap()
+            .snapshot()
+            .agents
             .into_iter()
-            .map(|e| AgentInfo {
-                agent_path: e.path.to_string(),
-                status: format!("{:?}", e.status).to_lowercase(),
-                tool_calls: e.tool_calls,
-                last_activity_secs: e.last_activity.map(|t| t.elapsed().as_secs()),
-                task: e.task.clone(),
+            .map(|a| AgentInfo {
+                agent_path: a.path,
+                status: a.status,
+                tool_calls: a.tool_calls,
+                running_secs: a.running_secs,
+                last_activity_secs: a.last_activity_secs,
+                task: a.task,
             })
             .collect()
     }
 
-    /// Number of agents currently executing a task.
+    /// Number of agents with work outstanding (executing or queued).
     ///
-    /// The fan-in coordinator's quiescence signal: a batch of child results is
-    /// complete when nothing is `Running` anymore.
-    pub fn running_count(&self) -> usize {
-        self.registry.lock().unwrap().running_count()
+    /// Derived from facts, not markers. The fan-in coordinator's actual
+    /// quiescence signal is [`AgentRegistry::quiescent`] (via the watcher).
+    pub fn busy_count(&self) -> usize {
+        self.registry.lock().unwrap().busy_count()
+    }
+
+    /// Subscribe to lifecycle snapshots (watch channel; latest only).
+    ///
+    /// Phase 5 hook: the phimint event bridge maps these onto its UI panel.
+    /// Metric fields in the snapshot are transition-frozen (republishes
+    /// happen on status transitions only) — derive status from this stream
+    /// and poll `list_agents` for live metrics.
+    pub fn subscribe_lifecycle(&self) -> watch::Receiver<Arc<RegistrySnapshot>> {
+        self.registry.lock().unwrap().subscribe()
+    }
+
+    /// The last `max` lifecycle transitions, oldest first (diagnostics).
+    pub fn recent_lifecycle_events(&self, max: usize) -> Vec<AgentLifecycleEvent> {
+        self.registry.lock().unwrap().recent_events(max)
     }
 
     /// Get the mailbox hub (for tools that need it directly).
@@ -632,12 +666,22 @@ pub struct CloseResult {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AgentInfo {
     pub agent_path: String,
+    /// Derived status name: `queued` (task waiting in queue), `running`
+    /// (executing), `done` (no pending work — result delivered, or the
+    /// agent has not been tasked yet; a freshly spawned agent reads `done`
+    /// until its first `send_task` succeeds). `closed` never appears:
+    /// unregistered agents leave this listing entirely.
     pub status: String,
     /// Tool calls actually executed (grows while the agent works). A frozen
     /// count together with a stale `last_activity_secs` is the stall signal.
     pub tool_calls: usize,
+    /// Seconds spent in the current `Running` period; present only while
+    /// running. Feeds the Phase 6 stall reaper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_secs: Option<u64>,
     /// Seconds since the agent's last observed activity (task start or tool
     /// call); `None` until the agent receives its first task.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_activity_secs: Option<u64>,
     /// What the agent was asked to do (None until the first task is sent).
     pub task: Option<String>,

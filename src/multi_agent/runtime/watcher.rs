@@ -9,11 +9,12 @@
 //! - **Progress** — each result is announced for the *user* immediately
 //!   (Focus summary once wired, plain notice otherwise). Progress never
 //!   wakes the parent agent.
-//! - **Batch** — once nothing is executing anymore
-//!   (`registry.running_count() == 0`) and at least one non-Closed report
-//!   is pending, the watcher emits one `Batch` carrying every full report.
-//!   The parent wakes exactly once per generation of children and runs one
-//!   synthesis turn.
+//! - **Batch** — once the registry is quiescent (see
+//!   [`AgentRegistry::quiescent`]: nobody executing, nothing queued, and
+//!   every registered agent has delivered ≥1 result) and at least one
+//!   non-Closed report is pending, the watcher emits one `Batch` carrying
+//!   every full report. The parent wakes exactly once per generation of
+//!   children and runs one synthesis turn.
 //!
 //! Rules encoded here:
 //! - A redundant `Closed` for an agent whose `Ok`/`Error` is already in the
@@ -31,13 +32,15 @@
 //!   consumers must be idempotent (phimint's UI is: mark-finished is a
 //!   no-op on an already-finished entry). Closed results need no summary
 //!   and are announced synchronously.
-//! - Two ordering invariants keep every quiescence check well-timed:
-//!   the child loop sets `Done` *before* posting its FINAL task's result
-//!   (a bare `set_status` never bumps the mailbox seq — see `spawn.rs`;
-//!   while a task remains queued it instead posts in `Running` state, so a
-//!   phantom-idle child can never make the batch fire early — session
-//!   20260904_c6559510), and `unregister` bumps the seq after releasing
-//!   the registry slot (the close path).
+//! - Quiescence timing is **derived, not marked** (session
+//!   20260904_c6559510): the child loop records facts at dequeue and before
+//!   each post (`note_posted` precedes the post's seq bump), so "result
+//!   drained ⇒ producer settled" holds structurally — no Done-before-post
+//!   comment contract for callers to violate, and no phantom-idle window
+//!   while a sibling task is still queued (`queue_len > 0` blocks the
+//!   predicate directly). The delivery clause additionally seals the
+//!   spawn→send window: a freshly spawned agent has zero deliveries, so a
+//!   sibling's result cannot fire a batch that would exclude it.
 
 use std::sync::{Arc, Mutex};
 
@@ -236,10 +239,12 @@ pub fn spawn_watcher(
                         batch.push(r);
                     }
 
-                    // Quiescence: nothing is executing anymore and at least
-                    // one real (non-Closed) report is pending → wake the
+                    // Quiescence: nobody working, nothing queued, and every
+                    // registered agent has delivered ≥1 result (delivery
+                    // completeness seals the spawn→send window) — plus at
+                    // least one real (non-Closed) report pending → wake the
                     // parent once with everything.
-                    if batch.is_empty() || registry.lock().unwrap().running_count() != 0 {
+                    if batch.is_empty() || !registry.lock().unwrap().quiescent() {
                         continue;
                     }
                     let any_real = batch
@@ -354,7 +359,6 @@ mod tests {
     use crate::multi_agent::config::MultiAgentConfig;
     use crate::multi_agent::mailbox::MailboxResult;
     use crate::multi_agent::path::AgentPath;
-    use crate::multi_agent::registry::AgentStatus;
 
     struct Fixture {
         mailbox: Arc<MailboxHub>,
@@ -365,8 +369,9 @@ mod tests {
         handle: tokio::task::JoinHandle<()>,
     }
 
-    /// Watcher + registry fixture. Children start `Idle`; tests move them
-    /// through the same Done-before-post order the child loop uses.
+    /// Watcher + registry fixture. Children move through the same fact
+    /// points (`note_enqueued` / `note_dequeued` / `note_posted`) the child
+    /// loop uses, in the same order.
     fn fixture() -> Fixture {
         fixture_with_summarizer(None)
     }
@@ -392,26 +397,22 @@ mod tests {
         }
     }
 
-    /// Register a child in both the mailbox and the registry, marking it
-    /// `Running` (the state `send_task` produces).
+    /// Register a child in both the mailbox and the registry with a task
+    /// dequeued and executing — the facts `send_task` + the child loop's
+    /// dequeue produce.
     fn spawn_running(fx: &Fixture, name: &str) {
         let path = AgentPath::root().join(name);
         fx.mailbox.register(&path);
         fx.registry.lock().unwrap().register(&path, 1).unwrap();
-        fx.registry
-            .lock()
-            .unwrap()
-            .set_status(&path, AgentStatus::Running);
+        fx.registry.lock().unwrap().note_enqueued(&path);
+        fx.registry.lock().unwrap().note_dequeued(&path);
     }
 
-    /// The child loop's terminal order: publish `Done` *before* posting the
-    /// result (see the fan-in note in `spawn.rs`).
+    /// The child loop's terminal order: record the delivery fact *before*
+    /// posting the result (see `note_posted` in `spawn.rs`).
     fn finish_and_post(fx: &Fixture, name: &str, status: MailboxStatus, text: Option<&str>) {
         let path = AgentPath::root().join(name);
-        fx.registry
-            .lock()
-            .unwrap()
-            .set_status(&path, AgentStatus::Done);
+        fx.registry.lock().unwrap().note_posted(&path);
         fx.mailbox.register(&path);
         fx.mailbox.post_result(MailboxResult {
             agent_path: path,
@@ -876,6 +877,76 @@ mod tests {
             other => panic!("expected Progress, got {other:?}"),
         }
         assert_no_event(&mut fx).await; // lone Closed → no Batch
+        fx.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn fresh_spawn_without_delivery_blocks_the_batch() {
+        // The spawn→send window: b is registered (spawn returned) but its
+        // send_task is still in flight — zero deliveries. a's result must
+        // Progress but NOT fire a batch that excludes b. Pins the delivery
+        // clause of `quiescent()` at the layer that consumes it.
+        let mut fx = fixture();
+        spawn_running(&fx, "a");
+        let b = AgentPath::root().join("b");
+        fx.mailbox.register(&b);
+        fx.registry.lock().unwrap().register(&b, 1).unwrap();
+
+        finish_and_post(&fx, "a", MailboxStatus::Ok, Some("a done"));
+        let _ = next_event(&mut fx).await; // Progress a
+        assert_no_event(&mut fx).await; // b never delivered — batch held
+
+        // b's task lands and the child loop dequeues it.
+        {
+            let mut reg = fx.registry.lock().unwrap();
+            reg.note_enqueued(&b);
+            reg.note_dequeued(&b);
+        }
+        finish_and_post(&fx, "b", MailboxStatus::Ok, Some("b done"));
+        let _ = next_event(&mut fx).await; // Progress b
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => assert_eq!(
+                reports
+                    .iter()
+                    .map(|r| r.agent_path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["root/a", "root/b"]
+            ),
+            other => panic!("expected Batch, got {other:?}"),
+        }
+        fx.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn close_during_queued_task_drops_phantom_queue_from_quiescence() {
+        // Close lands while a task sits queued (sent, never dequeued). The
+        // registry entry — and its queue_len — must vanish with the close,
+        // and the late notes the child loop may still issue must be no-ops.
+        let mut fx = fixture();
+        let b = AgentPath::root().join("b");
+        fx.mailbox.register(&b);
+        {
+            let mut reg = fx.registry.lock().unwrap();
+            reg.register(&b, 1).unwrap();
+            reg.note_enqueued(&b);
+        }
+        assert!(!fx.registry.lock().unwrap().quiescent());
+
+        fx.registry.lock().unwrap().close(&b); // close wins the race
+        assert!(
+            fx.registry.lock().unwrap().quiescent(),
+            "phantom queue must not outlive the entry"
+        );
+
+        // Cleanup's Closed delivery; the child loop's note_posted is a no-op
+        // on the removed entry.
+        finish_and_post(&fx, "b", MailboxStatus::Closed, None);
+        match next_event(&mut fx).await {
+            ChildResultEvent::Progress { status, .. } => assert_eq!(status, "closed"),
+            other => panic!("expected Progress(closed), got {other:?}"),
+        }
+        assert_no_event(&mut fx).await;
         fx.cancel.cancel();
     }
 }

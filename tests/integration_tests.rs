@@ -1132,11 +1132,12 @@ mod multi_agent_tests {
 
         assert_eq!(path, "root/test-worker");
 
-        // Verify child is registered
+        // Verify child is registered. Freshly spawned derives `done` (the
+        // fact model has no `idle` — same facts as a finished agent).
         let agents = runtime.list_agents();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent_path, "root/test-worker");
-        assert_eq!(agents[0].status, "idle");
+        assert_eq!(agents[0].status, "done");
         assert_eq!(agents[0].tool_calls, 0);
 
         // Send a task

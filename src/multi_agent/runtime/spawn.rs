@@ -112,11 +112,18 @@ impl MultiAgentRuntime {
             }
         };
 
-        // 4. Create mailbox
-        let child_mailbox = self
-            .mailbox
-            .register(&path)
-            .ok_or_else(|| AgentError::ConfigError("mailbox already exists".to_string()))?;
+        // 4. Create mailbox. Failure rolls back the registry entry too — a
+        // registered agent with no mailbox could never receive a task, and a
+        // zero-delivery registered entry would block quiescence forever.
+        let child_mailbox = match self.mailbox.register(&path) {
+            Some(mb) => mb,
+            None => {
+                self.registry.lock().unwrap().close(&path);
+                return Err(AgentError::ConfigError(
+                    "mailbox already exists".to_string(),
+                ));
+            }
+        };
 
         // 5. Build child AgentRuntime (roll back registry+mailbox on failure).
         // A `ToolNotFound` from whitelist validation propagates typed (it is
@@ -191,7 +198,6 @@ impl MultiAgentRuntime {
         let mailbox_for_task = self.mailbox.clone();
         let registry_for_task = self.registry.clone();
         let event_tx = self.event_tx.lock().unwrap().clone();
-        let registry_agent_path = path.clone();
 
         let cleanup = ChildCleanup {
             _slot: slot,
@@ -225,10 +231,10 @@ impl MultiAgentRuntime {
         // itself panics, neither credential is spent.
         ticket.commit();
 
-        self.registry
-            .lock()
-            .unwrap()
-            .set_status(&registry_agent_path, AgentStatus::Idle);
+        // No status marking here. Under the fact model a freshly spawned
+        // agent derives `Done` from its facts (no queue, nothing in flight)
+        // until the first `send_task` records the enqueue fact — the old
+        // `set_status(Idle)` marker no longer exists.
     }
 
     /// Spawn a child agent with fork_history support.
@@ -558,6 +564,17 @@ async fn run_child_loop(
     }
 
     // Main task loop
+    //
+    // Status protocol (session 20260904_c6559510, fact model): this loop
+    // only records facts at the two points the structure forces —
+    // dequeue (`note_dequeued`) and delivery (`note_posted`, before
+    // `post_result` bumps the mailbox seq so the watcher wakes onto settled
+    // facts). The status itself is derived by the registry: posting while a
+    // sibling task is still queued derives `Queued` (quiescence blocked),
+    // the final post derives `Done` (batch may fire). The old explicit
+    // peek-ahead (`try_recv` + `set_status(Running/Done)` before posting)
+    // existed only because the marker model had no `Queued`; with facts it
+    // is dead weight. Cancel stays honored between tasks.
     loop {
         tokio::select! {
             _ = child_cancel.cancelled() => {
@@ -565,63 +582,28 @@ async fn run_child_loop(
             }
             task = task_rx.recv() => {
                 match task {
-                    Some(mut task) => {
-                        // Serial task-queue loop. Status protocol (session
-                        // 20260904_c6559510): `send_task` marks Running at
-                        // QUEUE time, but only this loop knows whether more
-                        // tasks remain. The next task is peeked via
-                        // `try_recv` BEFORE posting the current result, and
-                        // the status is set accordingly — so the watcher's
-                        // quiescence check (`running_count() == 0`) never
-                        // sees a phantom-idle child whose queue still holds
-                        // work. The old protocol (Done at every post, no
-                        // Running at dequeue) made the watcher fire the
-                        // batch early and fragment the remaining results
-                        // into one wake-up per straggler.
-                        loop {
-                            if child_cancel.is_cancelled() {
-                                break; // close is honored between tasks
-                            }
-                            let (status, result_text, denied_tools) =
-                                execute_child_task(
-                                    &child_runtime,
-                                    &session_id,
-                                    &task,
-                                    task_timeout,
-                                )
-                                .await;
+                    Some(task) => {
+                        registry.lock().unwrap().note_dequeued(&agent_path);
+                        let (status, result_text, denied_tools) =
+                            execute_child_task(
+                                &child_runtime,
+                                &session_id,
+                                &task,
+                                task_timeout,
+                            )
+                            .await;
 
-                            // Peek the next queued task BEFORE posting: the
-                            // status the watcher sees when it wakes on this
-                            // post's seq bump must reflect the queue. With a
-                            // queued task → Running (a later post will re-wake
-                            // it, so holding this result cannot hang the
-                            // batch). Queue empty → Done (Done-before-post,
-                            // the fan-in invariant: a bare `set_status` never
-                            // bumps the seq, so posting in Done state is what
-                            // makes "result drained ⇒ producer quiescent"
-                            // hold for the final task).
-                            let next = task_rx.try_recv().ok();
-                            let new_status = if next.is_some() {
-                                AgentStatus::Running
-                            } else {
-                                AgentStatus::Done
-                            };
-                            registry
-                                .lock()
-                                .unwrap()
-                                .set_status(&agent_path, new_status);
-                            mailbox.post_result(MailboxResult {
-                                agent_path: agent_path.clone(),
-                                status,
-                                result: result_text,
-                                denied_tools,
-                            });
-                            match next {
-                                Some(t) => task = t,
-                                None => break,
-                            }
-                        }
+                        // Fact before post: the watcher wakes on this
+                        // post's seq bump and must see `in_flight` already
+                        // cleared — that ordering is what makes "result
+                        // drained ⇒ producer quiescent" structural.
+                        registry.lock().unwrap().note_posted(&agent_path);
+                        mailbox.post_result(MailboxResult {
+                            agent_path: agent_path.clone(),
+                            status,
+                            result: result_text,
+                            denied_tools,
+                        });
                     }
                     None => break, // task channel closed
                 }
