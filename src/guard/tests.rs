@@ -32,6 +32,7 @@ fn make_ctx(
         reasoning_only_strikes,
         empty_response_strikes,
         run_has_tool_calls,
+        last_tool_calls_invalid: false,
         all_user_inputs: vec!["test".to_string()],
         is_reasoning_only,
         is_empty_response,
@@ -62,6 +63,7 @@ fn make_ctx_with_text(
         reasoning_only_strikes: 0,
         empty_response_strikes: 0,
         run_has_tool_calls,
+        last_tool_calls_invalid: false,
         all_user_inputs: vec![user_input.to_string()],
         is_reasoning_only: false,
         is_empty_response: false,
@@ -490,6 +492,38 @@ async fn test_text_only_short_response_with_judge_done() {
         "short response + judge done → Complete, got: {:?}",
         decision
     );
+}
+
+#[tokio::test]
+async fn test_text_only_after_rejected_tool_calls_never_judges_complete() {
+    // Session 20260904_efad759c: the truncation guard rejected a spawn_agent
+    // call, the model answered with a fabricated text-only success narrative,
+    // and the completion judge — blind to the rejected tool_result — passed
+    // it, ending the run with zero children spawned. last_tool_calls_invalid
+    // must short-circuit the judge: no client here, so a Complete decision
+    // could only come from the old (buggy) judge path failing open.
+    let guard = DefaultGuard::new(DefaultGuardConfig::default());
+    let mut ctx = make_ctx_with_text(
+        "analyze 3 projects with sub-agents",
+        "已启动 4 个子 agent 分析，稍后汇总。",
+        true,
+        true,
+    );
+    ctx.last_tool_calls_invalid = true;
+
+    let decision = guard.on_turn(&ctx).await;
+    match decision {
+        GuardDecision::Continue { nudge: Some(msg) } => {
+            assert!(
+                msg.contains("NOT executed"),
+                "nudge must tell the model the tool call never executed, got: {msg}"
+            );
+        }
+        other => panic!(
+            "text-only after rejected tool calls must Continue with a re-issue \
+             nudge, got: {other:?}"
+        ),
+    }
 }
 
 // ── Skip threshold tests ──

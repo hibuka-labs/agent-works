@@ -88,6 +88,33 @@ impl DefaultGuard {
     }
 
     async fn handle_text_only(&self, ctx: &GuardCtx) -> GuardDecision {
+        // Session 20260904_efad759c: after the react-side truncation guard
+        // rejected a spawn_agent call, the model replied with a text-only
+        // "success" narrative and the completion judge — which sees only the
+        // user inputs and that narrative — passed it, ending the run with
+        // zero children spawned. A text-only turn that follows rejected tool
+        // calls is definitionally not completion: the work the text describes
+        // never executed. Skip the judge, push the model back to re-issuing.
+        // (Bounded: the react truncation breaker fails the run at its strike
+        // limit, and max_turns still applies.)
+        if ctx.last_tool_calls_invalid {
+            tracing::info!(
+                session_id = ctx.session_id.id,
+                turn = ctx.turn_count,
+                "text-only response after rejected tool calls — not completion, re-issuing"
+            );
+            return GuardDecision::Continue {
+                nudge: Some(
+                    "Your previous tool call was NOT executed — its arguments \
+                     were invalid or truncated. The report you just wrote \
+                     describes work that never happened; do not narrate \
+                     results. Re-issue the tool call with complete, valid \
+                     JSON arguments."
+                        .to_string(),
+                ),
+            };
+        }
+
         let input_len = ctx.user_input.chars().count();
         let output_len = ctx.model_response.chars().count();
 
