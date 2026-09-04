@@ -124,6 +124,7 @@ fn tool_finished(tool_name: &str, denied: bool) -> agent_base::RuntimeEvent {
         agent_id: None,
         trace_id: None,
         denied,
+        details: None,
     }
 }
 
@@ -161,6 +162,7 @@ fn test_collect_denied_tools_excludes_grandchild_denials() {
             agent_id: Some("root/child/grandchild".to_string()),
             trace_id: None,
             denied: true,
+            details: None,
         },
         tool_finished("child_tool", true),
     ];
