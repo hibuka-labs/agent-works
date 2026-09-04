@@ -23,6 +23,7 @@ use agent_base::{
     DenyAllApprovalHandler, DenyAllToolPolicy, Language, ReasoningEffort, RuntimeEvent, SessionId,
     Tool, ToolPolicy,
 };
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -35,11 +36,13 @@ use super::limiter::{AgentExecutionLimiter, ExecutionSlot};
 use super::mailbox::{ChildMailbox, MailboxHub, MailboxResult, MailboxStatus};
 use super::path::AgentPath;
 use super::registry::{AgentRegistry, AgentStatus};
+pub use super::runtime::watcher::{ChildReport, ChildResultEvent};
 
 mod build;
 mod fork;
 mod outcome;
 mod spawn;
+pub mod watcher;
 
 // ---------------------------------------------------------------------------
 // MultiAgentRuntime
@@ -93,6 +96,10 @@ pub struct MultiAgentRuntime {
     /// Whether to nudge children toward read-only behaviour (see
     /// [`MultiAgentConfig::child_read_only`]).
     child_read_only: bool,
+
+    /// Fork-history policy applied to every spawn (see
+    /// [`MultiAgentConfig::child_fork_history`]).
+    child_fork_history: Option<String>,
 
     /// Deployment autonomy mode (design §7.5). Drives the `Manual`
     /// three-layer expansion in `spawn_permission`,
@@ -167,6 +174,7 @@ impl MultiAgentRuntime {
         let child_excluded_tools = config.child_excluded_tools.clone();
         let child_reasoning_effort = config.child_reasoning_effort.clone();
         let child_read_only = config.child_read_only;
+        let child_fork_history = config.child_fork_history.clone();
         // Control plane: the config knobs land in `AgentControl` (budget +
         // limiter). `None` knobs → unlimited gates that still count (§7.2).
         let control = Arc::new(AgentControl::new(&config.control));
@@ -185,6 +193,7 @@ impl MultiAgentRuntime {
             child_excluded_tools,
             child_reasoning_effort,
             child_read_only,
+            child_fork_history,
             autonomy,
             write_tools,
             task_timeout,
@@ -206,6 +215,15 @@ impl MultiAgentRuntime {
     /// Used by tools that need to make LLM calls (e.g., Focus-based prompt generation).
     pub fn client(&self) -> &Arc<dyn LlmProvider> {
         &self.client
+    }
+
+    /// Get the configured fork-history policy for spawns (see
+    /// [`MultiAgentConfig::child_fork_history`]).
+    ///
+    /// Used by the `spawn_agent` tool, which reads this instead of trusting
+    /// an LLM-supplied argument.
+    pub fn child_fork_history(&self) -> Option<&str> {
+        self.child_fork_history.as_deref()
     }
 
     /// Set the event sender for bridging child events to parent.
@@ -244,12 +262,12 @@ impl MultiAgentRuntime {
         if !self.mailbox.contains(&path) {
             return Err("agent not found".to_string());
         }
-        let sent = self.mailbox.send_task(&path, task, interrupt);
+        let sent = self.mailbox.send_task(&path, task.clone(), interrupt);
         if sent {
-            self.registry
-                .lock()
-                .unwrap()
-                .set_status(&path, AgentStatus::Running);
+            let mut registry = self.registry.lock().unwrap();
+            registry.set_task(&path, task);
+            registry.set_status(&path, AgentStatus::Running);
+            registry.touch(&path);
         }
         Ok(sent)
     }
@@ -357,6 +375,107 @@ impl MultiAgentRuntime {
         }
     }
 
+    /// Non-blocking check for a result from any or a specific child agent.
+    ///
+    /// Returns the result immediately if one is available, or `"pending"` status
+    /// if no result has arrived yet. Called by `wait_agent` with `blocking=false`.
+    pub fn try_wait(&self, agent_path: Option<&str>) -> WaitResult {
+        let filter_path = match agent_path {
+            Some(s) => match AgentPath::parse(s) {
+                Some(p) => Some(p),
+                None => {
+                    return WaitResult {
+                        status: "error".to_string(),
+                        result: Some(format!("invalid agent path: {}", s)),
+                        agent_path: None,
+                        has_more: false,
+                        denied_tools: vec![],
+                    };
+                }
+            },
+            None => None,
+        };
+
+        let result = match &filter_path {
+            Some(path) => self.mailbox.try_recv_result(path),
+            None => self.mailbox.try_recv_any(),
+        };
+
+        if let Some(r) = result {
+            let has_more = self.mailbox.total_pending_results() > 0;
+            let (status_str, result_text) = match r.status {
+                MailboxStatus::Ok => ("ok".to_string(), r.result),
+                MailboxStatus::Error => ("error".to_string(), r.result),
+                MailboxStatus::Closed => ("closed".to_string(), r.result),
+            };
+            return WaitResult {
+                status: status_str,
+                result: result_text,
+                agent_path: Some(r.agent_path.to_string()),
+                has_more,
+                denied_tools: r.denied_tools,
+            };
+        }
+
+        // Terminal-state synthesis for a filtered path (same as wait_for_result)
+        if let Some(path) = &filter_path {
+            let gone =
+                !self.mailbox.contains(path) && !self.registry.lock().unwrap().contains(path);
+            if gone {
+                return WaitResult {
+                    status: "closed".to_string(),
+                    result: None,
+                    agent_path: Some(path.to_string()),
+                    has_more: false,
+                    denied_tools: vec![],
+                };
+            }
+        }
+
+        WaitResult {
+            status: "pending".to_string(),
+            result: None,
+            agent_path: filter_path.map(|p| p.to_string()),
+            has_more: false,
+            denied_tools: vec![],
+        }
+    }
+
+    /// Start the background watcher task: the fan-in coordinator.
+    ///
+    /// The watcher watches the mailbox and emits two kinds of events on a
+    /// single channel: per-result `Progress` (user-facing notice, never wakes
+    /// the parent) and one `Batch` per generation of children (all full
+    /// reports — this is what wakes the parent for its synthesis turn).
+    ///
+    /// Uses a watchdog wrapper that automatically restarts the watcher if it
+    /// panics. The task exits when the `root_cancel` token is fired.
+    pub fn start_watcher(
+        self: &Arc<Self>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        mpsc::UnboundedReceiver<ChildResultEvent>,
+    ) {
+        let (child_result_tx, child_result_rx) = mpsc::unbounded_channel();
+
+        // Focus summarizes each result for the user on the main agent's
+        // behalf (10 s timeout, fail-open to a plain notice).
+        let summarizer = Arc::new(crate::focus::ProgressSummarizer::new(
+            Arc::clone(&self.client),
+            crate::focus::DEFAULT_SUMMARY_TIMEOUT,
+        ));
+
+        let handle = watcher::spawn_watcher_with_watchdog(
+            Arc::clone(&self.mailbox),
+            Arc::clone(&self.registry),
+            Some(summarizer),
+            Some(child_result_tx),
+            self.root_cancel.clone(),
+        );
+
+        (handle, child_result_rx)
+    }
+
     /// Close a child agent — cancel now, clean up on the child's exit.
     ///
     /// Called by `close_agent` tool. Performs only the cancellation; the
@@ -421,9 +540,19 @@ impl MultiAgentRuntime {
             .map(|e| AgentInfo {
                 agent_path: e.path.to_string(),
                 status: format!("{:?}", e.status).to_lowercase(),
-                tool_count: e.tool_count,
+                tool_calls: e.tool_calls,
+                last_activity_secs: e.last_activity.map(|t| t.elapsed().as_secs()),
+                task: e.task.clone(),
             })
             .collect()
+    }
+
+    /// Number of agents currently executing a task.
+    ///
+    /// The fan-in coordinator's quiescence signal: a batch of child results is
+    /// complete when nothing is `Running` anymore.
+    pub fn running_count(&self) -> usize {
+        self.registry.lock().unwrap().running_count()
     }
 
     /// Get the mailbox hub (for tools that need it directly).
@@ -504,7 +633,14 @@ pub struct CloseResult {
 pub struct AgentInfo {
     pub agent_path: String,
     pub status: String,
-    pub tool_count: usize,
+    /// Tool calls actually executed (grows while the agent works). A frozen
+    /// count together with a stale `last_activity_secs` is the stall signal.
+    pub tool_calls: usize,
+    /// Seconds since the agent's last observed activity (task start or tool
+    /// call); `None` until the agent receives its first task.
+    pub last_activity_secs: Option<u64>,
+    /// What the agent was asked to do (None until the first task is sent).
+    pub task: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

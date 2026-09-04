@@ -103,7 +103,6 @@ async fn test_child_denied_tool_reaches_parent_via_wait() {
             "worker",
             "child system prompt".to_string(),
             0,
-            1,
             false,
             vec![],
         )

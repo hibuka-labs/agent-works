@@ -33,7 +33,6 @@ impl MultiAgentRuntime {
         name: &str,
         system_prompt: String,
         depth: i32,
-        tool_count: usize,
         full_permission: bool,
         parent_messages: Vec<agent_base::ChatMessage>,
     ) -> Result<String, String> {
@@ -43,7 +42,7 @@ impl MultiAgentRuntime {
             ..Default::default()
         };
         let prepared = self
-            .spawn_inner(name, depth, tool_count, &config, parent_messages)
+            .spawn_inner(name, depth, &config, parent_messages)
             .await
             // Legacy error strings preserved byte-for-byte: `ConfigError`
             // wraps the plain SpawnError / "mailbox already exists" /
@@ -73,7 +72,6 @@ impl MultiAgentRuntime {
         &self,
         name: &str,
         depth: i32,
-        tool_count: usize,
         config: &ChildConfig,
         parent_messages: Vec<agent_base::ChatMessage>,
     ) -> Result<PreparedChild, AgentError> {
@@ -97,7 +95,7 @@ impl MultiAgentRuntime {
                 .can_spawn(depth)
                 .map_err(|e| AgentError::ConfigError(e.to_string()))?;
             registry
-                .register(&path, depth, tool_count)
+                .register(&path, depth)
                 .map_err(|e| AgentError::ConfigError(e.to_string()))?;
         }
 
@@ -191,6 +189,7 @@ impl MultiAgentRuntime {
         let task_timeout = self.task_timeout;
         let agent_path = path.clone();
         let mailbox_for_task = self.mailbox.clone();
+        let registry_for_task = self.registry.clone();
         let event_tx = self.event_tx.lock().unwrap().clone();
         let registry_agent_path = path.clone();
 
@@ -210,6 +209,7 @@ impl MultiAgentRuntime {
                 session_id,
                 agent_path,
                 mailbox_for_task,
+                registry_for_task,
                 event_tx,
                 child_cancel,
                 task_timeout,
@@ -235,29 +235,35 @@ impl MultiAgentRuntime {
     ///
     /// `fork_history`: "none" (default), "all", or a number N for last N turns.
     /// `parent_session_id`: the parent agent's session ID.
+    /// `model`: requested model override, carried into `ChildConfig.model`.
+    /// TODO(layer-3): inert today — see `ChildConfig::model`.
     #[allow(clippy::too_many_arguments)] // spawn config is naturally positional
     pub async fn spawn_child_with_history(
         &self,
         name: &str,
         system_prompt: String,
-        depth: i32,
-        tool_count: usize,
         full_permission: bool,
         fork_history: Option<String>,
+        model: Option<String>,
         parent_session_id: &SessionId,
     ) -> Result<String, String> {
         let parent_messages = self
             .resolve_fork_history(fork_history, parent_session_id)
             .await;
-        self.spawn_child(
-            name,
-            system_prompt,
-            depth,
-            tool_count,
-            full_permission,
-            parent_messages,
-        )
-        .await
+        let config = ChildConfig {
+            system_prompt: Some(system_prompt),
+            full_permission: Some(full_permission),
+            model,
+            ..Default::default()
+        };
+        self.spawn_with_config_forked(name.to_string(), config, parent_messages)
+            .await
+            // Legacy error strings preserved byte-for-byte (see spawn_child).
+            .map_err(|e| match e {
+                AgentError::ConfigError(s) => s,
+                other => other.to_string(),
+            })
+            .map(|spawned| spawned.path.to_string())
     }
 
     /// Fluent entry point for the new spawn API (§5.3). Takes `&Arc<Self>`
@@ -313,18 +319,10 @@ impl MultiAgentRuntime {
         }
 
         // Nesting is structurally absent (K5 / §10.1 B4): a config child is
-        // always a direct child of root. `tool_count` is the registry
-        // bookkeeping estimate (whitelist size, else the parent's business
-        // tool count — matching the legacy LLM estimate); the *actual*
-        // registered set is echoed in `SpawnedChild::spawned_tools`.
-        let tool_count = config
-            .tool_names
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or_else(|| self.business_tools.len());
-
+        // always a direct child of root. The *actual* registered tool set is
+        // echoed in `SpawnedChild::spawned_tools`.
         let prepared = self
-            .spawn_inner(&name, 1, tool_count, &config, parent_messages)
+            .spawn_inner(&name, 1, &config, parent_messages)
             .await?;
 
         let path = prepared.path.clone();
@@ -446,6 +444,46 @@ impl Drop for ChildCleanup {
 // Child agent event loop
 // ---------------------------------------------------------------------------
 
+/// Run one dequeued child task to completion and build its mailbox result.
+///
+/// §9.2: `Some(dur)` puts a hard wall on one task. On elapse the turn future
+/// is dropped (execution stops at its next await point), `cancel()` tells the
+/// engine to abandon detached work, and the parent learns via the mailbox
+/// Error. The child itself survives: agent-base resets the cancel token
+/// before every `run_turn`, so later tasks run normally.
+async fn execute_child_task(
+    child_runtime: &AgentRuntime,
+    session_id: &SessionId,
+    task: &crate::multi_agent::mailbox::MailboxTask,
+    task_timeout: Option<Duration>,
+) -> (MailboxStatus, Option<String>, Vec<String>) {
+    let input = outcome::build_child_input(task);
+    let run = child_runtime.run_turn_collect(session_id.clone(), &input);
+    let result = if let Some(dur) = task_timeout {
+        match tokio::time::timeout(dur, run).await {
+            Ok(r) => r,
+            Err(_elapsed) => {
+                child_runtime.cancel();
+                return (
+                    MailboxStatus::Error,
+                    Some(format!("task timed out after {dur:?}")),
+                    vec![],
+                );
+            }
+        }
+    } else {
+        run.await
+    };
+    match result {
+        Ok((events, outcome)) => (
+            MailboxStatus::Ok,
+            Some(outcome::build_child_result(&outcome, &events)),
+            outcome::collect_denied_tools(&events),
+        ),
+        Err(e) => (MailboxStatus::Error, Some(e.to_string()), vec![]),
+    }
+}
+
 /// Run the child agent's main event loop.
 ///
 /// This function runs inside a tokio task spawned by [`MultiAgentRuntime::spawn_child`].
@@ -465,17 +503,23 @@ async fn run_child_loop(
     session_id: SessionId,
     agent_path: AgentPath,
     mailbox: Arc<MailboxHub>,
+    registry: Arc<Mutex<AgentRegistry>>,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
     child_cancel: CancellationToken,
     task_timeout: Option<Duration>,
 ) {
     let mut task_rx = child_mailbox.task_rx;
 
-    // Spawn event bridging: forward child events to parent, tagging agent_id
+    // Spawn event bridging: forward child events to parent, tagging agent_id.
+    // Tool-call starts are also recorded in the registry (monotonic counter +
+    // activity timestamp) so `list_agents` shows real progress, not a frozen
+    // inventory size (session 20260903_0cf95e79 regression).
     if let Some(tx) = event_tx {
         let mut child_events = child_runtime.subscribe_runtime_events();
         let bridge_path = agent_path.to_string();
         let bridge_cancel = child_cancel.clone();
+        let bridge_registry = registry.clone();
+        let bridge_agent_path = agent_path.clone();
 
         tokio::spawn(async move {
             loop {
@@ -484,6 +528,12 @@ async fn run_child_loop(
                     event = child_events.recv() => {
                         match event {
                             Ok(event) => {
+                                if matches!(event, RuntimeEvent::ToolCallStarted { .. }) {
+                                    bridge_registry
+                                        .lock()
+                                        .unwrap()
+                                        .record_tool_call(&bridge_agent_path);
+                                }
                                 if matches!(event,
                                     RuntimeEvent::RunFinished { .. }
                                     | RuntimeEvent::RunCancelled { .. }
@@ -515,52 +565,61 @@ async fn run_child_loop(
             }
             task = task_rx.recv() => {
                 match task {
-                    Some(task) => {
-                        let input = outcome::build_child_input(&task);
-                        let run = child_runtime.run_turn_collect(session_id.clone(), &input);
-                        // §9.2: `Some(dur)` puts a hard wall on one task. On
-                        // elapse the turn future is dropped (execution stops
-                        // at its next await point), `cancel()` tells the
-                        // engine to abandon detached work, and the parent
-                        // learns via the mailbox Error. The child survives:
-                        // agent-base resets the cancel token before every
-                        // `run_turn`, so later tasks run normally.
-                        let result = if let Some(dur) = task_timeout {
-                            match tokio::time::timeout(dur, run).await {
-                                Ok(r) => r,
-                                Err(_elapsed) => {
-                                    child_runtime.cancel();
-                                    mailbox.post_result(MailboxResult {
-                                        agent_path: agent_path.clone(),
-                                        status: MailboxStatus::Error,
-                                        result: Some(format!("task timed out after {dur:?}")),
-                                        denied_tools: vec![],
-                                    });
-                                    continue;
-                                }
+                    Some(mut task) => {
+                        // Serial task-queue loop. Status protocol (session
+                        // 20260904_c6559510): `send_task` marks Running at
+                        // QUEUE time, but only this loop knows whether more
+                        // tasks remain. The next task is peeked via
+                        // `try_recv` BEFORE posting the current result, and
+                        // the status is set accordingly — so the watcher's
+                        // quiescence check (`running_count() == 0`) never
+                        // sees a phantom-idle child whose queue still holds
+                        // work. The old protocol (Done at every post, no
+                        // Running at dequeue) made the watcher fire the
+                        // batch early and fragment the remaining results
+                        // into one wake-up per straggler.
+                        loop {
+                            if child_cancel.is_cancelled() {
+                                break; // close is honored between tasks
                             }
-                        } else {
-                            run.await
-                        };
+                            let (status, result_text, denied_tools) =
+                                execute_child_task(
+                                    &child_runtime,
+                                    &session_id,
+                                    &task,
+                                    task_timeout,
+                                )
+                                .await;
 
-                        match result {
-                            Ok((events, outcome)) => {
-                                let result_text = outcome::build_child_result(&outcome, &events);
-                                let denied_tools = outcome::collect_denied_tools(&events);
-                                mailbox.post_result(MailboxResult {
-                                    agent_path: agent_path.clone(),
-                                    status: MailboxStatus::Ok,
-                                    result: Some(result_text),
-                                    denied_tools,
-                                });
-                            }
-                            Err(e) => {
-                                mailbox.post_result(MailboxResult {
-                                    agent_path: agent_path.clone(),
-                                    status: MailboxStatus::Error,
-                                    result: Some(e.to_string()),
-                                    denied_tools: vec![],
-                                });
+                            // Peek the next queued task BEFORE posting: the
+                            // status the watcher sees when it wakes on this
+                            // post's seq bump must reflect the queue. With a
+                            // queued task → Running (a later post will re-wake
+                            // it, so holding this result cannot hang the
+                            // batch). Queue empty → Done (Done-before-post,
+                            // the fan-in invariant: a bare `set_status` never
+                            // bumps the seq, so posting in Done state is what
+                            // makes "result drained ⇒ producer quiescent"
+                            // hold for the final task).
+                            let next = task_rx.try_recv().ok();
+                            let new_status = if next.is_some() {
+                                AgentStatus::Running
+                            } else {
+                                AgentStatus::Done
+                            };
+                            registry
+                                .lock()
+                                .unwrap()
+                                .set_status(&agent_path, new_status);
+                            mailbox.post_result(MailboxResult {
+                                agent_path: agent_path.clone(),
+                                status,
+                                result: result_text,
+                                denied_tools,
+                            });
+                            match next {
+                                Some(t) => task = t,
+                                None => break,
                             }
                         }
                     }

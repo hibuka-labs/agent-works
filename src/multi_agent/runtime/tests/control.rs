@@ -107,7 +107,7 @@ async fn budget_cumulative_cap_survives_close() {
         },
         Arc::new(StreamingStub),
     );
-    ma.spawn_child("a", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("a", "prompt".to_string() , 0, false, vec![])
         .await
         .expect("first spawn allowed");
     assert_eq!(ma.control().budget().spawn_count(), 1);
@@ -121,7 +121,7 @@ async fn budget_cumulative_cap_survives_close() {
     .await;
 
     let err = ma
-        .spawn_child("b", "prompt".to_string(), 0, 0, false, vec![])
+        .spawn_child("b", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap_err();
     // Legacy string shape: the budget error surfaces as plain text.
@@ -188,7 +188,7 @@ async fn token_budget_metered_by_turn_end_hook() {
         },
         Arc::new(UsageStreamingStub),
     );
-    ma.spawn_child("a", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("a", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap();
     for task in ["t1", "t2"] {
@@ -200,7 +200,7 @@ async fn token_budget_metered_by_turn_end_hook() {
     assert_eq!(ma.control().budget().used_tokens(), 160);
 
     let err = ma
-        .spawn_child("b", "prompt".to_string(), 0, 0, false, vec![])
+        .spawn_child("b", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap_err();
     assert_eq!(err, "child token budget exhausted (160 / 100)");
@@ -220,7 +220,7 @@ async fn task_timeout_reports_error_and_child_survives() {
         },
         Arc::new(HangingLlm),
     );
-    ma.spawn_child("slow", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("slow", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap();
     ma.send_task("root/slow", "hang".to_string(), false)

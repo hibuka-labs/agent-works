@@ -192,6 +192,16 @@ pub struct MultiAgentConfig {
     /// meant to write (the codex-style symmetric model).
     pub child_read_only: bool,
 
+    /// Fork-history policy applied to every spawn, replacing the per-spawn
+    /// LLM-supplied `fork_history` argument (removed from the tool schema —
+    /// the LLM should not control context inheritance).
+    ///
+    /// `None` (default) = no pre-fill; the child starts fresh. `"all"` forks
+    /// the full parent history; a number N (`Some("5")`) forks the last N
+    /// turns. The value is passed through verbatim to
+    /// `resolve_fork_history`, which validates it.
+    pub child_fork_history: Option<String>,
+
     /// Control-plane limits (token budget, cumulative spawns, live
     /// concurrency, per-task timeout). All `None` by default — behaviour
     /// unchanged unless a knob is explicitly set (see [`ControlConfig`]).
@@ -208,6 +218,7 @@ impl Default for MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            child_fork_history: None,
             control: ControlConfig::default(),
         }
     }
@@ -232,6 +243,7 @@ impl MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            child_fork_history: None,
             control: ControlConfig::default(),
         }
     }

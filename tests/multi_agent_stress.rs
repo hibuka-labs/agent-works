@@ -144,6 +144,22 @@ async fn thousand_round_spawn_work_close_conserves_everything() {
     let st = rt.control().status();
     assert!(rt.list_agents().is_empty(), "registry must end empty");
     assert!(rt.mailbox().is_empty(), "mailbox hub must end empty");
+    // P2 tombstones: each round's close posted one Closed notification and
+    // nothing consumed it (this test runs no watcher). Conservation means
+    // unregister preserves it as a readable tombstone — not that it vanishes.
+    {
+        use agent_works::multi_agent::mailbox::MailboxStatus;
+        let mut closed = 0;
+        while let Some(result) = rt.mailbox().try_recv_any() {
+            assert_eq!(
+                result.status,
+                MailboxStatus::Closed,
+                "only close notifications may remain"
+            );
+            closed += 1;
+        }
+        assert_eq!(closed, ITERS, "every close leaves exactly one readable Closed");
+    }
     assert_eq!(rt.mailbox().total_pending_results(), 0);
     assert_eq!(st.live_children, 0, "every concurrency slot returned");
     // Cumulative semantics (§7.2): committed spawns are never given back.
@@ -288,7 +304,17 @@ async fn mixed_lifecycle_chaos_conserves_everything() {
     }
 
     poll_until("all closed children gone", || rt.list_agents().is_empty()).await;
-    assert_eq!(rt.mailbox().total_pending_results(), 0);
+    // P2 tombstones: every chaos close posted a Closed notification; with no
+    // watcher running they remain readable tombstones until drained here.
+    {
+        use agent_works::multi_agent::mailbox::MailboxStatus;
+        let mut closed = 0;
+        while let Some(result) = rt.mailbox().try_recv_any() {
+            assert_eq!(result.status, MailboxStatus::Closed);
+            closed += 1;
+        }
+        assert_eq!(closed, CHAOS, "every chaos close leaves one readable Closed");
+    }
     let st = rt.control().status();
     assert!(rt.list_agents().is_empty());
     assert!(rt.mailbox().is_empty(), "no orphan mailboxes after chaos");

@@ -45,6 +45,20 @@ pub struct ChildConfig {
     /// `child_permission_mode = PerSpawn`; keeping the knob does not open a
     /// privilege door for the LLM, see design §10.1 B4).
     pub full_permission: Option<bool>,
+
+    /// Requested model override for this child, verbatim from the spawn
+    /// arguments (`spawn_agent`'s `model` field). `None` = inherit the
+    /// parent's model (the only behaviour today).
+    ///
+    /// TODO(layer-3): **currently inert.** The model name is baked into the
+    /// shared `LlmProvider` (`LlmConfig.model` → `create_provider`), and
+    /// `llm_trait::ChatRequest` has no per-request model field, so there is
+    /// no route for this value to influence LLM calls yet. Layer-3 work:
+    /// add `ChatRequest.model: Option<String>` (llm-trait), honour it in
+    /// each protocol (llm-providers), then thread this field into the child
+    /// builder. Until then this exists only to accept and carry the LLM's
+    /// choice so the schema does not churn again.
+    pub model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +79,7 @@ mod tests {
         assert!(c.max_turns.is_none());
         assert!(c.context_window.is_none());
         assert!(c.full_permission.is_none());
+        assert!(c.model.is_none());
     }
 
     #[test]

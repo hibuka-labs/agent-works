@@ -243,6 +243,7 @@ mod tests {
                 max_turns: Some(32),
                 context_window: Some(4096),
                 full_permission: Some(true),
+                ..Default::default()
             },
         )
     }

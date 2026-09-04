@@ -6,7 +6,8 @@
 
 use agent_base::{RunOutcome, RuntimeEvent};
 
-use crate::multi_agent::mailbox::MailboxTask;
+use crate::multi_agent::mailbox::{MailboxResult, MailboxStatus, MailboxTask};
+use super::watcher::ChildReport;
 
 /// Build the input text for a child agent from a mailbox task.
 pub(super) fn build_child_input(task: &MailboxTask) -> String {
@@ -104,5 +105,47 @@ pub(super) fn build_child_result(outcome: &RunOutcome, events: &[RuntimeEvent]) 
             }
         }
         _ => summarize_outcome(outcome),
+    }
+}
+
+/// Format a [`MailboxResult`] into a [`ChildReport`] for the watcher's batch.
+///
+/// Builds a human-readable message that can be injected into the parent agent's
+/// context as a synthetic user message when the fan-in batch completes.
+pub fn format_child_result(result: &MailboxResult) -> ChildReport {
+    let status_str = match &result.status {
+        MailboxStatus::Ok => "ok",
+        MailboxStatus::Error => "error",
+        MailboxStatus::Closed => "closed",
+    };
+
+    let result_text = result.result.as_deref().unwrap_or("");
+    let path = result.agent_path.to_string();
+
+    let message = match &result.status {
+        MailboxStatus::Ok => {
+            if result_text.is_empty() {
+                format!("[子 agent {} 已完成]", path)
+            } else {
+                format!("[子 agent {} 已完成]\n{}", path, result_text)
+            }
+        }
+        MailboxStatus::Error => {
+            if result_text.is_empty() {
+                format!("[子 agent {} 执行出错]", path)
+            } else {
+                format!("[子 agent {} 执行出错]\n{}", path, result_text)
+            }
+        }
+        MailboxStatus::Closed => {
+            format!("[子 agent {} 已关闭]", path)
+        }
+    };
+
+    ChildReport {
+        agent_path: path,
+        status: status_str.to_string(),
+        result: result.result.clone(),
+        message,
     }
 }

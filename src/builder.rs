@@ -398,6 +398,23 @@ impl AgentBuilder {
         }
     }
 
+    /// Build the runtime and return the multi-agent runtime (if enabled).
+    ///
+    /// Same as [`build`](Self::build) but also returns the `MultiAgentRuntime`
+    /// created during setup. Callers that need to start the watcher task or
+    /// access the mailbox should use this method.
+    #[cfg(feature = "multi_agent")]
+    pub fn build_with_ma(self) -> AgentResult<(AgentRuntime, Option<Arc<MultiAgentRuntime>>)> {
+        #[cfg(feature = "skill")]
+        {
+            self.build_with_skills_ma()
+        }
+        #[cfg(not(feature = "skill"))]
+        {
+            self.build_inner_ma()
+        }
+    }
+
     #[allow(dead_code, unused_mut)]
     fn build_inner(mut self) -> AgentResult<AgentRuntime> {
         // Inject default guard if none was set by the consumer.
@@ -460,6 +477,60 @@ impl AgentBuilder {
         }
 
         Ok(runtime)
+    }
+
+    /// Like `build_inner` but also returns the `MultiAgentRuntime`.
+    #[cfg(feature = "multi_agent")]
+    #[allow(dead_code, unused_mut)]
+    fn build_inner_ma(mut self) -> AgentResult<(AgentRuntime, Option<Arc<MultiAgentRuntime>>)> {
+        if self.inner.get_guard().is_none() {
+            self.inner = self
+                .inner
+                .guard(crate::guard::DefaultGuard::with_llm_client(
+                    crate::guard::DefaultGuardConfig::default(),
+                    self.client.clone(),
+                ));
+        }
+
+        let lang = self.language.clone().unwrap_or_default();
+        let business_tools = std::mem::take(&mut self.business_tools);
+        let error_recovery = self.error_recovery.clone();
+        let tool_names = self.tool_names.clone();
+        let ma_config = self.multi_agent_config.clone();
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
+
+        if ma_config.as_ref().map(|c| c.enabled).unwrap_or(false) {
+            let ma_prompt = build_multi_agent_system_prompt();
+            let new_prompt = match self.system_prompt.take() {
+                Some(existing) => format!("{}\n\n---\n\n{}", existing, ma_prompt),
+                None => ma_prompt,
+            };
+            self.inner = self.inner.system_prompt(new_prompt);
+        }
+
+        if let Some(compactor) = self.context_compactor.take() {
+            self.inner = self.inner.context_compactor(compactor);
+        }
+
+        let runtime = self.inner.build()?;
+
+        let ma_runtime_out = if let Some(config) = ma_config
+            && config.enabled
+        {
+            Some(setup_multi_agent(
+                &runtime,
+                config,
+                lang,
+                business_tools,
+                error_recovery,
+                &tool_names,
+                ma_tool_factory,
+            )?)
+        } else {
+            None
+        };
+
+        Ok((runtime, ma_runtime_out))
     }
 
     /// Build the runtime with skill support.
@@ -596,6 +667,117 @@ impl AgentBuilder {
 
         Ok(runtime)
     }
+
+    /// Like `build_with_skills` but also returns the `MultiAgentRuntime`.
+    #[cfg(all(feature = "skill", feature = "multi_agent"))]
+    fn build_with_skills_ma(mut self) -> AgentResult<(AgentRuntime, Option<Arc<MultiAgentRuntime>>)> {
+        if self.inner.get_guard().is_none() {
+            self.inner = self
+                .inner
+                .guard(crate::guard::DefaultGuard::with_llm_client(
+                    crate::guard::DefaultGuardConfig::default(),
+                    self.client.clone(),
+                ));
+        }
+
+        let mut ab = self.inner;
+        let lang = self.language.clone().unwrap_or_default();
+        let business_tools = std::mem::take(&mut self.business_tools);
+        let error_recovery = self.error_recovery.clone();
+        let tool_names = self.tool_names.clone();
+        let ma_config = self.multi_agent_config.clone();
+        let ma_tool_factory = self.multi_agent_tool_factory.take();
+
+        // Process skills
+        if !self.skills.is_empty() {
+            let prompter: Arc<dyn SkillPrompter> = self
+                .skill_prompter
+                .take()
+                .unwrap_or_else(|| Arc::new(LazySkillPrompter::new()));
+
+            let mut skill_refs: Vec<Arc<dyn Skill>> = Vec::new();
+
+            for skill in self.skills {
+                for tool in skill.tools() {
+                    let tool_name = tool.name().to_string();
+                    if self.tool_names.contains(&tool_name) {
+                        return Err(agent_base::AgentError::internal(format!(
+                            "Tool name conflict: `{}` (Skill `{}`)",
+                            tool_name,
+                            skill.name()
+                        )));
+                    }
+                    self.tool_names.insert(tool_name);
+                    ab = ab.register_tool_arc(tool);
+                }
+                skill_refs.push(skill);
+            }
+
+            if !self.disable_skill_prompt_injection {
+                let skill_prompt = prompter.build_prompt(&skill_refs, &self.skill_detail_tool_name);
+                if !skill_prompt.is_empty() {
+                    let new_prompt = match self.system_prompt.take() {
+                        Some(existing) => format!("{}\n\n---\n\n{}", existing, skill_prompt),
+                        None => skill_prompt,
+                    };
+                    self.system_prompt = Some(new_prompt.clone());
+                    ab = ab.system_prompt(new_prompt);
+                }
+            }
+
+            if let Some(factory) = self.skill_detail_tool_factory.take() {
+                let detail_tool = factory(skill_refs.clone(), self.skill_detail_tool_name);
+                ab = ab.register_tool_arc(detail_tool);
+            }
+
+            if let Some(factory) = self.list_skills_tool_factory.take() {
+                let registry = Arc::new(crate::skill::SkillRegistry::new());
+                for skill in &skill_refs {
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            registry.register(skill.clone()).await;
+                        })
+                    });
+                }
+                let list_tool = factory(registry);
+                ab = ab.register_tool_arc(list_tool);
+            }
+        }
+
+        // Inject multi-agent prompt
+        if ma_config.as_ref().map(|c| c.enabled).unwrap_or(false) {
+            let ma_prompt = build_multi_agent_system_prompt();
+            let new_prompt = match self.system_prompt.take() {
+                Some(existing) => format!("{}\n\n---\n\n{}", existing, ma_prompt),
+                None => ma_prompt,
+            };
+            ab = ab.system_prompt(new_prompt);
+        }
+
+        if let Some(compactor) = self.context_compactor.take() {
+            ab = ab.context_compactor(compactor);
+        }
+
+        let runtime = ab.build()?;
+
+        let ma_runtime_out = if let Some(config) = ma_config
+            && config.enabled
+        {
+            Some(setup_multi_agent(
+                &runtime,
+                config,
+                lang,
+                business_tools,
+                error_recovery,
+                &tool_names,
+                ma_tool_factory,
+            )?)
+        } else {
+            None
+        };
+
+        Ok((runtime, ma_runtime_out))
+    }
 }
 
 /// Set up the MultiAgentRuntime, event bridge, and register tools on an already-built runtime.
@@ -674,11 +856,14 @@ You can spawn sub-agents to work on tasks concurrently. Each sub-agent is an ind
 
 ### Tools
 
-- `spawn_agent`: Create a sub-agent. Use the `task` field to describe what you want done — the sub-agent will figure out the steps. Example: `spawn_agent({task_name: "analyze-codex", task: "analyze the codex project structure and output a structured report", message: "start analysis"})`.
-- `wait_agent`: Wait for a sub-agent's result.
-- `send_message`: Send follow-up context or tasks to a sub-agent.
-- `list_agents`: List active sub-agents and their status.
+- `spawn_agent`: Create a sub-agent. Use the `task` field to describe what you want done — the sub-agent will figure out the steps. Example: `spawn_agent({task_name: "analyze-codex", task: "analyze the codex project structure and output a structured report"})`.
+- `send_message`: Send follow-up context or tasks to a sub-agent (`trigger: true` starts execution).
+- `list_agents`: List active sub-agents with their assigned task and status — use it to answer "what is agent X doing?".
 - `close_agent`: Close a sub-agent when done.
+
+### How Results Reach You
+
+Sub-agent results are **pushed into your context automatically** when they complete — there is no wait tool. To wait, simply end your turn: you will be woken with the result as a new message. Keep working on other things instead of polling.
 
 ### How Sub-Agents Work
 
@@ -1093,12 +1278,15 @@ mod tests {
         assert!(prompt.contains("spawn_agent"));
         assert!(prompt.contains("send_message"));
         assert!(prompt.contains("trigger"));
-        assert!(prompt.contains("wait_agent"));
         assert!(prompt.contains("list_agents"));
         assert!(prompt.contains("close_agent"));
         // followup_task is gone (§8.3) — guidance must not advertise a tool
         // the factory no longer registers.
         assert!(!prompt.contains("followup_task"));
+        // wait_agent is gone too — results are pushed, the parent waits by
+        // ending its turn.
+        assert!(!prompt.contains("wait_agent"));
+        assert!(prompt.contains("pushed into your context automatically"));
     }
 
     #[cfg(feature = "multi_agent")]
@@ -1107,7 +1295,7 @@ mod tests {
         let prompt = build_multi_agent_system_prompt();
         assert!(prompt.contains("When to Spawn"));
         assert!(prompt.contains("When NOT to Spawn"));
-        assert!(prompt.contains("Communication Pattern"));
+        assert!(prompt.contains("How Results Reach You"));
     }
 
     // ── without_multi_agent ──

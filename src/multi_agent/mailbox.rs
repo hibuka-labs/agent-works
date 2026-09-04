@@ -108,6 +108,12 @@ struct MailboxEntry {
 /// via `Arc<MailboxHub>`.
 pub struct MailboxHub {
     entries: Mutex<HashMap<AgentPath, MailboxEntry>>,
+    /// Results orphaned by `unregister` — queued results that outlived their
+    /// entry. `ChildCleanup::drop` posts `Closed` and then unregisters in the
+    /// same synchronous poll, so the watcher cannot drain in between; without
+    /// this tombstone list those results (close notifications, and any task
+    /// result completed after a close) were silently discarded.
+    tombstones: Mutex<Vec<MailboxResult>>,
     seq_tx: watch::Sender<u64>,
     seq_rx: watch::Receiver<u64>,
 }
@@ -118,6 +124,7 @@ impl MailboxHub {
         let (seq_tx, seq_rx) = watch::channel(0);
         Self {
             entries: Mutex::new(HashMap::new()),
+            tombstones: Mutex::new(Vec::new()),
             seq_tx,
             seq_rx,
         }
@@ -146,8 +153,12 @@ impl MailboxHub {
 
     /// Unregister an agent mailbox.
     ///
-    /// Bumps the global sequence number (to wake waiters), then removes the
-    /// entry — discarding any results still queued in it.
+    /// Queued-but-unread results are moved to the tombstone list (not
+    /// discarded) so a consumer that only wakes after the removal — the
+    /// watcher task, which cannot be scheduled between `post_result(Closed)`
+    /// and `unregister` inside `ChildCleanup::drop`'s synchronous block —
+    /// still observes them. It bumps the global sequence number (to wake
+    /// waiters), then removes the entry.
     ///
     /// It does **not** post a `Closed` result itself (the old doc-comment
     /// claimed otherwise while the code never did — defect K1 in the design
@@ -164,7 +175,9 @@ impl MailboxHub {
             // Wake waiters with sequence bump
             let current = *self.seq_rx.borrow();
             let _ = self.seq_tx.send(current.wrapping_add(1));
-            entries.remove(agent_path);
+            let entry = entries.remove(agent_path).expect("entry checked above");
+            // Preserve unread results — see the doc comment above.
+            self.tombstones.lock().unwrap().extend(entry.results);
             true
         } else {
             false
@@ -238,21 +251,26 @@ impl MailboxHub {
 
     /// Try to receive a result for a specific agent (non-blocking).
     ///
-    /// Returns the oldest unread result for the agent, or `None`.
+    /// Returns the oldest unread result for the agent, or `None`. Also reads
+    /// tombstoned results (see `unregister`).
     pub fn try_recv_result(&self, agent_path: &AgentPath) -> Option<MailboxResult> {
         let mut entries = self.entries.lock().unwrap();
-        entries.get_mut(agent_path).and_then(|e| {
-            if e.results.is_empty() {
-                None
-            } else {
-                Some(e.results.remove(0))
+        if let Some(e) = entries.get_mut(agent_path) {
+            if !e.results.is_empty() {
+                return Some(e.results.remove(0));
             }
-        })
+        }
+        let mut tombstones = self.tombstones.lock().unwrap();
+        tombstones
+            .iter()
+            .position(|r| &r.agent_path == agent_path)
+            .map(|i| tombstones.remove(i))
     }
 
     /// Try to receive any result (non-blocking).
     ///
-    /// Returns the first available result from any agent mailbox.
+    /// Returns the first available result from any agent mailbox, including
+    /// tombstoned results orphaned by `unregister`.
     pub fn try_recv_any(&self) -> Option<MailboxResult> {
         let mut entries = self.entries.lock().unwrap();
         for entry in entries.values_mut() {
@@ -260,22 +278,35 @@ impl MailboxHub {
                 return Some(entry.results.remove(0));
             }
         }
-        None
+        let mut tombstones = self.tombstones.lock().unwrap();
+        if tombstones.is_empty() {
+            None
+        } else {
+            Some(tombstones.remove(0))
+        }
     }
 
-    /// Check if an agent has unread results.
+    /// Check if an agent has unread results (including tombstones).
     pub fn has_results(&self, agent_path: &AgentPath) -> bool {
         let entries = self.entries.lock().unwrap();
-        entries
+        if entries
             .get(agent_path)
             .map(|e| !e.results.is_empty())
             .unwrap_or(false)
+        {
+            return true;
+        }
+        let tombstones = self.tombstones.lock().unwrap();
+        tombstones.iter().any(|r| &r.agent_path == agent_path)
     }
 
-    /// Return the total number of unread results across all agents.
+    /// Return the total number of unread results across all agents
+    /// (including tombstones).
     pub fn total_pending_results(&self) -> usize {
         let entries = self.entries.lock().unwrap();
-        entries.values().map(|e| e.results.len()).sum()
+        let total = entries.values().map(|e| e.results.len()).sum::<usize>();
+        let tombstones = self.tombstones.lock().unwrap();
+        total + tombstones.len()
     }
 
     /// Check if an agent is registered.
@@ -448,6 +479,44 @@ mod tests {
 
         assert!(seq.has_changed().unwrap());
         assert_ne!(*seq.borrow(), initial);
+    }
+
+    #[test]
+    fn unregister_preserves_queued_results() {
+        // Regression (session 20260903_2438d139): `ChildCleanup::drop` posts
+        // `Closed` and then unregisters **in the same synchronous poll** — the
+        // watcher cannot be scheduled in between. If unregister discarded the
+        // queued results, every close notification (and any task result
+        // completed after a close) was silently lost.
+        let hub = MailboxHub::new();
+        let path = test_path("tomb");
+        hub.register(&path);
+
+        hub.post_result(MailboxResult {
+            agent_path: path.clone(),
+            status: MailboxStatus::Ok,
+            result: Some("late report".into()),
+            denied_tools: vec![],
+        });
+        hub.post_result(MailboxResult {
+            agent_path: path.clone(),
+            status: MailboxStatus::Closed,
+            result: None,
+            denied_tools: vec![],
+        });
+
+        assert!(hub.unregister(&path));
+
+        // The queued results must still be observable after removal.
+        let r1 = hub.try_recv_any().expect("ok result survives unregister");
+        assert_eq!(r1.status, MailboxStatus::Ok);
+        assert_eq!(r1.result.as_deref(), Some("late report"));
+
+        let r2 = hub.try_recv_any().expect("closed survives unregister");
+        assert_eq!(r2.status, MailboxStatus::Closed);
+
+        assert!(hub.try_recv_any().is_none());
+        assert_eq!(hub.total_pending_results(), 0);
     }
 
     #[test]

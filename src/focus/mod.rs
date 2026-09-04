@@ -12,5 +12,7 @@
 //! is good, even a weak model can do one thing well.
 
 mod core;
+mod progress;
 
 pub use core::{Context, Focus, FocusError, FocusInput, FocusOutput};
+pub use progress::{ProgressSummarizer, DEFAULT_SUMMARY_TIMEOUT};

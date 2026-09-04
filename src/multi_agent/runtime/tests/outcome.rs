@@ -210,3 +210,66 @@ fn test_build_child_input_single_message() {
     let out = build_child_input(&task);
     assert_eq!(out, "[Message]: hint\n\n[Task]: final task");
 }
+
+// ── format_child_result ──
+
+use crate::multi_agent::mailbox::{MailboxResult, MailboxStatus};
+use crate::multi_agent::path::AgentPath;
+
+#[test]
+fn test_format_child_result_ok_with_text() {
+    let result = MailboxResult {
+        agent_path: AgentPath::parse("root/worker").unwrap(),
+        status: MailboxStatus::Ok,
+        result: Some("found 3 files".to_string()),
+        denied_tools: vec![],
+    };
+    let event = format_child_result(&result);
+    assert_eq!(event.agent_path, "root/worker");
+    assert_eq!(event.status, "ok");
+    assert_eq!(event.result.as_deref(), Some("found 3 files"));
+    assert!(event.message.contains("root/worker"));
+    assert!(event.message.contains("已完成"));
+    assert!(event.message.contains("found 3 files"));
+}
+
+#[test]
+fn test_format_child_result_ok_empty() {
+    let result = MailboxResult {
+        agent_path: AgentPath::parse("root/helper").unwrap(),
+        status: MailboxStatus::Ok,
+        result: None,
+        denied_tools: vec![],
+    };
+    let event = format_child_result(&result);
+    assert_eq!(event.status, "ok");
+    assert!(event.message.contains("已完成"));
+    assert!(!event.message.contains("\n")); // no trailing newline for empty result
+}
+
+#[test]
+fn test_format_child_result_error() {
+    let result = MailboxResult {
+        agent_path: AgentPath::parse("root/worker").unwrap(),
+        status: MailboxStatus::Error,
+        result: Some("timeout".to_string()),
+        denied_tools: vec![],
+    };
+    let event = format_child_result(&result);
+    assert_eq!(event.status, "error");
+    assert!(event.message.contains("出错"));
+    assert!(event.message.contains("timeout"));
+}
+
+#[test]
+fn test_format_child_result_closed() {
+    let result = MailboxResult {
+        agent_path: AgentPath::parse("root/worker").unwrap(),
+        status: MailboxStatus::Closed,
+        result: None,
+        denied_tools: vec![],
+    };
+    let event = format_child_result(&result);
+    assert_eq!(event.status, "closed");
+    assert!(event.message.contains("已关闭"));
+}

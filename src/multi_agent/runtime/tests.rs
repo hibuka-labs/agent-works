@@ -53,8 +53,7 @@ impl agent_base::llm_trait::LlmProvider for StreamingStub {
     }
 }
 
-fn make_ma_runtime() -> Arc<MultiAgentRuntime> {
-    let client: Arc<dyn agent_base::llm_trait::LlmProvider> = Arc::new(StreamingStub);
+fn make_ma_runtime_with(client: Arc<dyn agent_base::llm_trait::LlmProvider>) -> Arc<MultiAgentRuntime> {
     Arc::new(MultiAgentRuntime::new(
         MultiAgentConfig::enabled(),
         client,
@@ -65,6 +64,10 @@ fn make_ma_runtime() -> Arc<MultiAgentRuntime> {
         None,
         None,
     ))
+}
+
+fn make_ma_runtime() -> Arc<MultiAgentRuntime> {
+    make_ma_runtime_with(Arc::new(StreamingStub))
 }
 
 struct NoopReadFileTool;
@@ -136,6 +139,58 @@ impl agent_base::llm_trait::LlmProvider for HangingLlm {
         agent_base::llm_trait::ProviderInfo {
             name: "hanging".to_string(),
             model: "hanging".to_string(),
+            version: None,
+        }
+    }
+}
+
+/// Provider whose stream completes after a short delay — keeps the child
+/// inside `run_turn` long enough for a mid-task `close_agent`, then lets the
+/// task finish (close is only honored between tasks, so the late result must
+/// still be delivered).
+struct DelayedStub;
+
+#[async_trait::async_trait]
+impl agent_base::llm_trait::LlmProvider for DelayedStub {
+    async fn stream(
+        &self,
+        _request: agent_base::llm_trait::ChatRequest,
+    ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
+            futures_util::stream::iter(vec![
+                Ok(agent_base::StreamChunk::Text("late ok".to_string())),
+                Ok(agent_base::StreamChunk::Stop {
+                    finish_reason: Some("stop".to_string()),
+                }),
+            ]),
+        )))
+    }
+
+    async fn chat(
+        &self,
+        _request: agent_base::llm_trait::ChatRequest,
+    ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        Ok(agent_base::llm_trait::ChatResponse {
+            content: "late ok".to_string(),
+            tool_calls: vec![],
+            usage: agent_base::llm_trait::types::UsageInfo::default(),
+            finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
+            raw: None,
+            reasoning_content: None,
+            thinking_signature: None,
+        })
+    }
+
+    fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
+        agent_base::llm_trait::Capabilities::default()
+    }
+
+    fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+        agent_base::llm_trait::ProviderInfo {
+            name: "delayed".to_string(),
+            model: "delayed".to_string(),
             version: None,
         }
     }

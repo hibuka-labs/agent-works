@@ -66,7 +66,7 @@ async fn child_cleanup_normal_exit_releases_all_resources() {
     let mailbox = Arc::clone(&ma.mailbox);
     let path = AgentPath::root().join("w");
 
-    ma.spawn_child("w", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap();
     assert_eq!(limiter.current(), 1, "slot held while child is live");
@@ -109,7 +109,7 @@ async fn child_cleanup_panic_releases_all_resources() {
     let limiter = Arc::clone(&ma.limiter);
     let registry = Arc::clone(&ma.registry);
 
-    ma.spawn_child("w", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap();
     assert_eq!(limiter.current(), 1);
@@ -139,7 +139,7 @@ async fn child_cleanup_parent_drop_releases_all_resources() {
     let mailbox = Arc::clone(&ma.mailbox);
     let path = AgentPath::root().join("w");
 
-    ma.spawn_child("w", "prompt".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
         .await
         .unwrap();
     ma.send_task("root/w", "work".to_string(), false).unwrap();
@@ -165,12 +165,12 @@ async fn child_cleanup_parent_drop_releases_all_resources() {
 async fn concurrency_gate_failure_rolls_back_registry() {
     let ma = make_ma_runtime_concurrent(1, Arc::new(StreamingStub));
 
-    ma.spawn_child("a", "p".to_string(), 0, 0, false, vec![])
+    ma.spawn_child("a", "p".to_string() , 0, false, vec![])
         .await
         .unwrap();
 
     let err = ma
-        .spawn_child("b", "p".to_string(), 0, 0, false, vec![])
+        .spawn_child("b", "p".to_string() , 0, false, vec![])
         .await
         .unwrap_err();
     assert!(

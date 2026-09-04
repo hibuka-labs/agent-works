@@ -115,6 +115,7 @@ pub struct FocusOutput<T> {
 ///     .add("screen", screen);
 /// let output = status_focus.ask::<TaskStatus>(&ctx, 5s).await?;
 /// ```
+#[derive(Clone)]
 pub struct Focus {
     client: Arc<dyn agent_base::llm_trait::LlmProvider>,
     system_prompt: String,

@@ -5,6 +5,7 @@
 //! (`idle → running → done`).
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use super::config::MultiAgentConfig;
 use super::path::AgentPath;
@@ -33,8 +34,22 @@ pub struct AgentEntry {
     pub status: AgentStatus,
     /// Depth from root (root=0, direct child=1, etc.).
     pub depth: i32,
-    /// Number of tools registered on this agent (for `list_agents` output).
-    pub tool_count: usize,
+    /// Tool calls the agent has actually executed (monotonic). Surfaced by
+    /// `list_agents` so the parent can distinguish "working" from "stalled":
+    /// a live agent's count grows; a frozen count with a stale
+    /// `last_activity` is the real stall signal.
+    ///
+    /// (This deliberately replaced the former static `tool_count` — the size
+    /// of the child's tool *inventory*, fixed at spawn — which the parent
+    /// misread as progress: "stuck at 9 tool calls".)
+    pub tool_calls: usize,
+    /// Last observed activity (task start or tool call). `None` until the
+    /// agent receives its first task.
+    pub last_activity: Option<Instant>,
+    /// The task the agent is currently assigned (first `send_task` wins).
+    /// Recorded so `list_agents` can show *what* each agent is doing, not
+    /// just its lifecycle status.
+    pub task: Option<String>,
 }
 
 /// Errors that can occur during spawn attempts.
@@ -126,12 +141,7 @@ impl AgentRegistry {
     ///
     /// Returns `Ok(())` on success, or a [`SpawnError`] if limits are exceeded
     /// or the path already exists.
-    pub fn register(
-        &mut self,
-        path: &AgentPath,
-        depth: i32,
-        tool_count: usize,
-    ) -> Result<(), SpawnError> {
+    pub fn register(&mut self, path: &AgentPath, depth: i32) -> Result<(), SpawnError> {
         self.can_spawn(depth)?;
 
         if self.agents.contains_key(path) {
@@ -144,7 +154,9 @@ impl AgentRegistry {
                 path: path.clone(),
                 status: AgentStatus::Idle,
                 depth,
-                tool_count,
+                tool_calls: 0,
+                last_activity: None,
+                task: None,
             },
         );
 
@@ -170,6 +182,62 @@ impl AgentRegistry {
             }
             None => false,
         }
+    }
+
+    /// Record the agent's assigned task (first write wins).
+    ///
+    /// `list_agents` surfaces this so the parent — and the user asking
+    /// "what is that agent doing?" — can tell agents apart by *what* they
+    /// were asked to do, not just by name and lifecycle status.
+    pub fn set_task(&mut self, path: &AgentPath, task: String) -> bool {
+        match self.agents.get_mut(path) {
+            Some(entry) => {
+                if entry.task.is_none() {
+                    entry.task = Some(task);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Mark the agent as active (liveness heartbeat) without counting a tool
+    /// call — used on task start, where there is work but no tool call yet.
+    ///
+    /// Returns `true` if the agent was found and updated.
+    pub fn touch(&mut self, path: &AgentPath) -> bool {
+        match self.agents.get_mut(path) {
+            Some(entry) => {
+                entry.last_activity = Some(Instant::now());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record one executed tool call: bumps the monotonic counter and the
+    /// activity timestamp.
+    ///
+    /// Called from the child event bridge on every `ToolCallStarted`, so
+    /// `list_agents` can show real progress (see [`AgentEntry::tool_calls`]).
+    /// Returns `true` if the agent was found and updated.
+    pub fn record_tool_call(&mut self, path: &AgentPath) -> bool {
+        match self.agents.get_mut(path) {
+            Some(entry) => {
+                entry.tool_calls += 1;
+                entry.last_activity = Some(Instant::now());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Number of agents currently executing a task (`Running`).
+    ///
+    /// The fan-in coordinator uses this as its quiescence signal: a batch of
+    /// results is complete when nothing is `Running` anymore.
+    pub fn running_count(&self) -> usize {
+        self.count_by_status(&AgentStatus::Running)
     }
 
     /// Get an agent entry by path.
@@ -231,14 +299,16 @@ mod tests {
         let mut reg = AgentRegistry::new(test_config());
         let path = test_path("worker");
 
-        assert!(reg.register(&path, 1, 5).is_ok());
+        assert!(reg.register(&path, 1).is_ok());
         assert_eq!(reg.count(), 1);
         assert!(reg.contains(&path));
 
         let entry = reg.get(&path).unwrap();
         assert_eq!(entry.status, AgentStatus::Idle);
         assert_eq!(entry.depth, 1);
-        assert_eq!(entry.tool_count, 5);
+        // Fresh agent: no tool calls executed, no activity yet.
+        assert_eq!(entry.tool_calls, 0);
+        assert!(entry.last_activity.is_none());
 
         let closed = reg.close(&path).unwrap();
         assert_eq!(closed.path, path);
@@ -251,9 +321,9 @@ mod tests {
         let mut reg = AgentRegistry::new(test_config());
         let path = test_path("worker");
 
-        assert!(reg.register(&path, 1, 3).is_ok());
+        assert!(reg.register(&path, 1).is_ok());
         assert_eq!(
-            reg.register(&path, 1, 3).unwrap_err(),
+            reg.register(&path, 1).unwrap_err(),
             SpawnError::AlreadyExists
         );
     }
@@ -263,10 +333,10 @@ mod tests {
         let config = MultiAgentConfig::with_limits(2, 1);
         let mut reg = AgentRegistry::new(config);
 
-        assert!(reg.register(&test_path("a"), 1, 1).is_ok());
-        assert!(reg.register(&test_path("b"), 1, 1).is_ok());
+        assert!(reg.register(&test_path("a"), 1).is_ok());
+        assert!(reg.register(&test_path("b"), 1).is_ok());
         assert_eq!(
-            reg.register(&test_path("c"), 1, 1).unwrap_err(),
+            reg.register(&test_path("c"), 1).unwrap_err(),
             SpawnError::MaxAgentsReached { max: 2 }
         );
     }
@@ -294,7 +364,7 @@ mod tests {
         let mut reg = AgentRegistry::new(test_config());
         let path = test_path("worker");
 
-        reg.register(&path, 1, 3).unwrap();
+        reg.register(&path, 1).unwrap();
         assert_eq!(reg.count_by_status(&AgentStatus::Idle), 1);
 
         reg.set_status(&path, AgentStatus::Running);
@@ -316,7 +386,7 @@ mod tests {
         let mut reg = AgentRegistry::new(config);
 
         let path = test_path("worker");
-        reg.register(&path, 1, 3).unwrap();
+        reg.register(&path, 1).unwrap();
         assert_eq!(reg.count(), 1);
 
         // Can't spawn another — quota full
@@ -331,13 +401,70 @@ mod tests {
     #[test]
     fn list_sorted() {
         let mut reg = AgentRegistry::new(test_config());
-        reg.register(&test_path("b"), 1, 1).unwrap();
-        reg.register(&test_path("a"), 1, 1).unwrap();
+        reg.register(&test_path("b"), 1).unwrap();
+        reg.register(&test_path("a"), 1).unwrap();
 
         let list = reg.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].path.name(), "a");
         assert_eq!(list[1].path.name(), "b");
+    }
+
+    #[test]
+    fn tool_call_counter_is_monotonic() {
+        // Session 20260903_0cf95e79 regression: list_agents showed a frozen
+        // `tool_count: 9` (static inventory size) while the children actually
+        // executed 100+ calls — the parent read it as "stuck". The executed
+        // count must start at zero and only grow.
+        let mut reg = AgentRegistry::new(test_config());
+        let path = test_path("worker");
+        reg.register(&path, 1).unwrap();
+
+        for _ in 0..3 {
+            assert!(reg.record_tool_call(&path));
+        }
+        assert_eq!(reg.get(&path).unwrap().tool_calls, 3);
+        assert!(reg.get(&path).unwrap().last_activity.is_some());
+
+        assert!(reg.record_tool_call(&path));
+        assert_eq!(reg.get(&path).unwrap().tool_calls, 4);
+
+        // Unknown paths are a no-op (event bridge may race cleanup).
+        assert!(!reg.record_tool_call(&test_path("ghost")));
+    }
+
+    #[test]
+    fn touch_marks_activity_without_counting() {
+        let mut reg = AgentRegistry::new(test_config());
+        let path = test_path("worker");
+        reg.register(&path, 1).unwrap();
+
+        assert!(reg.touch(&path));
+        assert!(reg.get(&path).unwrap().last_activity.is_some());
+        assert_eq!(reg.get(&path).unwrap().tool_calls, 0);
+        assert!(!reg.touch(&test_path("ghost")));
+    }
+
+    #[test]
+    fn running_count_tracks_lifecycle() {
+        // Fan-in quiescence signal: the batch is complete when nothing is
+        // Running anymore (Done children awaiting close must not block it).
+        let mut reg = AgentRegistry::new(test_config());
+        let a = test_path("a");
+        let b = test_path("b");
+        reg.register(&a, 1).unwrap();
+        reg.register(&b, 1).unwrap();
+        assert_eq!(reg.running_count(), 0);
+
+        reg.set_status(&a, AgentStatus::Running);
+        reg.set_status(&b, AgentStatus::Running);
+        assert_eq!(reg.running_count(), 2);
+
+        reg.set_status(&a, AgentStatus::Done);
+        assert_eq!(reg.running_count(), 1);
+
+        reg.set_status(&b, AgentStatus::Done);
+        assert_eq!(reg.running_count(), 0);
     }
 
     #[test]

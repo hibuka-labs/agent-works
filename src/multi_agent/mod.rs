@@ -46,3 +46,4 @@ pub use limiter::{AgentExecutionLimiter, ExecutionSlot, LimiterError};
 pub use path::AgentPath;
 pub use preset::ChildPreset;
 pub use runtime::MultiAgentRuntime;
+pub use runtime::{ChildReport, ChildResultEvent};
