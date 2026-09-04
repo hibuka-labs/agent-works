@@ -24,9 +24,13 @@
 //!   cannot leak into a later generation's batch.
 //! - The Focus summary never gates the wake (session 20260903_d8fc41dc:
 //!   awaited summaries serialized their timeouts in front of the batch).
-//!   Ok/Error summaries run detached; their Progress event may therefore
-//!   arrive after the Batch event. Closed results need no summary and are
-//!   announced synchronously.
+//!   Ok/Error get a plain Progress notice synchronously, then the summary
+//!   runs detached and follows as a second Progress event whenever Focus
+//!   answers (or not at all on failure). A Progress event may therefore
+//!   arrive after the Batch event, and the same agent may Progress twice —
+//!   consumers must be idempotent (phimint's UI is: mark-finished is a
+//!   no-op on an already-finished entry). Closed results need no summary
+//!   and are announced synchronously.
 //! - Two ordering invariants keep every quiescence check well-timed:
 //!   the child loop sets `Done` *before* posting its FINAL task's result
 //!   (a bare `set_status` never bumps the mailbox seq — see `spawn.rs`;
@@ -63,13 +67,18 @@ pub struct ChildReport {
 #[derive(Clone, Debug)]
 pub enum ChildResultEvent {
     /// One child returned. User-facing progress only — never wakes the
-    /// parent agent.
+    /// parent agent. Emitted **twice** for Ok/Error results when a
+    /// summarizer is wired: first synchronously with `summary: None` (the
+    /// plain "已返回" notice, the moment the child returns), then once more
+    /// with the Focus summary when it lands (no second event on Focus
+    /// failure). Consumers must treat repeated Progress for the same
+    /// agent as idempotent.
     Progress {
         /// The child agent's path.
         agent_path: String,
         /// Status: "ok", "error", or "closed".
         status: String,
-        /// Short user-facing summary (Focus-generated). `None` → the
+        /// Focus-generated summary shown as a follow-up line. `None` → the
         /// consumer shows a plain notice.
         summary: Option<String>,
     },
@@ -163,6 +172,21 @@ pub fn spawn_watcher(
                             // an already-finished entry).
                             match (&summarizer, &r.status) {
                                 (Some(s), MailboxStatus::Ok | MailboxStatus::Error) => {
+                                    // Plain notice FIRST, synchronously: the
+                                    // user learns the child returned the
+                                    // moment it does (session
+                                    // 20260904_e6612477: one summary's 30 s
+                                    // Focus timeout delayed that child's only
+                                    // notice by 30 s). The Focus summary —
+                                    // when it lands — follows as a second
+                                    // Progress event; on Focus failure no
+                                    // second event is sent (the plain notice
+                                    // already covers it).
+                                    let _ = tx.send(ChildResultEvent::Progress {
+                                        agent_path: r.agent_path.to_string(),
+                                        status: status.to_string(),
+                                        summary: None,
+                                    });
                                     let task = registry
                                         .lock()
                                         .unwrap()
@@ -188,9 +212,9 @@ pub fn spawn_watcher(
                                             None => {
                                                 tracing::debug!(
                                                     agent = %agent_path,
-                                                    "progress summary unavailable, using plain notice"
+                                                    "progress summary unavailable — plain notice already sent"
                                                 );
-                                                None
+                                                return;
                                             }
                                         };
                                         let _ = tx.send(ChildResultEvent::Progress {
@@ -745,16 +769,22 @@ mod tests {
 
         finish_and_post(&fx, "a", MailboxStatus::Ok, Some("report text"));
 
-        // Order-free: the summary runs detached, so either event may arrive
-        // first — but both must arrive, and each must carry its payload.
+        // Three events, order-tolerant except for the plain-first rule: a
+        // synchronous plain Progress (summary None) precedes everything, the
+        // detached summary Progress and the Batch race each other, and each
+        // must arrive with its payload.
+        let mut saw_plain = false;
         let mut saw_summary = false;
         let mut batch_ok = false;
-        for _ in 0..2 {
+        for _ in 0..3 {
             match next_event(&mut fx).await {
                 ChildResultEvent::Progress { status, summary, .. } => {
                     assert_eq!(status, "ok");
-                    assert_eq!(summary.as_deref(), Some("mock 摘要"));
-                    saw_summary = true;
+                    match summary.as_deref() {
+                        None => saw_plain = true,
+                        Some("mock 摘要") => saw_summary = true,
+                        other => panic!("unexpected summary {other:?}"),
+                    }
                 }
                 ChildResultEvent::Batch { reports } => {
                     // The batch still carries the full report — Focus does
@@ -765,6 +795,7 @@ mod tests {
                 }
             }
         }
+        assert!(saw_plain, "synchronous plain Progress must arrive first-class");
         assert!(saw_summary, "Progress with summary must arrive");
         assert!(batch_ok, "Batch with full report must arrive");
         fx.cancel.cancel();
@@ -787,17 +818,27 @@ mod tests {
         let started = std::time::Instant::now();
         finish_and_post(&fx, "a", MailboxStatus::Ok, Some("report text"));
 
-        let mut batch_arrived = false;
-        // The first event must be the Batch (the summary is still sleeping),
-        // and it must arrive well under the summary's 500 ms delay.
+        // First: the synchronous plain Progress (summary None) — the child's
+        // return is announced immediately, never held hostage by Focus.
+        match next_event(&mut fx).await {
+            ChildResultEvent::Progress { summary, .. } => {
+                assert!(summary.is_none(), "first notice must be the plain one");
+            }
+            other => panic!("expected plain Progress first, got {other:?}"),
+        }
+
+        // Second: the Batch, well under the summary's 500 ms delay.
         match next_event(&mut fx).await {
             ChildResultEvent::Batch { reports } => {
-                batch_arrived = true;
                 assert_eq!(reports.len(), 1);
             }
-            ChildResultEvent::Progress { .. } => panic!("summary raced ahead of Batch"),
+            ChildResultEvent::Progress {
+                summary: Some(_), ..
+            } => panic!("summary raced ahead of Batch"),
+            ChildResultEvent::Progress { summary: None, .. } => {
+                panic!("only one plain Progress expected")
+            }
         }
-        assert!(batch_arrived);
         assert!(
             started.elapsed() < std::time::Duration::from_millis(400),
             "Batch must not wait for the summary (took {:?})",
