@@ -53,7 +53,9 @@ impl agent_base::llm_trait::LlmProvider for StreamingStub {
     }
 }
 
-fn make_ma_runtime_with(client: Arc<dyn agent_base::llm_trait::LlmProvider>) -> Arc<MultiAgentRuntime> {
+fn make_ma_runtime_with(
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+) -> Arc<MultiAgentRuntime> {
     Arc::new(MultiAgentRuntime::new(
         MultiAgentConfig::enabled(),
         client,

@@ -192,7 +192,7 @@ mod tests {
             agent_id: None,
             trace_id: None,
             denied: false,
-                            details: None,
+            details: None,
         };
         let agent_result = cep.handle(event);
         assert!(agent_result.is_ok());

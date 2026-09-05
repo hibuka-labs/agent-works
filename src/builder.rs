@@ -670,7 +670,9 @@ impl AgentBuilder {
 
     /// Like `build_with_skills` but also returns the `MultiAgentRuntime`.
     #[cfg(all(feature = "skill", feature = "multi_agent"))]
-    fn build_with_skills_ma(mut self) -> AgentResult<(AgentRuntime, Option<Arc<MultiAgentRuntime>>)> {
+    fn build_with_skills_ma(
+        mut self,
+    ) -> AgentResult<(AgentRuntime, Option<Arc<MultiAgentRuntime>>)> {
         if self.inner.get_guard().is_none() {
             self.inner = self
                 .inner

@@ -339,9 +339,9 @@ pub fn spawn_watcher_with_watchdog(
                         .try_into_panic()
                         .ok()
                         .and_then(|p| {
-                            p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| {
-                                p.downcast_ref::<String>().map(|s| s.clone())
-                            })
+                            p.downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| p.downcast_ref::<String>().map(|s| s.clone()))
                         })
                         .unwrap_or_else(|| "unknown panic".to_string());
 
@@ -364,10 +364,7 @@ pub fn spawn_watcher_with_watchdog(
         }
 
         if restart_count > 0 {
-            tracing::info!(
-                restart_count,
-                "watcher watchdog exiting after restarts"
-            );
+            tracing::info!(restart_count, "watcher watchdog exiting after restarts");
         }
     })
 }
@@ -693,8 +690,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
 
-        let handle =
-            spawn_watcher(mailbox.clone(), registry, None, Some(tx), cancel.clone());
+        let handle = spawn_watcher(mailbox.clone(), registry, None, Some(tx), cancel.clone());
         cancel.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
@@ -740,7 +736,9 @@ mod tests {
         let mut statuses = Vec::new();
         for _ in 0..2 {
             match next_event(&mut fx).await {
-                ChildResultEvent::Progress { agent_path, status, .. } => {
+                ChildResultEvent::Progress {
+                    agent_path, status, ..
+                } => {
                     assert_ne!(agent_path, "root/none");
                     statuses.push(status);
                 }
@@ -840,7 +838,9 @@ mod tests {
         let mut batch_ok = false;
         for _ in 0..3 {
             match next_event(&mut fx).await {
-                ChildResultEvent::Progress { status, summary, .. } => {
+                ChildResultEvent::Progress {
+                    status, summary, ..
+                } => {
                     assert_eq!(status, "ok");
                     match summary.as_deref() {
                         None => saw_plain = true,
@@ -857,7 +857,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_plain, "synchronous plain Progress must arrive first-class");
+        assert!(
+            saw_plain,
+            "synchronous plain Progress must arrive first-class"
+        );
         assert!(saw_summary, "Progress with summary must arrive");
         assert!(batch_ok, "Batch with full report must arrive");
         fx.cancel.cancel();
@@ -931,7 +934,9 @@ mod tests {
         finish_and_post(&fx, "w", MailboxStatus::Closed, None);
 
         match next_event(&mut fx).await {
-            ChildResultEvent::Progress { status, summary, .. } => {
+            ChildResultEvent::Progress {
+                status, summary, ..
+            } => {
                 assert_eq!(status, "closed");
                 assert!(summary.is_none(), "closed needs no LLM call");
             }

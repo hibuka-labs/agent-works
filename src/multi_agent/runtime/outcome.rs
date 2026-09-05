@@ -6,8 +6,8 @@
 
 use agent_base::{RunOutcome, RuntimeEvent};
 
-use crate::multi_agent::mailbox::{MailboxResult, MailboxStatus, MailboxTask};
 use super::watcher::ChildReport;
+use crate::multi_agent::mailbox::{MailboxResult, MailboxStatus, MailboxTask};
 
 /// Build the input text for a child agent from a mailbox task.
 pub(super) fn build_child_input(task: &MailboxTask) -> String {

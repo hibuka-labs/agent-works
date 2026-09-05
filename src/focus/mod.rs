@@ -15,4 +15,4 @@ mod core;
 mod progress;
 
 pub use core::{Context, Focus, FocusError, FocusInput, FocusOutput};
-pub use progress::{ProgressSummarizer, DEFAULT_SUMMARY_TIMEOUT};
+pub use progress::{DEFAULT_SUMMARY_TIMEOUT, ProgressSummarizer};

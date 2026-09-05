@@ -108,7 +108,10 @@ impl ProgressSummarizer {
         };
         let summary = output.result.summary.trim().to_string();
         if summary.is_empty() {
-            tracing::warn!(agent = agent_name, "progress summary empty — falling back to plain notice");
+            tracing::warn!(
+                agent = agent_name,
+                "progress summary empty — falling back to plain notice"
+            );
             None
         } else {
             Some(summary)
@@ -239,7 +242,12 @@ mod tests {
         let summarizer = ProgressSummarizer::new(client.clone(), Duration::from_secs(5));
 
         let _ = summarizer
-            .summarize("analyze-pi", "ok", Some("分析 pi 工程"), Some("结论是模块 A 最重"))
+            .summarize(
+                "analyze-pi",
+                "ok",
+                Some("分析 pi 工程"),
+                Some("结论是模块 A 最重"),
+            )
             .await;
 
         let prompts = client.captured_prompts();

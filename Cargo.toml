@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -19,12 +19,19 @@ hot-reload = ["dep:notify", "prompt_skill"]
 cli = []
 focus = []
 compression = []
-multi_agent = []
+# The multi-agent fan-in coordinator uses Focus for user-facing progress
+# summaries, so enabling multi_agent always brings focus along.
+multi_agent = ["focus"]
+# Model-check the multi_agent atomic gates with loom (off by default; normal
+# dependency graphs never compile it). Use a *feature*, not `--cfg loom`:
+# the RUSTFLAGS form leaks into tokio's own loom mode and breaks hyper-util.
+# Run: cargo test --features multi_agent,loom-check --lib loom
+loom-check = ["dep:loom"]
 full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.4.0" }
+agent-base = { version = "0.5.0" }
 async-trait = "0.1"
 dyn-clone = "1"
 futures-core = "0.3"
@@ -37,6 +44,7 @@ tracing = "0.1"
 reqwest = { version = "0.13", features = ["json"] }
 serde_yaml = { version = "0.9", optional = true }
 notify = { version = "7", optional = true, default-features = false, features = ["macos_kqueue"] }
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -50,6 +58,11 @@ proptest = "1"
 [[bench]]
 name = "agent_builder"
 harness = false
+
+[[bench]]
+name = "multi_agent_control"
+harness = false
+required-features = ["multi_agent"]
 
 [[example]]
 name = "skill_demo"
@@ -65,3 +78,7 @@ name = "guard_demo"
 [[example]]
 name = "mcp_demo"
 required-features = ["mcp"]
+
+[[example]]
+name = "multi_agent"
+required-features = ["multi_agent"]

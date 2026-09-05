@@ -182,7 +182,13 @@ async fn test_try_wait_invalid_path_returns_error() {
 
     let result = ma.try_wait(Some("worker"));
     assert_eq!(result.status, "error");
-    assert!(result.result.as_deref().unwrap().contains("invalid agent path"));
+    assert!(
+        result
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("invalid agent path")
+    );
 }
 
 // ── try_wait: closed after agent gone ──
@@ -192,13 +198,7 @@ async fn test_try_wait_closed_after_agent_gone() {
     let ma = make_ma_runtime();
 
     let path = ma
-        .spawn_child(
-            "worker",
-            "prompt".to_string(),
-            0,
-            false,
-            vec![],
-        )
+        .spawn_child("worker", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
 
@@ -228,10 +228,10 @@ async fn test_try_wait_any_returns_first_available() {
 
     let ma = make_ma_runtime();
 
-    ma.spawn_child("a", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("a", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn a");
-    ma.spawn_child("b", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("b", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn b");
 
@@ -262,7 +262,7 @@ async fn test_try_wait_any_returns_first_available() {
 async fn test_wait_for_result_basic() {
     let ma = make_ma_runtime();
 
-    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
 
@@ -282,7 +282,7 @@ async fn test_wait_for_result_basic() {
 async fn test_wait_for_result_any() {
     let ma = make_ma_runtime();
 
-    ma.spawn_child("x", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("x", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
 
@@ -300,7 +300,7 @@ async fn test_wait_for_result_any() {
 async fn test_wait_for_result_timeout() {
     let ma = make_ma_runtime();
 
-    ma.spawn_child("slow", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("slow", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
 
@@ -318,10 +318,10 @@ async fn test_wait_for_result_has_more() {
 
     let ma = make_ma_runtime();
 
-    ma.spawn_child("a", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("a", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn a");
-    ma.spawn_child("b", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("b", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn b");
 
@@ -363,7 +363,7 @@ async fn test_wait_for_result_has_more() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_agents_shows_done_after_result_delivered() {
     let ma = make_ma_runtime();
-    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
     ma.send_task("root/w", "task".to_string(), false).unwrap();
@@ -387,7 +387,7 @@ async fn test_list_agents_shows_done_after_result_delivered() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_close_idle_child_delivers_closed_event() {
     let ma = make_ma_runtime();
-    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
     ma.send_task("root/w", "task".to_string(), false).unwrap();
@@ -433,8 +433,10 @@ async fn test_queued_task_does_not_fire_premature_batch() {
         .expect("spawn");
     // Queue two tasks back-to-back: task two sits in the channel while
     // task one executes.
-    ma.send_task("root/w", "task one".to_string(), false).unwrap();
-    ma.send_task("root/w", "task two".to_string(), false).unwrap();
+    ma.send_task("root/w", "task one".to_string(), false)
+        .unwrap();
+    ma.send_task("root/w", "task two".to_string(), false)
+        .unwrap();
 
     // Collect events until the batch arrives. Progress ordering is free
     // (detached summaries), but the FIRST batch must already carry both
@@ -480,7 +482,7 @@ async fn test_close_running_child_result_still_delivered() {
     let ma = make_ma_runtime_with(Arc::new(DelayedStub));
     let (_handle, mut rx) = ma.start_watcher();
 
-    ma.spawn_child("w", "prompt".to_string() , 0, false, vec![])
+    ma.spawn_child("w", "prompt".to_string(), 0, false, vec![])
         .await
         .expect("spawn");
     ma.send_task("root/w", "task".to_string(), false).unwrap();

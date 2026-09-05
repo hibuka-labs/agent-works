@@ -158,7 +158,10 @@ async fn thousand_round_spawn_work_close_conserves_everything() {
             );
             closed += 1;
         }
-        assert_eq!(closed, ITERS, "every close leaves exactly one readable Closed");
+        assert_eq!(
+            closed, ITERS,
+            "every close leaves exactly one readable Closed"
+        );
     }
     assert_eq!(rt.mailbox().total_pending_results(), 0);
     assert_eq!(st.live_children, 0, "every concurrency slot returned");
@@ -313,7 +316,10 @@ async fn mixed_lifecycle_chaos_conserves_everything() {
             assert_eq!(result.status, MailboxStatus::Closed);
             closed += 1;
         }
-        assert_eq!(closed, CHAOS, "every chaos close leaves one readable Closed");
+        assert_eq!(
+            closed, CHAOS,
+            "every chaos close leaves one readable Closed"
+        );
     }
     let st = rt.control().status();
     assert!(rt.list_agents().is_empty());

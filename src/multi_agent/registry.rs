@@ -981,7 +981,10 @@ mod tests {
         reg2.note_enqueued(&p2);
         assert!(!reg2.quiescent());
         reg2.note_send_failed(&p2);
-        assert!(reg2.quiescent(), "rolled-back phantom queue must not wedge the batch");
+        assert!(
+            reg2.quiescent(),
+            "rolled-back phantom queue must not wedge the batch"
+        );
     }
 
     #[test]

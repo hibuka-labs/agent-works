@@ -327,9 +327,7 @@ impl MultiAgentRuntime {
         // Nesting is structurally absent (K5 / §10.1 B4): a config child is
         // always a direct child of root. The *actual* registered tool set is
         // echoed in `SpawnedChild::spawned_tools`.
-        let prepared = self
-            .spawn_inner(&name, 1, &config, parent_messages)
-            .await?;
+        let prepared = self.spawn_inner(&name, 1, &config, parent_messages).await?;
 
         let path = prepared.path.clone();
         let spawned_tools = prepared.spawned_tools.clone();
