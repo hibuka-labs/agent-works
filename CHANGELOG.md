@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Error results now emit a single synchronous Progress carrying the error's
+  first line (ANSI/control sanitized, truncated at 160 chars) instead of a
+  terse notice plus a detached Focus paraphrase — the user sees the real
+  reason in the TUI the moment the child fails (session 20260906_0f6d4341).
+  Ok results are unchanged (plain notice, then Focus summary).
+
 ## [0.6.0] - 2026-09-06
 
 ### Added

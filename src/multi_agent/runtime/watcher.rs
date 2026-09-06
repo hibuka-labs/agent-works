@@ -7,7 +7,9 @@
 //! coordination:
 //!
 //! - **Progress** — each result is announced for the *user* immediately
-//!   (Focus summary once wired, plain notice otherwise). Progress never
+//!   (Ok: Focus summary once wired, plain notice otherwise; Error: the
+//!   error's first line, ANSI/control sanitized; Closed: plain notice).
+//!   Progress never
 //!   wakes the parent agent.
 //! - **Batch** — once the registry is quiescent (see
 //!   [`AgentRegistry::quiescent`]: nobody executing, nothing queued, and
@@ -25,13 +27,15 @@
 //!   cannot leak into a later generation's batch.
 //! - The Focus summary never gates the wake (session 20260903_d8fc41dc:
 //!   awaited summaries serialized their timeouts in front of the batch).
-//!   Ok/Error get a plain Progress notice synchronously, then the summary
+//!   Ok results get a plain Progress notice synchronously, then the summary
 //!   runs detached and follows as a second Progress event whenever Focus
 //!   answers (or not at all on failure). A Progress event may therefore
 //!   arrive after the Batch event, and the same agent may Progress twice —
 //!   consumers must be idempotent (phimint's UI is: mark-finished is a
 //!   no-op on an already-finished entry). Closed results need no summary
-//!   and are announced synchronously.
+//!   and are announced synchronously. Error results skip Focus entirely:
+//!   one synchronous Progress carrying the raw error's first line (session
+//!   20260906_0f6d4341 — the user wants the real reason, not a paraphrase).
 //! - Quiescence timing is **derived, not marked** (session
 //!   20260904_c6559510): the child loop records facts at dequeue and before
 //!   each post (`note_posted` precedes the post's seq bump), so "result
@@ -71,19 +75,24 @@ pub struct ChildReport {
 #[derive(Clone, Debug)]
 pub enum ChildResultEvent {
     /// One child returned. User-facing progress only — never wakes the
-    /// parent agent. Emitted **twice** for Ok/Error results when a
-    /// summarizer is wired: first synchronously with `summary: None` (the
-    /// plain "已返回" notice, the moment the child returns), then once more
-    /// with the Focus summary when it lands (no second event on Focus
-    /// failure). Consumers must treat repeated Progress for the same
-    /// agent as idempotent.
+    /// parent agent. Ok results with a wired summarizer are emitted
+    /// **twice**: first synchronously with `summary: None` (the plain
+    /// "已返回" notice, the moment the child returns), then once more with
+    /// the Focus summary when it lands (no second event on Focus failure).
+    /// **Error results are emitted once**, synchronously, with `summary`
+    /// carrying the raw first line of the child's error text — the user
+    /// wants the real reason, not an LLM paraphrase of it (session
+    /// 20260906_0f6d4341). Consumers must treat repeated Progress for the
+    /// same agent as idempotent.
     Progress {
         /// The child agent's path.
         agent_path: String,
         /// Status: "ok", "error", or "closed".
         status: String,
-        /// Focus-generated summary shown as a follow-up line. `None` → the
-        /// consumer shows a plain notice.
+        /// For Ok: the Focus-generated summary shown as a follow-up line.
+        /// For Error: the error's first line, sanitized (ANSI stripped,
+        /// control characters blanked) and truncated at 160 chars.
+        /// `None` → the consumer shows a plain notice.
         summary: Option<String>,
     },
     /// Every child has returned — wake the parent once with all reports,
@@ -105,6 +114,58 @@ impl ChildResultEvent {
                 .unwrap_or_default(),
         }
     }
+}
+
+/// Cap on the raw error reason surfaced in a Progress notice (fits a TUI
+/// line or two; the full text still reaches the parent via the batch).
+const MAX_ERROR_REASON_CHARS: usize = 160;
+
+/// Strip ANSI escape sequences (CSI: ESC `[` params final byte). Provider
+/// error bodies are gateway-controlled bytes (llm-providers embeds the whole
+/// non-2xx response body in `LlmError::api`), and this reason line is headed
+/// for the TUI transcript — never let it paint terminal state or leave
+/// `[31m` debris behind a dropped ESC.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if ('@'..='~').contains(&n) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Extract the user-visible reason from a child's error text: the first
+/// line with visible content — ANSI stripped, control characters (CR
+/// splices, BEL, stray ESC…) blanked — truncated with a bounded check so a
+/// multi-megabyte single-line body cannot stall the watcher drain loop.
+/// `None` → the consumer's terse fallback notice.
+fn error_reason(result_text: Option<&str>) -> Option<String> {
+    let line = result_text
+        .map(strip_ansi)
+        .as_deref()?
+        .lines()
+        .map(|l| {
+            l.chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+        })
+        .map(|l| l.trim().to_string())
+        .find(|l| !l.is_empty())?;
+    let mut reason: String = line.chars().take(MAX_ERROR_REASON_CHARS).collect();
+    if line.chars().nth(MAX_ERROR_REASON_CHARS).is_some() {
+        reason.push('…');
+    }
+    Some(reason)
 }
 
 /// Spawn the background watcher (fan-in coordinator) task.
@@ -175,7 +236,26 @@ pub fn spawn_watcher(
                             // (phimint's UI is: mark-finished is a no-op on
                             // an already-finished entry).
                             match (&summarizer, &r.status) {
-                                (Some(s), MailboxStatus::Ok | MailboxStatus::Error) => {
+                                (_, MailboxStatus::Error) => {
+                                    // Errors skip Focus entirely: the user
+                                    // wants the real reason (e.g. "LLM call
+                                    // failed: HTTP request failed: …"), and
+                                    // an LLM paraphrase of an error adds a
+                                    // second delayed notice plus a 30 s
+                                    // timeout risk on a call that analyzes a
+                                    // failure (session 20260906_0f6d4341:
+                                    // both Error children surfaced as a
+                                    // terse "执行出错" followed by a vague
+                                    // paraphrase while the raw text went
+                                    // only to the parent). The raw first
+                                    // line goes out synchronously instead.
+                                    let _ = tx.send(ChildResultEvent::Progress {
+                                        agent_path: r.agent_path.to_string(),
+                                        status: status.to_string(),
+                                        summary: error_reason(r.result.as_deref()),
+                                    });
+                                }
+                                (Some(s), MailboxStatus::Ok) => {
                                     // Plain notice FIRST, synchronously: the
                                     // user learns the child returned the
                                     // moment it does (session
@@ -943,6 +1023,156 @@ mod tests {
             other => panic!("expected Progress, got {other:?}"),
         }
         assert_no_event(&mut fx).await; // lone Closed → no Batch
+        fx.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn error_progress_carries_raw_reason_not_a_paraphrase() {
+        // Session 20260906_0f6d4341: an Error child used to surface as a
+        // terse "执行出错" plus a detached Focus paraphrase, while the raw
+        // error ("LLM call failed: HTTP request failed: …") went only to
+        // the parent. Now the synchronous Progress must carry the raw
+        // first line itself, and Focus must not be called for errors —
+        // exactly one Progress, no follow-up.
+        let summarizer = Arc::new(ProgressSummarizer::new(
+            Arc::new(SummaryStub {
+                delay: std::time::Duration::ZERO,
+            }),
+            std::time::Duration::from_secs(5),
+        ));
+        let mut fx = fixture_with_summarizer(Some(summarizer));
+
+        spawn_running(&fx, "e");
+        finish_and_post(
+            &fx,
+            "e",
+            MailboxStatus::Error,
+            Some("LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)"),
+        );
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Progress {
+                status, summary, ..
+            } => {
+                assert_eq!(status, "error");
+                let reason = summary.expect("error Progress must carry the raw reason");
+                assert!(reason.starts_with("LLM call failed"), "{reason}");
+                assert!(reason.contains("error sending request"), "{reason}");
+                assert!(!reason.contains("mock 摘要"), "paraphrase leaked: {reason}");
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+        // The lone Error still wakes the parent (unlike lone Closed), with
+        // the full raw error in the report — then nothing further (no
+        // paraphrase Progress must follow).
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => {
+                assert_eq!(reports.len(), 1);
+                assert_eq!(
+                    reports[0].result.as_deref(),
+                    Some("LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)")
+                );
+            }
+            other => panic!("expected Batch, got {other:?}"),
+        }
+        assert_no_event(&mut fx).await;
+        fx.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn error_reason_truncates_and_skips_blank_lines() {
+        let long = format!("{}…tail", "x".repeat(300));
+        // Blank lines are skipped; the FIRST content line wins over later
+        // ones (real errors are multi-line: "LLM call failed:\n  caused by").
+        assert_eq!(
+            error_reason(Some("\n  \nboom: first line is the meat")),
+            Some("boom: first line is the meat".to_string())
+        );
+        assert_eq!(
+            error_reason(Some("first line\nsecond line\nthird")),
+            Some("first line".to_string())
+        );
+        // Exact boundary: 160 chars passes through untouched, 161 gains the
+        // ellipsis (pins off-by-one at MAX_ERROR_REASON_CHARS).
+        let at = "x".repeat(MAX_ERROR_REASON_CHARS);
+        let r = error_reason(Some(&at)).unwrap();
+        assert_eq!(r.chars().count(), MAX_ERROR_REASON_CHARS);
+        assert!(!r.ends_with('…'));
+        let over = "x".repeat(MAX_ERROR_REASON_CHARS + 1);
+        let r = error_reason(Some(&over)).unwrap();
+        assert_eq!(r.chars().count(), MAX_ERROR_REASON_CHARS + 1);
+        assert!(r.ends_with('…'));
+        // Far over the limit: 300 chars → 160 + ellipsis, tail dropped.
+        let truncated = error_reason(Some(&long)).unwrap();
+        assert_eq!(truncated.chars().count(), 161, "160 chars + ellipsis");
+        assert!(truncated.ends_with('…'));
+        assert_eq!(error_reason(Some("  \n\n  ")), None);
+        assert_eq!(error_reason(None), None);
+    }
+
+    #[tokio::test]
+    async fn error_reason_neutralizes_control_chars_and_ansi() {
+        // Provider error bodies are gateway-controlled bytes headed for the
+        // TUI: escape sequences must not paint terminal state (or leave
+        // "[31m" debris behind a dropped ESC), CR must not splice text, and
+        // a pure-control first line must not shadow the real reason.
+        assert_eq!(
+            error_reason(Some("\x1b[31mError: boom\x1b[0m")),
+            Some("Error: boom".to_string())
+        );
+        // CR mid-line becomes a space instead of a silent splice (A\rB → AB).
+        assert_eq!(error_reason(Some("A\rB")), Some("A B".to_string()));
+        // Tab stays readable rather than gluing words together.
+        assert_eq!(
+            error_reason(Some("error:\tboom")),
+            Some("error: boom".to_string())
+        );
+        // A control-garbage first line is skipped, not shown invisibly.
+        assert_eq!(
+            error_reason(Some("\x07\nreal reason")),
+            Some("real reason".to_string())
+        );
+        // Sanitization composes with truncation (still bounded at 160+1).
+        let dirty = format!("\x1b[1m{}", "y".repeat(300));
+        let r = error_reason(Some(&dirty)).unwrap();
+        assert_eq!(r.chars().count(), 161);
+        assert!(r.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn error_progress_with_none_result_falls_back_to_plain_notice() {
+        // Error with no result text: error_reason(None) → the Progress
+        // carries summary: None and the consumer shows its terse fallback
+        // notice. Focus still must not run, and the parent still gets the
+        // batch with the None report.
+        let summarizer = Arc::new(ProgressSummarizer::new(
+            Arc::new(SummaryStub {
+                delay: std::time::Duration::ZERO,
+            }),
+            std::time::Duration::from_secs(5),
+        ));
+        let mut fx = fixture_with_summarizer(Some(summarizer));
+
+        spawn_running(&fx, "e");
+        finish_and_post(&fx, "e", MailboxStatus::Error, None);
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Progress {
+                status, summary, ..
+            } => {
+                assert_eq!(status, "error");
+                assert!(summary.is_none(), "None error text must fall back to a plain notice");
+            }
+            other => panic!("expected Progress, got {other:?}"),
+        }
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => {
+                assert_eq!(reports.len(), 1);
+                assert_eq!(reports[0].result, None);
+            }
+            other => panic!("expected Batch, got {other:?}"),
+        }
+        assert_no_event(&mut fx).await;
         fx.cancel.cancel();
     }
 
