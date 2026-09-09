@@ -18,6 +18,7 @@ pub mod compression;
 
 pub mod guard;
 pub mod prompt;
+pub mod token_budget;
 
 mod builder;
 pub mod handle;

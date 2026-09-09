@@ -132,7 +132,7 @@ async fn test_try_wait_returns_result_after_post() {
 
     let ma = make_ma_runtime();
 
-    let path = ma
+    let _path = ma
         .spawn_child(
             "worker",
             "child system prompt".to_string(),

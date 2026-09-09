@@ -18,6 +18,7 @@
 //! ├── budget.rs         RolloutBudget + SpawnTicket (§7.2)
 //! ├── limiter.rs        AgentExecutionLimiter (live-concurrency gate, §7.3)
 //! ├── control.rs        AgentControl (budget + limiter bundle, §7.1)
+//! ├── fan_in.rs         ChildResultRouter (child-result fan-in delivery policy)
 //! └── runtime.rs        MultiAgentRuntime
 //! ```
 //!
@@ -29,6 +30,7 @@ pub mod child_builder;
 pub mod child_config;
 pub mod config;
 pub mod control;
+pub mod fan_in;
 pub mod limiter;
 pub mod mailbox;
 pub mod path;
@@ -42,6 +44,7 @@ pub use child_builder::ChildBuilder;
 pub use child_config::ChildConfig;
 pub use config::{AgentAutonomy, ChildPermissionMode, ControlConfig, MultiAgentConfig};
 pub use control::{AgentControl, ControlStatus};
+pub use fan_in::{ChildResultRoute, ChildResultRouter};
 pub use limiter::{AgentExecutionLimiter, ExecutionSlot, LimiterError};
 pub use path::AgentPath;
 pub use preset::ChildPreset;

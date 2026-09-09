@@ -325,6 +325,21 @@ pub fn spawn_watcher(
                     // completeness seals the spawn→send window) — plus at
                     // least one real (non-Closed) report pending → wake the
                     // parent once with everything.
+                    {
+                        let reg = registry.lock().unwrap();
+                        let q = reg.quiescent();
+                        if !q {
+                            let snapshot = reg.snapshot();
+                            tracing::info!(
+                                batch_len = batch.len(),
+                                agent_count = snapshot.agents.len(),
+                                agents = ?snapshot.agents.iter().map(|a| {
+                                    format!("{}: status={}, tool_calls={}, pending={}", a.path, a.status, a.tool_calls, a.pending_results)
+                                }).collect::<Vec<_>>(),
+                                "watcher: quiescent=false, holding batch"
+                            );
+                        }
+                    }
                     if batch.is_empty() || !registry.lock().unwrap().quiescent() {
                         continue;
                     }
