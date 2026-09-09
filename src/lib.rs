@@ -18,7 +18,7 @@ pub mod compression;
 
 pub mod guard;
 pub mod prompt;
-pub mod token_budget;
+pub mod rotation_policy;
 
 mod builder;
 pub mod handle;
