@@ -108,7 +108,10 @@ impl ChildResultRouter {
         if total <= Self::MAX_REPORT_CHARS {
             (message.to_string(), total)
         } else {
-            (message.chars().take(Self::MAX_REPORT_CHARS).collect(), total)
+            (
+                message.chars().take(Self::MAX_REPORT_CHARS).collect(),
+                total,
+            )
         }
     }
 }
@@ -162,7 +165,10 @@ mod tests {
 
         match router.on_event(
             false,
-            batch(vec![report("root/a", "report a"), report("root/b", "report b")]),
+            batch(vec![
+                report("root/a", "report a"),
+                report("root/b", "report b"),
+            ]),
         ) {
             ChildResultRoute::Batch { reports } => {
                 assert_eq!(reports.len(), 2);

@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "agent-base"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ffa153327c5710871b2b0b03d864007fca7f9b90d049c9628e7dfc7c7880e18"
+checksum = "28c057980920248816f0106c20264d7f5eb0917efa3c66f62a10a8673cb8f6f8"
 dependencies = [
  "agent-types",
  "anyhow",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "agent-works"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "agent-base",
  "anyhow",
@@ -1254,9 +1254,9 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "llm-trait"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "642ba36b46eae992f9b5deb67b9337123584905ff8e182077265375ee4c8b260"
+checksum = "28f415524d0efc33e8d687420d5d8a341d520cf9bb52c9d55e546aacdbe40f6d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1271,9 +1271,9 @@ dependencies = [
 
 [[package]]
 name = "llm-unified"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e9f080946fff31851b52d570e666202bddde8da4c31338a0f307e2f172b092"
+checksum = "855576cf2b3ae5cb718dd7a873a8e2a7fc20d16738cb1e1d9a7c6e5aa2735673"
 dependencies = [
  "async-trait",
  "clap",
@@ -1281,7 +1281,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "llm-trait",
- "rand 0.9.5",
+ "rand 0.10.2",
  "reqwest",
  "serde",
  "serde_json",

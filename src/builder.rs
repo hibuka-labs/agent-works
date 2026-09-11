@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_base::{AgentResult, AgentRuntime, Tool};
@@ -8,6 +9,31 @@ use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
 
 #[cfg(feature = "skill")]
 use crate::skill::{LazySkillPrompter, Skill, SkillPrompter};
+
+/// Read agent instruction files and build a combined prompt section.
+///
+/// Files are read in order; later entries have higher priority and appear
+/// first in the output. Missing files are silently skipped.
+fn build_agent_instructions_prompt(paths: &[PathBuf]) -> Option<String> {
+    let mut sections = Vec::new();
+
+    for path in paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                sections.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+
+    // Later entries (higher priority) appear first
+    sections.reverse();
+    Some(sections.join("\n\n---\n\n"))
+}
 
 /// Factory type for creating multi-agent tools from a MultiAgentRuntime.
 #[cfg(feature = "multi_agent")]
@@ -58,6 +84,11 @@ pub struct AgentBuilder {
     disable_skill_prompt_injection: bool,
     /// Optional inline context compactor for the react loop.
     context_compactor: Option<Arc<dyn agent_base::ContextCompaction>>,
+    /// Paths to agent instruction files (e.g., CLAUDE.md, INSTRUCTIONS.md).
+    /// These files are read at build time and appended to the system prompt.
+    /// Supports multiple paths (user-level + project-level); later entries
+    /// have higher priority and appear first in the prompt.
+    agent_instructions_paths: Vec<PathBuf>,
 }
 
 impl AgentBuilder {
@@ -87,6 +118,7 @@ impl AgentBuilder {
             #[cfg(feature = "skill")]
             disable_skill_prompt_injection: false,
             context_compactor: None,
+            agent_instructions_paths: Vec::new(),
         }
     }
 
@@ -379,6 +411,27 @@ impl AgentBuilder {
         self
     }
 
+    /// Set paths to agent instruction files (e.g., CLAUDE.md, INSTRUCTIONS.md).
+    ///
+    /// These files are read at build time and appended to the system prompt.
+    /// Supports multiple paths (user-level + project-level); later entries
+    /// have higher priority and appear first in the prompt.
+    ///
+    /// Example:
+    /// ```rust,ignore
+    /// use std::path::PathBuf;
+    /// use agent_works::AgentBuilder;
+    /// let builder = AgentBuilder::new();
+    /// let builder = builder.agent_instructions_paths(vec![
+    ///     PathBuf::from("~/.claude/CLAUDE.md"),  // user-level
+    ///     PathBuf::from(".claude/CLAUDE.md"),     // project-level
+    /// ]);
+    /// ```
+    pub fn agent_instructions_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.agent_instructions_paths = paths;
+        self
+    }
+
     #[cfg(feature = "skill")]
     pub fn skill_detail_tool_name(mut self, name: impl Into<String>) -> Self {
         self.skill_detail_tool_name = name.into();
@@ -426,6 +479,24 @@ impl AgentBuilder {
                     crate::guard::DefaultGuardConfig::default(),
                     self.client.clone(),
                 ));
+        }
+
+        // Inject agent instruction files (e.g., CLAUDE.md) into system prompt
+        if !self.agent_instructions_paths.is_empty()
+            && let Some(instructions) =
+                build_agent_instructions_prompt(&self.agent_instructions_paths)
+        {
+            tracing::info!(
+                paths = ?self.agent_instructions_paths,
+                instructions_len = instructions.len(),
+                "injecting agent instructions into system prompt"
+            );
+            let new_prompt = match self.system_prompt.take() {
+                Some(existing) => format!("{}\n\n---\n\n{}", existing, instructions),
+                None => instructions,
+            };
+            self.system_prompt = Some(new_prompt.clone());
+            self.inner = self.inner.system_prompt(new_prompt);
         }
 
         #[cfg(feature = "multi_agent")]
@@ -557,6 +628,24 @@ impl AgentBuilder {
                 ));
         }
 
+        // Inject agent instruction files (e.g., CLAUDE.md) into system prompt
+        if !self.agent_instructions_paths.is_empty()
+            && let Some(instructions) =
+                build_agent_instructions_prompt(&self.agent_instructions_paths)
+        {
+            tracing::info!(
+                paths = ?self.agent_instructions_paths,
+                instructions_len = instructions.len(),
+                "injecting agent instructions into system prompt"
+            );
+            let new_prompt = match self.system_prompt.take() {
+                Some(existing) => format!("{}\n\n---\n\n{}", existing, instructions),
+                None => instructions,
+            };
+            self.system_prompt = Some(new_prompt.clone());
+            self.inner = self.inner.system_prompt(new_prompt);
+        }
+
         let mut ab = self.inner;
         #[cfg(feature = "multi_agent")]
         let lang = self.language.clone().unwrap_or_default();
@@ -680,6 +769,24 @@ impl AgentBuilder {
                     crate::guard::DefaultGuardConfig::default(),
                     self.client.clone(),
                 ));
+        }
+
+        // Inject agent instruction files (e.g., CLAUDE.md) into system prompt
+        if !self.agent_instructions_paths.is_empty()
+            && let Some(instructions) =
+                build_agent_instructions_prompt(&self.agent_instructions_paths)
+        {
+            tracing::info!(
+                paths = ?self.agent_instructions_paths,
+                instructions_len = instructions.len(),
+                "injecting agent instructions into system prompt"
+            );
+            let new_prompt = match self.system_prompt.take() {
+                Some(existing) => format!("{}\n\n---\n\n{}", existing, instructions),
+                None => instructions,
+            };
+            self.system_prompt = Some(new_prompt.clone());
+            self.inner = self.inner.system_prompt(new_prompt);
         }
 
         let mut ab = self.inner;
@@ -1555,5 +1662,44 @@ mod tests {
             // Tool still registered; prompt injection skipped.
             assert!(runtime_tool_names(&runtime).contains(&"skill_provided_tool".to_string()));
         }
+    }
+
+    // ── Agent instructions tests ──
+
+    #[test]
+    fn test_build_agent_instructions_prompt_reads_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file1 = tmp.path().join("CLAUDE.md");
+        let file2 = tmp.path().join("INSTRUCTIONS.md");
+        std::fs::write(&file1, "# User instructions\nBe helpful.").unwrap();
+        std::fs::write(&file2, "# Project instructions\nFollow conventions.").unwrap();
+
+        let prompt = build_agent_instructions_prompt(&[file1, file2]);
+        assert!(prompt.is_some());
+        let prompt = prompt.unwrap();
+        // Higher priority (later entries) appear first
+        assert!(prompt.starts_with("# Project instructions"));
+        assert!(prompt.contains("# User instructions"));
+        assert!(prompt.contains("Be helpful."));
+        assert!(prompt.contains("Follow conventions."));
+    }
+
+    #[test]
+    fn test_build_agent_instructions_prompt_skips_missing_files() {
+        let prompt = build_agent_instructions_prompt(&[
+            PathBuf::from("/nonexistent/CLAUDE.md"),
+            PathBuf::from("/nonexistent/INSTRUCTIONS.md"),
+        ]);
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    fn test_build_agent_instructions_prompt_skips_empty_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("empty.md");
+        std::fs::write(&file, "   \n  ").unwrap();
+
+        let prompt = build_agent_instructions_prompt(&[file]);
+        assert!(prompt.is_none());
     }
 }

@@ -539,16 +539,21 @@ impl AgentRegistry {
     ///    sibling's result fire a batch that excludes it);
     /// 3. (caller side) the batch itself is non-empty.
     pub fn quiescent(&self) -> bool {
-        let all_quiet = self.agents
+        let all_quiet = self
+            .agents
             .values()
             .all(|e| !e.in_flight && e.queue_len == 0 && e.results_posted >= 1);
         if !all_quiet {
-            let blocking: Vec<String> = self.agents.values()
+            let blocking: Vec<String> = self
+                .agents
+                .values()
                 .filter(|e| e.in_flight || e.queue_len > 0 || e.results_posted < 1)
-                .map(|e| format!(
-                    "{}: in_flight={}, queue_len={}, results_posted={}",
-                    e.path, e.in_flight, e.queue_len, e.results_posted
-                ))
+                .map(|e| {
+                    format!(
+                        "{}: in_flight={}, queue_len={}, results_posted={}",
+                        e.path, e.in_flight, e.queue_len, e.results_posted
+                    )
+                })
                 .collect();
             tracing::info!(
                 blocking_agents = ?blocking,

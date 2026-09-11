@@ -194,6 +194,12 @@ impl MultiAgentRuntime {
 
         let child = builder.build()?;
 
+        // Set model override from ChildConfig.model if specified.
+        // This allows sub-agents to use a different model tier (e.g., "lite").
+        if let Some(ref model) = config.model {
+            child.set_model_override(Some(model.clone()));
+        }
+
         // Hook A (§5.4 / review M-4): child usage feeds the rollout budget.
         // `run_turn`'s return value carries no usage, so the child runtime's
         // turn-end callback is the only metering path — registered on the

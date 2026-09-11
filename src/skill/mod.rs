@@ -14,8 +14,33 @@ pub mod prompt_skill;
 #[cfg(feature = "yaml_skill")]
 pub mod yaml_skill;
 
+// Filesystem discovery + prompt injection capability (skill-injection design
+// D1/D2/M3). Gated on `prompt_skill` because the resolver builds on
+// `PromptSkill::scan_dir`.
+#[cfg(feature = "prompt_skill")]
+pub mod catalog;
+#[cfg(feature = "prompt_skill")]
+pub mod middleware;
+#[cfg(feature = "prompt_skill")]
+pub mod resolver;
+#[cfg(feature = "prompt_skill")]
+pub mod telemetry;
+#[cfg(feature = "prompt_skill")]
+pub mod tool;
+
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
 pub use registry::{SkillRegistry, SkillSummary};
+
+#[cfg(feature = "prompt_skill")]
+pub use catalog::{MAX_CATALOG_SKILLS, refresh_catalog, render_catalog, strip_catalog};
+#[cfg(feature = "prompt_skill")]
+pub use middleware::SkillCatalogRefreshMiddleware;
+#[cfg(feature = "prompt_skill")]
+pub use resolver::SkillResolver;
+#[cfg(feature = "prompt_skill")]
+pub use telemetry::SkillTelemetry;
+#[cfg(feature = "prompt_skill")]
+pub use tool::SkillTool;
 
 // ── Skill parameter types ──
 

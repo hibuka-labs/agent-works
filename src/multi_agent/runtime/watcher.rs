@@ -1062,7 +1062,9 @@ mod tests {
             &fx,
             "e",
             MailboxStatus::Error,
-            Some("LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)"),
+            Some(
+                "LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)",
+            ),
         );
 
         match next_event(&mut fx).await {
@@ -1085,7 +1087,9 @@ mod tests {
                 assert_eq!(reports.len(), 1);
                 assert_eq!(
                     reports[0].result.as_deref(),
-                    Some("LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)")
+                    Some(
+                        "LLM call failed: HTTP request failed: error sending request for url (https://example.invalid/v1/messages)"
+                    )
                 );
             }
             other => panic!("expected Batch, got {other:?}"),
@@ -1176,7 +1180,10 @@ mod tests {
                 status, summary, ..
             } => {
                 assert_eq!(status, "error");
-                assert!(summary.is_none(), "None error text must fall back to a plain notice");
+                assert!(
+                    summary.is_none(),
+                    "None error text must fall back to a plain notice"
+                );
             }
             other => panic!("expected Progress, got {other:?}"),
         }

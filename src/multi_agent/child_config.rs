@@ -50,14 +50,10 @@ pub struct ChildConfig {
     /// arguments (`spawn_agent`'s `model` field). `None` = inherit the
     /// parent's model (the only behaviour today).
     ///
-    /// TODO(layer-3): **currently inert.** The model name is baked into the
-    /// shared `LlmProvider` (`LlmConfig.model` → `create_provider`), and
-    /// `llm_trait::ChatRequest` has no per-request model field, so there is
-    /// no route for this value to influence LLM calls yet. Layer-3 work:
-    /// add `ChatRequest.model: Option<String>` (llm-trait), honour it in
-    /// each protocol (llm-providers), then thread this field into the child
-    /// builder. Until then this exists only to accept and carry the LLM's
-    /// choice so the schema does not churn again.
+    /// When set, this value is applied to the child's `ChatRequest.model`
+    /// field via `AgentRuntime::set_model_override()`. The LLM provider
+    /// uses this to route to the appropriate model (e.g., "lite" for
+    /// sub-agents).
     pub model: Option<String>,
 }
 

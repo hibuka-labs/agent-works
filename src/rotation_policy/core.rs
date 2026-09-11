@@ -229,10 +229,7 @@ impl TokenBudgetCore {
         if self.work_remaining(total_tokens) <= self.config.reminder_threshold {
             self.state.mark_reminder_sent();
             let remaining = self.work_remaining(total_tokens);
-            return TokenBudgetAction::Reminder(build_reminder_message(
-                &self.config,
-                remaining,
-            ));
+            return TokenBudgetAction::Reminder(build_reminder_message(&self.config, remaining));
         }
 
         self.state.mark_breath();
@@ -402,7 +399,10 @@ mod tests {
     fn reminder_only_once_per_window() {
         let core = core_with_sys_prompt();
         let total = core.base_overhead() + 85;
-        assert!(matches!(core.evaluate(total), TokenBudgetAction::Reminder(_)));
+        assert!(matches!(
+            core.evaluate(total),
+            TokenBudgetAction::Reminder(_)
+        ));
         assert!(matches!(core.evaluate(total), TokenBudgetAction::None));
     }
 
@@ -430,7 +430,10 @@ mod tests {
         let core = core_with_sys_prompt();
         let total = core.base_overhead() + 111; // used 111 ≥ 100 + 10
         // One-turn hold: the first crossing asks for the handoff...
-        assert!(matches!(core.evaluate(total), TokenBudgetAction::Fallback(_)));
+        assert!(matches!(
+            core.evaluate(total),
+            TokenBudgetAction::Fallback(_)
+        ));
         // ...the next check rotates.
         match core.evaluate(total) {
             TokenBudgetAction::Reset {
@@ -450,9 +453,15 @@ mod tests {
         // A window that already had its nudge (reminder band) skips the
         // hold: reminder → reset without a second Fallback.
         let band = core.base_overhead() + 85; // remaining 15 ≤ 20
-        assert!(matches!(core.evaluate(band), TokenBudgetAction::Reminder(_)));
+        assert!(matches!(
+            core.evaluate(band),
+            TokenBudgetAction::Reminder(_)
+        ));
         let total = core.base_overhead() + 111;
-        assert!(matches!(core.evaluate(total), TokenBudgetAction::Reset { .. }));
+        assert!(matches!(
+            core.evaluate(total),
+            TokenBudgetAction::Reset { .. }
+        ));
     }
 
     #[test]
@@ -483,8 +492,10 @@ mod tests {
         let msgs = core.build_reset_messages(&old, None, 1);
         // sys + window info + user trail [user("hi")] + guidance + seed
         assert_eq!(msgs.len(), 5);
-        assert!(matches!(&msgs[0], ChatMessage::System { content, ephemeral: false }
-            if content.contains("helpful assistant")));
+        assert!(
+            matches!(&msgs[0], ChatMessage::System { content, ephemeral: false }
+            if content.contains("helpful assistant"))
+        );
         assert!(matches!(&msgs[1], ChatMessage::System { content, .. }
             if content.contains("context_window")));
         // User trail preserves the real user message.
@@ -497,7 +508,8 @@ mod tests {
     fn reset_messages_include_thread_hint() {
         let core = core_with_sys_prompt();
         let old = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
-        let msgs = core.build_reset_messages(&old, Some("<thread_hint>note</thread_hint>".into()), 1);
+        let msgs =
+            core.build_reset_messages(&old, Some("<thread_hint>note</thread_hint>".into()), 1);
         // sys + window info + thread_hint + user trail [user("hi")] + guidance + seed
         assert_eq!(msgs.len(), 6);
         assert!(matches!(&msgs[2], ChatMessage::System { content, .. }
@@ -534,10 +546,7 @@ mod tests {
     fn user_trail_truncates_long_message() {
         let core = core_with_sys_prompt();
         let long_msg = "a".repeat(16_000); // ~4000 tokens, exceeds cap
-        let old = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user(&long_msg),
-        ];
+        let old = vec![ChatMessage::system("sys"), ChatMessage::user(&long_msg)];
         let trail = core.collect_user_trail(&old);
         assert_eq!(trail.len(), 1);
         match &trail[0] {
@@ -568,7 +577,10 @@ mod tests {
     fn commit_reset_advances_window_and_resets_reminder() {
         let core = core_with_sys_prompt();
         let total = core.base_overhead() + 85;
-        assert!(matches!(core.evaluate(total), TokenBudgetAction::Reminder(_)));
+        assert!(matches!(
+            core.evaluate(total),
+            TokenBudgetAction::Reminder(_)
+        ));
         assert!(core.state().has_sent_reminder());
 
         assert_eq!(core.commit_reset(), 2);
@@ -600,8 +612,10 @@ mod tests {
         // work — construction clamps it up (scaling the bands) instead of
         // just warning.
         let config = TokenBudgetConfig::with_work_budget(1);
-        let core =
-            TokenBudgetCore::new(config, Some("a reasonably long system prompt for the floor"));
+        let core = TokenBudgetCore::new(
+            config,
+            Some("a reasonably long system prompt for the floor"),
+        );
         let floor = (core.base_overhead() as f64 * 2.0).ceil() as usize;
         assert!(core.config().work_budget >= floor);
         assert_eq!(
@@ -621,7 +635,10 @@ mod tests {
         // shrink with the prompt, so the constant term must win.
         let config = TokenBudgetConfig::with_work_budget(1);
         let core = TokenBudgetCore::new(config, Some("hi"));
-        assert!(core.base_overhead() * 2 < 4_096, "premise: proportional floor below the absolute one");
+        assert!(
+            core.base_overhead() * 2 < 4_096,
+            "premise: proportional floor below the absolute one"
+        );
         assert_eq!(core.config().work_budget, 4_096);
         assert_eq!(core.max_result_tokens(), 4_096 / 3);
     }
@@ -674,7 +691,10 @@ mod tests {
             core.commit_reset();
         }
         // The third breathless window engages the brake instead of resetting.
-        assert!(matches!(core.evaluate(total), TokenBudgetAction::Fallback(_)));
+        assert!(matches!(
+            core.evaluate(total),
+            TokenBudgetAction::Fallback(_)
+        ));
         assert!(matches!(core.evaluate(total), TokenBudgetAction::None));
         assert!(core.braked());
         // From now on nothing resets, however large the conversation grows.
@@ -691,8 +711,14 @@ mod tests {
         let over = over_budget(&core);
 
         // One breathless reset (with its Fallback hold)...
-        assert!(matches!(core.evaluate(over), TokenBudgetAction::Fallback(_)));
-        assert!(matches!(core.evaluate(over), TokenBudgetAction::Reset { .. }));
+        assert!(matches!(
+            core.evaluate(over),
+            TokenBudgetAction::Fallback(_)
+        ));
+        assert!(matches!(
+            core.evaluate(over),
+            TokenBudgetAction::Reset { .. }
+        ));
         core.commit_reset();
         // ...then a window with a quiet turn (real work fits)...
         assert!(matches!(
@@ -700,8 +726,14 @@ mod tests {
             TokenBudgetAction::None
         ));
         // ...then overflowing again must still reset — the counter was cleared.
-        assert!(matches!(core.evaluate(over), TokenBudgetAction::Fallback(_)));
-        assert!(matches!(core.evaluate(over), TokenBudgetAction::Reset { .. }));
+        assert!(matches!(
+            core.evaluate(over),
+            TokenBudgetAction::Fallback(_)
+        ));
+        assert!(matches!(
+            core.evaluate(over),
+            TokenBudgetAction::Reset { .. }
+        ));
         assert!(!core.braked());
     }
 }

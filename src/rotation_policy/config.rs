@@ -223,8 +223,7 @@ impl TokenBudgetState {
     }
 
     pub fn current_window_id(&self) -> usize {
-        self.window_id
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.window_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn has_sent_reminder(&self) -> bool {
@@ -245,8 +244,7 @@ impl TokenBudgetState {
     }
 
     pub fn had_breath(&self) -> bool {
-        self.had_breath
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.had_breath.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Count a reset of a window that never had a quiet turn. Returns the
@@ -270,8 +268,7 @@ impl TokenBudgetState {
     }
 
     pub fn braked(&self) -> bool {
-        self.braked
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.braked.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

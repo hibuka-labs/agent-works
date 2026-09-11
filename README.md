@@ -40,7 +40,7 @@ agent-works = { version = "0.1.7", features = ["mcp", "skill"] }
 |---------|-------------|------------|
 | `mcp` | `McpHUb` — multi-server MCP with HTTP + stdio transport | — |
 | `skill` | `Skill` trait + `LazySkillPrompter` / `FullDetailPrompter` + `SkillDetailTool` + `SkillLoader` | — |
-| `prompt_skill` | `PromptSkill` — skill definitions from prompt files | `serde_yaml` |
+| `prompt_skill` | `PromptSkill` — skill definitions from prompt files + `SkillResolver` + `SkillTool` + catalog + middleware + telemetry | `serde_yaml` |
 | `yaml_skill` | `YamlSkill` — skill definitions from YAML files | `serde_yaml` |
 | `hot-reload` | Hot-reload skill definitions on file change | `notify`, `prompt_skill` |
 | `cli` | `CliRepl` (generic REPL loop) + `CliEventPrinter` (terminal event output) | — |
