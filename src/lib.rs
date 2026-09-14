@@ -4,6 +4,12 @@ pub mod mcp;
 #[cfg(feature = "skill")]
 pub mod skill;
 
+#[cfg(feature = "memory")]
+pub mod memory;
+
+#[cfg(feature = "memory")]
+pub mod tools;
+
 #[cfg(feature = "cli")]
 pub mod cli;
 
@@ -26,6 +32,19 @@ pub mod handle;
 #[cfg(feature = "skill")]
 pub use crate::builder::SkillDetailToolFactory;
 pub use crate::builder::{AgentBuilder, build_memory_system_prompt};
+#[cfg(feature = "memory")]
+pub use crate::builder::build_memory_system_prompt_with_config;
+#[cfg(feature = "memory")]
+pub use crate::memory::{
+    CLAUDE_COMPATIBLE_TEMPLATE, DEFAULT_INDEX_FILENAME, MEMORY_TYPES, MemoryConfig, MemoryDoc,
+    MemoryFrontmatter, MemoryStore, is_valid_memory_name, now_iso8601, parse_memory_file,
+    parse_memory_str, project_slug, rebuild_index, render_memory_file, validate_memory_name,
+    validate_memory_type,
+};
+#[cfg(feature = "memory")]
+pub use crate::tools::{
+    MemoryDeleteTool, MemoryListTool, MemoryReadTool, MemoryWriteTool, create_memory_tools,
+};
 #[cfg(feature = "multi_agent")]
 pub use crate::builder::{
     MultiAgentToolFactory, build_multi_agent_system_prompt, setup_multi_agent,

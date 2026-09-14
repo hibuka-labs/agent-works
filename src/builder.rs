@@ -7,6 +7,9 @@ use agent_base::{AgentResult, AgentRuntime, Tool};
 #[cfg(feature = "multi_agent")]
 use crate::multi_agent::{MultiAgentConfig, MultiAgentRuntime};
 
+#[cfg(feature = "memory")]
+use crate::memory::{MemoryConfig, MemoryStore};
+
 #[cfg(feature = "skill")]
 use crate::skill::{LazySkillPrompter, Skill, SkillPrompter};
 
@@ -89,6 +92,10 @@ pub struct AgentBuilder {
     /// Supports multiple paths (user-level + project-level); later entries
     /// have higher priority and appear first in the prompt.
     agent_instructions_paths: Vec<PathBuf>,
+    /// Memory configuration (Phase 9b). `None` = memory disabled: no memory
+    /// tools registered, no memory prompt injected (opt-in by design).
+    #[cfg(feature = "memory")]
+    memory_config: Option<MemoryConfig>,
 }
 
 impl AgentBuilder {
@@ -119,6 +126,8 @@ impl AgentBuilder {
             disable_skill_prompt_injection: false,
             context_compactor: None,
             agent_instructions_paths: Vec::new(),
+            #[cfg(feature = "memory")]
+            memory_config: None,
         }
     }
 
@@ -438,6 +447,81 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable persistent auto-memory (Phase 9b) with the given configuration.
+    ///
+    /// Registers the four `memory_*` tools and appends the memory prompt
+    /// (MEMORY.md index snapshot + tool guidance) to the system prompt at
+    /// build time. Opt-in: without this call no memory tools exist and the
+    /// prompt is untouched.
+    #[cfg(feature = "memory")]
+    pub fn memory_config(mut self, config: MemoryConfig) -> Self {
+        self.memory_config = Some(config);
+        self
+    }
+
+    /// Disable auto-memory (removes any previously set configuration).
+    #[cfg(feature = "memory")]
+    pub fn without_memory_config(mut self) -> Self {
+        self.memory_config = None;
+        self
+    }
+
+    /// Register the four memory tools and append the memory prompt (index
+    /// snapshot + tool guidance) to the system prompt. No-op when no memory
+    /// configuration was set. Called from every `build_*` path right after
+    /// the agent-instructions (CLAUDE.md) injection.
+    #[cfg(feature = "memory")]
+    fn apply_memory_config(mut self) -> Self {
+        let Some(config) = self.memory_config.take() else {
+            return self;
+        };
+
+        let store = Arc::new(MemoryStore::new(
+            config.memory_root.clone(),
+            config.index_filename.clone(),
+        ));
+
+        // Register the memory tools unless the consumer already took the name.
+        for tool in crate::tools::create_memory_tools(Arc::clone(&store)) {
+            let tool_name = tool.name().to_string();
+            if self.tool_names.contains(&tool_name) {
+                tracing::warn!(tool = %tool_name, "memory tool name conflict; skipping registration");
+                continue;
+            }
+            self.tool_names.insert(tool_name);
+            self.inner = self.inner.register_tool_arc(tool);
+        }
+
+        // Inject the index snapshot + tool guidance into the system prompt.
+        let index = store.read_index();
+        if index.len() > 10_240 {
+            tracing::warn!(
+                index_bytes = index.len(),
+                root = %config.memory_root.display(),
+                "memory index is unusually large (>10KB); consider cleaning up stale memories"
+            );
+        }
+        let mem_prompt = build_memory_system_prompt_with_config(&config, &index);
+        tracing::info!(
+            memory_root = %config.memory_root.display(),
+            index_bytes = index.len(),
+            tools = 4,
+            "injecting memory prompt + tools into system prompt"
+        );
+        let new_prompt = match self.system_prompt.take() {
+            Some(existing) => format!("{existing}\n\n---\n\n{mem_prompt}"),
+            None => mem_prompt,
+        };
+        tracing::info!(
+            prompt_len = new_prompt.len(),
+            "system prompt after memory injection (full text logged at DEBUG level)"
+        );
+        tracing::debug!(system_prompt = %new_prompt, "full system prompt after memory injection");
+        self.system_prompt = Some(new_prompt.clone());
+        self.inner = self.inner.system_prompt(new_prompt);
+        self
+    }
+
     // ── Build ──
 
     pub fn build(self) -> AgentResult<AgentRuntime> {
@@ -497,6 +581,12 @@ impl AgentBuilder {
             };
             self.system_prompt = Some(new_prompt.clone());
             self.inner = self.inner.system_prompt(new_prompt);
+        }
+
+        // Register memory tools + inject memory prompt (Phase 9b)
+        #[cfg(feature = "memory")]
+        {
+            self = self.apply_memory_config();
         }
 
         #[cfg(feature = "multi_agent")]
@@ -561,6 +651,12 @@ impl AgentBuilder {
                     crate::guard::DefaultGuardConfig::default(),
                     self.client.clone(),
                 ));
+        }
+
+        // Register memory tools + inject memory prompt (Phase 9b)
+        #[cfg(feature = "memory")]
+        {
+            self = self.apply_memory_config();
         }
 
         let lang = self.language.clone().unwrap_or_default();
@@ -644,6 +740,12 @@ impl AgentBuilder {
             };
             self.system_prompt = Some(new_prompt.clone());
             self.inner = self.inner.system_prompt(new_prompt);
+        }
+
+        // Register memory tools + inject memory prompt (Phase 9b)
+        #[cfg(feature = "memory")]
+        {
+            self = self.apply_memory_config();
         }
 
         let mut ab = self.inner;
@@ -787,6 +889,12 @@ impl AgentBuilder {
             };
             self.system_prompt = Some(new_prompt.clone());
             self.inner = self.inner.system_prompt(new_prompt);
+        }
+
+        // Register memory tools + inject memory prompt (Phase 9b)
+        #[cfg(feature = "memory")]
+        {
+            self = self.apply_memory_config();
         }
 
         let mut ab = self.inner;
@@ -1051,6 +1159,35 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
 **To update:** edit the existing `.md` file (don't create a duplicate).
 **To forget:** delete the `.md` file → remove its entry from `MEMORY.md`."#
         .to_string()
+}
+
+/// Build the memory system prompt from a [`MemoryConfig`](crate::memory::MemoryConfig)
+/// (Phase 9b).
+///
+/// Renders `config.prompt_template`, substituting the placeholders:
+///
+/// - `{memory_root}` — the memory directory path
+/// - `{index_content}` — the `MEMORY.md` index snapshot (startup state); an
+///   empty index renders as a friendly "no memories yet" line
+/// - `{tools_description}` — fixed description of the four `memory_*` tools
+///
+/// The legacy no-arg [`build_memory_system_prompt`] is kept for callers that
+/// don't register memory tools (prompt-injection-only mode).
+#[cfg(feature = "memory")]
+pub fn build_memory_system_prompt_with_config(
+    config: &crate::memory::MemoryConfig,
+    index_content: &str,
+) -> String {
+    let index = if index_content.trim().is_empty() {
+        "(no memories yet — memory_write creates the first one)".to_string()
+    } else {
+        index_content.to_string()
+    };
+    config
+        .prompt_template
+        .replace("{memory_root}", &config.memory_root.to_string_lossy())
+        .replace("{index_content}", &index)
+        .replace("{tools_description}", crate::tools::MEMORY_TOOLS_DESCRIPTION)
 }
 
 #[cfg(test)]
@@ -1468,6 +1605,97 @@ mod tests {
         assert!(prompt.contains("MEMORY.md"));
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("write_file"));
+    }
+
+    // ── build_memory_system_prompt_with_config (Phase 9b) ──
+
+    #[cfg(feature = "memory")]
+    mod memory_tests {
+        use super::*;
+        use crate::memory::{CLAUDE_COMPATIBLE_TEMPLATE, MemoryConfig, MemoryStore};
+
+        fn temp_config() -> (tempfile::TempDir, MemoryConfig) {
+            let dir = tempfile::tempdir().unwrap();
+            let config = MemoryConfig::custom(
+                dir.path().join("memory"),
+                CLAUDE_COMPATIBLE_TEMPLATE.to_string(),
+            );
+            (dir, config)
+        }
+
+        #[test]
+        fn prompt_with_config_substitutes_all_placeholders() {
+            let (_dir, config) = temp_config();
+            let prompt = build_memory_system_prompt_with_config(
+                &config,
+                "- [alpha](alpha.md) — first\n",
+            );
+            assert!(prompt.contains(config.memory_root.to_string_lossy().as_ref()), "{prompt}");
+            assert!(prompt.contains("- [alpha](alpha.md) — first"), "{prompt}");
+            assert!(prompt.contains("memory_write"), "{prompt}");
+            assert!(prompt.contains("memory_delete"), "{prompt}");
+            assert!(!prompt.contains("{memory_root}"), "{prompt}");
+            assert!(!prompt.contains("{index_content}"), "{prompt}");
+            assert!(!prompt.contains("{tools_description}"), "{prompt}");
+        }
+
+        #[test]
+        fn prompt_with_config_handles_empty_index() {
+            let (_dir, config) = temp_config();
+            let prompt = build_memory_system_prompt_with_config(&config, "");
+            assert!(prompt.contains("no memories yet"), "{prompt}");
+        }
+
+        #[test]
+        fn memory_disabled_by_default_registers_nothing() {
+            let client = make_client();
+            let runtime = AgentBuilder::new(client).build().unwrap();
+            let names = runtime_tool_names(&runtime);
+            assert!(!names.iter().any(|n| n.starts_with("memory_")), "{names:?}");
+            assert!(runtime.config().system_prompt.is_none());
+        }
+
+        #[test]
+        fn without_memory_config_clears_previous_config() {
+            let (_dir, config) = temp_config();
+            let client = make_client();
+            let builder = AgentBuilder::new(client)
+                .memory_config(config)
+                .without_memory_config();
+            assert!(builder.memory_config.is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn memory_config_registers_tools_and_injects_prompt() {
+            let (dir, config) = temp_config();
+
+            // Pre-seed one memory so the injected prompt carries a real row.
+            let store = MemoryStore::new(config.memory_root.clone(), "MEMORY.md");
+            store
+                .write_memory("seed-note", "seeded before build", "project", "body", None)
+                .unwrap();
+
+            let client = make_client();
+            let runtime = AgentBuilder::new(client)
+                .system_prompt("base prompt")
+                .memory_config(config)
+                .build()
+                .unwrap();
+
+            // All four tools registered.
+            let names = runtime_tool_names(&runtime);
+            for expected in ["memory_write", "memory_read", "memory_list", "memory_delete"] {
+                assert!(names.contains(&expected.to_string()), "{names:?}");
+            }
+
+            // Prompt = base + memory section with the seeded index row.
+            let prompt = tokio::task::block_in_place(|| {
+                runtime.config().system_prompt.clone().unwrap()
+            });
+            assert!(prompt.starts_with("base prompt"), "{prompt}");
+            assert!(prompt.contains("- [seeded before build](seed-note.md) — seeded before build"), "{prompt}");
+            assert!(prompt.contains(dir.path().join("memory").to_string_lossy().as_ref()), "{prompt}");
+        }
     }
 
     // ── Named tool for register_tool / skill tests ──

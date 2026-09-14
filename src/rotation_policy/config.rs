@@ -66,8 +66,11 @@ pub struct TokenBudgetConfig {
 impl Default for TokenBudgetConfig {
     fn default() -> Self {
         Self {
-            work_budget: 96_000,
-            reminder_threshold: 19_200,
+            // Target: ~256K context window × 90% ≈ 230K total.
+            // work_budget = 230K − base_overhead − fallback_buffer.
+            // With base_overhead ≈ 15-20K and buffer = 10%, work_budget ≈ 210K.
+            work_budget: 210_000,
+            reminder_threshold: 42_000,
             reminder_template: "You have approximately {n_remaining} tokens left in this context window. \
                 If you have important state, decisions, or progress to record, save them to your notes now \
                 using the notes tools. This window may close soon."
@@ -78,7 +81,7 @@ impl Default for TokenBudgetConfig {
                 and progress there. Your previous conversation history also remains \
                 available via the history tools."
                 .to_string(),
-            fallback_buffer: 9_600,
+            fallback_buffer: 21_000,
             guidance_message: "You have access to two private tools for context management:\n\
                 - `history`: read-only access to previous context windows (list, search, read)\n\
                 - `notes`: read-write persistent scratchpad that survives window transitions\n\

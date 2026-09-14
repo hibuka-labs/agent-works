@@ -599,9 +599,9 @@ mod tests {
     #[test]
     fn default_config_values() {
         let c = TokenBudgetConfig::default();
-        assert_eq!(c.work_budget, 96_000);
-        assert_eq!(c.reminder_threshold, 19_200);
-        assert_eq!(c.fallback_buffer, 9_600);
+        assert_eq!(c.work_budget, 210_000);
+        assert_eq!(c.reminder_threshold, 42_000);
+        assert_eq!(c.fallback_buffer, 21_000);
         assert_eq!(c.min_work_multiple, 2.0);
         assert!(!c.seed_message.is_empty());
     }
