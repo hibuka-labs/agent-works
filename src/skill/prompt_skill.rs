@@ -28,6 +28,37 @@ fn default_true() -> bool {
     true
 }
 
+/// Lifetime scope of a skill body once triggered (skill-lifetime spec D1-D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillScope {
+    /// Default: the host injects the body into its system prompt for the rest
+    /// of the session (matches the Claude Code ecosystem contract — loaded
+    /// skill content stays in context).
+    Session,
+    /// One-shot: the host injects the body as an ephemeral turn input and
+    /// strips it at turn end (the ephemeral-injection path).
+    Turn,
+}
+
+impl SkillScope {
+    /// Parse the raw frontmatter value. Missing/empty/unknown values fall back
+    /// to [`SkillScope::Session`] — the ecosystem default; unknown values warn.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Self::Session,
+            Some("session") => Self::Session,
+            Some("turn") => Self::Turn,
+            Some(other) => {
+                tracing::warn!(
+                    value = other,
+                    "unknown skill scope in SKILL.md frontmatter, falling back to 'session'"
+                );
+                Self::Session
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillFrontmatter {
     pub name: String,
@@ -63,6 +94,14 @@ pub struct SkillFrontmatter {
     /// like deploy/commit).
     #[serde(default, alias = "disable-model-invocation")]
     pub disable_model_invocation: bool,
+
+    /// Lifetime of the body once triggered. `session` (default): the host
+    /// injects it into its system prompt until session end. `turn`: one-shot —
+    /// the host injects it as an ephemeral turn input and strips it at turn
+    /// end. Raw string; parsed by [`SkillScope::parse`] with warn-on-unknown so
+    /// a typo can never fail the whole SKILL.md load.
+    #[serde(default)]
+    pub scope: Option<String>,
 
     /// Parameter placeholders (e.g. `[{name: branch, description: "Target branch"}]`).
     /// Body uses `$branch` to reference these.
@@ -215,6 +254,12 @@ impl PromptSkill {
     /// The raw frontmatter (for introspection).
     pub fn frontmatter(&self) -> &SkillFrontmatter {
         &self.frontmatter
+    }
+
+    /// Lifetime scope once triggered (frontmatter `scope:`; missing/unknown
+    /// values fall back to `session`).
+    pub fn scope(&self) -> SkillScope {
+        SkillScope::parse(self.frontmatter.scope.as_deref())
     }
 
     /// The Markdown body (without frontmatter).

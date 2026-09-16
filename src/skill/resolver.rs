@@ -10,11 +10,26 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::Skill;
-use super::prompt_skill::PromptSkill;
+use super::prompt_skill::{PromptSkill, SkillScope};
 
 /// Scanned skill set backing slash lookup and the `skill` tool.
 pub struct SkillResolver {
     skills: Vec<PromptSkill>,
+}
+
+/// A matched `/name args` slash invocation, with the skill's lifetime scope.
+///
+/// Hosts dispatch on [`scope`](ResolvedSkill::scope): `Session` skills go to
+/// the system prompt (persist for the session), `Turn` skills are injected as
+/// ephemeral turn input (one-shot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSkill {
+    /// Canonical name of the matched skill.
+    pub name: String,
+    /// Body with `$ARGUMENTS` substituted.
+    pub body: String,
+    /// Lifetime scope (frontmatter `scope:`; missing/unknown → `session`).
+    pub scope: SkillScope,
 }
 
 /// `resolve_by_name` 的失败原因（`skill` 工具据此生成不同错误文案）。
@@ -55,6 +70,13 @@ impl SkillResolver {
     ///
     /// 返回 `None` 表示输入不是斜杠命令（或未匹配到 skill），应原样提交。
     pub fn resolve(&self, input: &str) -> Option<String> {
+        self.resolve_with_meta(input).map(|r| r.body)
+    }
+
+    /// Like [`resolve`](Self::resolve), but also returns the matched skill's
+    /// canonical name and lifetime scope — hosts need both to dispatch
+    /// session-scope skills into their system prompt.
+    pub fn resolve_with_meta(&self, input: &str) -> Option<ResolvedSkill> {
         let trimmed = input.trim();
         if !trimmed.starts_with('/') {
             return None;
@@ -92,10 +114,15 @@ impl SkillResolver {
             matched = skill.name(),
             args = raw_args,
             body_len = body.len(),
+            scope = ?skill.scope(),
             "resolved /skill command"
         );
 
-        Some(body)
+        Some(ResolvedSkill {
+            name: skill.name().to_string(),
+            body,
+            scope: skill.scope(),
+        })
     }
 
     /// 按优先级模糊查找 skill：exact → suffix → contains → word-overlap。
@@ -538,5 +565,70 @@ mod tests {
             "later readable dir must still be scanned"
         );
         assert!(resolver.resolve("/commit").is_some());
+    }
+
+    // ── scope 解析（skill-lifetime v3）──
+
+    /// 写一个带任意额外 frontmatter 行的 skill。
+    fn make_skill_with_frontmatter(tmp: &Path, name: &str, extra: &str) {
+        let skill_dir = tmp.join("skills").join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        let content = format!(
+            "---\nname: {name}\ndescription: d\nuser-invocable: true\n{extra}\n---\n\nbody of {name}"
+        );
+        fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[test]
+    fn scope_defaults_to_session_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_skill_with_frontmatter(tmp.path(), "plain", "");
+
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        let resolved = resolver.resolve_with_meta("/plain").unwrap();
+        assert_eq!(resolved.scope, SkillScope::Session);
+        assert_eq!(resolved.name, "plain");
+        assert!(resolved.body.contains("body of plain"));
+    }
+
+    #[test]
+    fn scope_turn_is_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_skill_with_frontmatter(tmp.path(), "oneshot", "scope: turn");
+
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        assert_eq!(
+            resolver.resolve_with_meta("/oneshot").unwrap().scope,
+            SkillScope::Turn
+        );
+    }
+
+    #[test]
+    fn scope_session_explicit_and_unknown_fall_back_to_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_skill_with_frontmatter(tmp.path(), "explicit", "scope: session");
+        // 拼写错误绝不能让整个 SKILL.md 加载失败——回落 session。
+        make_skill_with_frontmatter(tmp.path(), "typo", "scope: sesion");
+
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        assert_eq!(resolver.len(), 2, "typo in scope must not fail the load");
+        assert_eq!(
+            resolver.resolve_with_meta("/explicit").unwrap().scope,
+            SkillScope::Session
+        );
+        assert_eq!(
+            resolver.resolve_with_meta("/typo").unwrap().scope,
+            SkillScope::Session
+        );
+    }
+
+    #[test]
+    fn resolve_delegates_to_resolve_with_meta_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_skill_with_frontmatter(tmp.path(), "commit", "scope: turn");
+
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        let via_meta = resolver.resolve_with_meta("/commit").unwrap();
+        assert_eq!(Some(via_meta.body), resolver.resolve("/commit"));
     }
 }

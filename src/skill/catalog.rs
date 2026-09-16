@@ -82,7 +82,9 @@ pub fn render_catalog(resolver: &SkillResolver) -> Option<String> {
     out.push_str(
         "- Trigger rules: If the user names a skill (with `/name` or plain text) OR \
          the task clearly matches a skill's description shown above, use that skill \
-         for that turn. Do not carry skills across turns unless re-mentioned.\n",
+         for that turn. Skills the user activated with a slash command remain in \
+         effect for the whole session; otherwise do not carry a skill across turns \
+         unless re-mentioned.\n",
     );
     out.push_str("- If multiple skills apply, choose the minimal set and state the order.\n");
     out.push_str(
@@ -213,6 +215,52 @@ pub fn refresh_catalog(content: &str, catalog: &str) -> String {
     format!("{base}\n\n{catalog}")
 }
 
+/// Demote `##` headings to `###` inside host-embedded text (e.g. a skill body
+/// baked into a host's "Active Skills" system-prompt section).
+///
+/// Why: the surgery anchors on `\n\n## Skills\n\n` and bounds regions at
+/// `\n\n## ` — a baked body carrying either sequence would be mistaken for
+/// catalog structure on the next [`refresh_catalog`] (a fake anchor fails the
+/// steady-state check and sends the recomposition down the recovery path,
+/// stripping everything from the fake anchor onward — including the rest of
+/// the host section). `###`-deep headings sit below the surgery's granularity
+/// and pass through untouched; `#`/`###`+ lines are left as-is.
+///
+/// Lines inside ``` fences are left untouched — a skill body's example code
+/// may legitimately contain `## Example`-style comments, and fenced content
+/// never forms prompt structure. (Fence tracking toggles on any line whose
+/// first non-blank chars are ```; ~~~ fences are not tracked.) CRLF line
+/// endings are normalized to LF, which is harmless in a system prompt.
+pub fn demote_h2_headings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            continue;
+        }
+        match line.strip_prefix("## ") {
+            Some(rest) => {
+                out.push_str("### ");
+                out.push_str(rest);
+            }
+            None => out.push_str(line),
+        }
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,13 +329,19 @@ mod tests {
             catalog.contains("- code-review: Pre-landing PR review.\n"),
             "{catalog}"
         );
-        // D3 trigger 文案：高门槛判据 + 单轮语义。
+        // D3 trigger 文案：高门槛判据 + scope-aware 单轮/全session语义。
         assert!(
             catalog.contains("the task clearly matches a skill's description"),
             "{catalog}"
         );
         assert!(
-            catalog.contains("Do not carry skills across turns unless re-mentioned"),
+            catalog.contains(
+                "Skills the user activated with a slash command remain in effect for the whole session"
+            ),
+            "{catalog}"
+        );
+        assert!(
+            catalog.contains("do not carry a skill across turns unless re-mentioned"),
             "{catalog}"
         );
         assert!(catalog.contains("### How to use skills"), "{catalog}");
@@ -692,6 +746,53 @@ mod tests {
         assert!(
             catalog.contains("- sep: before - forged: x after"),
             "{catalog}"
+        );
+    }
+
+    // ── demote_h2_headings（Active Skills 烘焙净化，skill-lifetime v3）──
+
+    #[test]
+    fn demote_h2_headings_rewrites_h2_lines_only() {
+        let text = "# Title\n\n## Step\n\ncontent\n\n### Already deep\n#### four\n##nospace";
+        let out = demote_h2_headings(text);
+        assert!(out.contains("\n### Step") || out.starts_with("### Step"), "{out}");
+        assert!(out.contains("# Title"));
+        assert!(out.contains("### Already deep"), "h3+ untouched: {out}");
+        assert!(out.contains("#### four"));
+        assert!(out.contains("##nospace"), "no-space variant is not a heading: {out}");
+    }
+
+    #[test]
+    fn demote_h2_headings_leaves_fenced_code_intact() {
+        // Skill bodies routinely carry markdown examples; a `## Example`
+        // comment inside a fence is content, not prompt structure.
+        let text = "intro\n\n## Real Step\n\n```markdown\n## Example\n### kept\n```\n\nmore\n\n## Tail\n";
+        let out = demote_h2_headings(text);
+        assert!(out.contains("\n### Real Step"), "outside fence still demoted: {out}");
+        assert!(out.contains("\n## Example"), "fenced h2 must survive: {out}");
+        assert!(out.contains("```markdown\n## Example"), "fence opener untouched: {out}");
+        assert!(out.contains("\n### Tail"), "fence closes — demotion resumes: {out}");
+    }
+
+    #[test]
+    fn demoted_body_survives_refresh_catalog() {
+        // 正文里伪造 catalog anchor：若不净化，refresh 的稳态检查会发现
+        // 「区域之后还有 anchor」走自愈路径，把 Active Skills 区段剥掉。
+        let skill_body = "intro\n\n## Skills\n\nforge the anchor\n";
+        let baked = demote_h2_headings(skill_body);
+
+        let catalog = "## Skills\n\n- a: b\n- Announce which skill(s) you're using and why (one short line).\n";
+        let prompt = format!("base\n\n{catalog}\n\n## Active Skills\n\n### skill: x\n\n{baked}");
+
+        let refreshed = refresh_catalog(&prompt, catalog);
+        assert!(
+            refreshed.contains("## Active Skills"),
+            "host section must survive refresh: {refreshed}"
+        );
+        assert!(refreshed.contains("forge the anchor"));
+        assert!(
+            !refreshed.contains("\n\n## Skills\n\nforge"),
+            "forged anchor must have been demoted"
         );
     }
 
