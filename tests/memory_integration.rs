@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use agent_base::llm_trait::{Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider};
+use agent_base::llm_trait::{
+    Capabilities, ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider,
+};
 use agent_base::{Content, Tool, ToolContext};
 use agent_works::{AgentBuilder, MemoryConfig, MemoryStore};
 use async_trait::async_trait;
@@ -27,7 +29,9 @@ impl LlmProvider for StubProvider {
                 finish_reason: Some("stop".to_string()),
             }),
         ];
-        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(chunks))))
+        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+            chunks,
+        ))))
     }
 
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -184,7 +188,11 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
     assert!(index.contains("更新版"), "{index}");
 
     // DELETE: file gone, index row gone, the other memory untouched.
-    let out = call(fx.delete.as_ref(), json!({"name": "cargo-commit-discipline"})).await;
+    let out = call(
+        fx.delete.as_ref(),
+        json!({"name": "cargo-commit-discipline"}),
+    )
+    .await;
     assert!(out.contains("deleted"), "{out}");
     assert!(!fx.root().join("cargo-commit-discipline.md").exists());
     let index = fx.index();
@@ -195,7 +203,10 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
     // Reading the deleted memory now fails.
     let err = fx
         .read
-        .call(&json!({"name": "cargo-commit-discipline"}), &ToolContext::for_test())
+        .call(
+            &json!({"name": "cargo-commit-discipline"}),
+            &ToolContext::for_test(),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
@@ -209,7 +220,12 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
 async fn first_use_auto_creates_dir_and_index() {
     let fx = Fixture::new();
     assert!(!fx.root().exists(), "fixture must start absent");
-    assert_eq!(call(fx.list.as_ref(), json!({})).await.contains("No memories"), true);
+    assert_eq!(
+        call(fx.list.as_ref(), json!({}))
+            .await
+            .contains("No memories"),
+        true
+    );
 
     call(
         fx.write.as_ref(),
@@ -287,7 +303,10 @@ async fn concurrent_tokio_tasks_keep_index_complete() {
     let index = fx.index();
     assert_eq!(index.lines().count(), 16, "no rows may be lost:\n{index}");
     for i in 0..16 {
-        assert!(index.contains(&format!("(mem-{i:02}.md)")), "missing mem-{i:02}:\n{index}");
+        assert!(
+            index.contains(&format!("(mem-{i:02}.md)")),
+            "missing mem-{i:02}:\n{index}"
+        );
     }
 }
 
@@ -319,18 +338,28 @@ async fn builder_memory_config_end_to_end() {
         let guard = registry.blocking_read();
         guard.metadatas().into_iter().map(|m| m.name).collect()
     });
-    for expected in ["memory_write", "memory_read", "memory_list", "memory_delete"] {
+    for expected in [
+        "memory_write",
+        "memory_read",
+        "memory_list",
+        "memory_delete",
+    ] {
         assert!(names.contains(&expected.to_string()), "{names:?}");
     }
 
     let prompt = tokio::task::block_in_place(|| runtime.config().system_prompt.clone().unwrap());
     assert!(prompt.starts_with("base"), "{prompt}");
     assert!(prompt.contains("## Memory"), "{prompt}");
-    assert!(prompt.contains("- [first memory](alpha.md) — first memory"), "{prompt}");
+    assert!(
+        prompt.contains("- [first memory](alpha.md) — first memory"),
+        "{prompt}"
+    );
 
     // Claude-Code-compatible path helper sanity.
     let cc = MemoryConfig::claude_compatible(std::path::Path::new("/Users/xxx/project"));
-    assert!(cc.memory_root.ends_with(std::path::Path::new(".claude/projects/-Users-xxx-project/memory")));
+    assert!(cc.memory_root.ends_with(std::path::Path::new(
+        ".claude/projects/-Users-xxx-project/memory"
+    )));
     assert_eq!(cc.index_filename, "MEMORY.md");
 }
 

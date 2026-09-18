@@ -594,9 +594,7 @@ impl AgentRegistry {
             let blocking: Vec<String> = self
                 .agents
                 .values()
-                .filter(|e| {
-                    !e.closing && (e.in_flight || e.queue_len > 0 || e.results_posted < 1)
-                })
+                .filter(|e| !e.closing && (e.in_flight || e.queue_len > 0 || e.results_posted < 1))
                 .map(|e| {
                     format!(
                         "{}: in_flight={}, queue_len={}, results_posted={}",

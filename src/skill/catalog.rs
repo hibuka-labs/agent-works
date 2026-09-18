@@ -755,23 +755,42 @@ mod tests {
     fn demote_h2_headings_rewrites_h2_lines_only() {
         let text = "# Title\n\n## Step\n\ncontent\n\n### Already deep\n#### four\n##nospace";
         let out = demote_h2_headings(text);
-        assert!(out.contains("\n### Step") || out.starts_with("### Step"), "{out}");
+        assert!(
+            out.contains("\n### Step") || out.starts_with("### Step"),
+            "{out}"
+        );
         assert!(out.contains("# Title"));
         assert!(out.contains("### Already deep"), "h3+ untouched: {out}");
         assert!(out.contains("#### four"));
-        assert!(out.contains("##nospace"), "no-space variant is not a heading: {out}");
+        assert!(
+            out.contains("##nospace"),
+            "no-space variant is not a heading: {out}"
+        );
     }
 
     #[test]
     fn demote_h2_headings_leaves_fenced_code_intact() {
         // Skill bodies routinely carry markdown examples; a `## Example`
         // comment inside a fence is content, not prompt structure.
-        let text = "intro\n\n## Real Step\n\n```markdown\n## Example\n### kept\n```\n\nmore\n\n## Tail\n";
+        let text =
+            "intro\n\n## Real Step\n\n```markdown\n## Example\n### kept\n```\n\nmore\n\n## Tail\n";
         let out = demote_h2_headings(text);
-        assert!(out.contains("\n### Real Step"), "outside fence still demoted: {out}");
-        assert!(out.contains("\n## Example"), "fenced h2 must survive: {out}");
-        assert!(out.contains("```markdown\n## Example"), "fence opener untouched: {out}");
-        assert!(out.contains("\n### Tail"), "fence closes — demotion resumes: {out}");
+        assert!(
+            out.contains("\n### Real Step"),
+            "outside fence still demoted: {out}"
+        );
+        assert!(
+            out.contains("\n## Example"),
+            "fenced h2 must survive: {out}"
+        );
+        assert!(
+            out.contains("```markdown\n## Example"),
+            "fence opener untouched: {out}"
+        );
+        assert!(
+            out.contains("\n### Tail"),
+            "fence closes — demotion resumes: {out}"
+        );
     }
 
     #[test]

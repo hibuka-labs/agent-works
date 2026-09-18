@@ -113,7 +113,11 @@ pub struct MemoryFrontmatterMetadata {
     pub node_type: String,
     #[serde(rename = "type")]
     pub memory_type: String,
-    #[serde(rename = "originSessionId", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "originSessionId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub origin_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
@@ -169,8 +173,12 @@ fn split_frontmatter(raw: &str) -> Option<(String, String)> {
 /// file" (fault tolerance for files Claude Code may have written badly).
 pub fn parse_memory_file(path: &Path) -> AgentResult<MemoryDoc> {
     let raw = fs::read_to_string(path)?;
-    parse_memory_str(&raw)
-        .ok_or_else(|| AgentError::internal(format!("{}: missing or malformed frontmatter", path.display())))
+    parse_memory_str(&raw).ok_or_else(|| {
+        AgentError::internal(format!(
+            "{}: missing or malformed frontmatter",
+            path.display()
+        ))
+    })
 }
 
 /// Parse memory file content (frontmatter + body).
@@ -219,10 +227,14 @@ pub fn render_memory_file(
     };
     // serde_yaml (never string concatenation) so descriptions with special
     // characters are quoted/escaped correctly.
-    let yaml = serde_yaml::to_string(&fm)
-        .map_err(|e| AgentError::internal(format!("failed to serialize memory frontmatter: {e}")))?;
+    let yaml = serde_yaml::to_string(&fm).map_err(|e| {
+        AgentError::internal(format!("failed to serialize memory frontmatter: {e}"))
+    })?;
     // `to_string` output always ends with '\n'.
-    Ok(format!("---\n{yaml}---\n\n{}", body.trim_start_matches('\n')))
+    Ok(format!(
+        "---\n{yaml}---\n\n{}",
+        body.trim_start_matches('\n')
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +326,10 @@ pub(crate) fn index_add(
 ) -> AgentResult<()> {
     // Self-healing: the very first write may race ahead of ensure_dir.
     fs::create_dir_all(memory_root).map_err(|e| {
-        AgentError::internal(format!("failed to create memory dir {}: {e}", memory_root.display()))
+        AgentError::internal(format!(
+            "failed to create memory dir {}: {e}",
+            memory_root.display()
+        ))
     })?;
     let index_path = memory_root.join(index_filename);
     // P2-2 fix: distinguish NotFound (empty index) from real I/O errors.
@@ -373,7 +388,10 @@ pub(crate) fn index_remove(
     name: &str,
 ) -> AgentResult<()> {
     fs::create_dir_all(memory_root).map_err(|e| {
-        AgentError::internal(format!("failed to create memory dir {}: {e}", memory_root.display()))
+        AgentError::internal(format!(
+            "failed to create memory dir {}: {e}",
+            memory_root.display()
+        ))
     })?;
     let index_path = memory_root.join(index_filename);
     // P2-2 fix: distinguish NotFound (empty index) from real I/O errors.
@@ -406,8 +424,12 @@ pub(crate) fn index_remove(
 /// from the frontmatter `name`, so Claude Code's human titles are lost (they
 /// cannot be recovered) — the memory files themselves are untouched.
 pub fn rebuild_index(memory_root: &Path, index_filename: &str) -> AgentResult<()> {
-    fs::create_dir_all(memory_root)
-        .map_err(|e| AgentError::internal(format!("failed to create memory dir {}: {e}", memory_root.display())))?;
+    fs::create_dir_all(memory_root).map_err(|e| {
+        AgentError::internal(format!(
+            "failed to create memory dir {}: {e}",
+            memory_root.display()
+        ))
+    })?;
     let mut entries: Vec<String> = Vec::new();
     for entry in fs::read_dir(memory_root)? {
         let path = entry?.path();
@@ -575,8 +597,12 @@ impl MemoryStore {
 
     /// Ensure the memory directory exists (first-use auto-init).
     pub fn ensure_dir(&self) -> AgentResult<()> {
-        fs::create_dir_all(&self.memory_root)
-            .map_err(|e| AgentError::internal(format!("failed to create memory dir {}: {e}", self.memory_root.display())))
+        fs::create_dir_all(&self.memory_root).map_err(|e| {
+            AgentError::internal(format!(
+                "failed to create memory dir {}: {e}",
+                self.memory_root.display()
+            ))
+        })
     }
 
     /// Create or overwrite the memory `name` and sync the index row.
@@ -618,7 +644,10 @@ impl MemoryStore {
         validate_memory_name(name)?;
         let path = self.memory_path(name);
         fs::read_to_string(&path).map_err(|_| {
-            AgentError::internal(format!("memory `{name}` not found (looked at {})", path.display()))
+            AgentError::internal(format!(
+                "memory `{name}` not found (looked at {})",
+                path.display()
+            ))
         })
     }
 
@@ -731,7 +760,15 @@ mod tests {
     fn name_validation_accepts_kebab_case() {
         // `^[a-z0-9][a-z0-9-]*$` permits a trailing dash — harmless, and the
         // plan pins the contract to this exact pattern.
-        for ok in ["a", "9", "valid-name", "a1-b2-c3", "9lives", "mem0ry", "trailing-"] {
+        for ok in [
+            "a",
+            "9",
+            "valid-name",
+            "a1-b2-c3",
+            "9lives",
+            "mem0ry",
+            "trailing-",
+        ] {
             assert!(is_valid_memory_name(ok), "`{ok}` should be valid");
         }
     }
@@ -1072,7 +1109,10 @@ mod tests {
         .unwrap();
         rebuild_index(&root, "MEMORY.md").unwrap();
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
-        assert_eq!(index, "", "mismatched file must not produce a dangling link: {index}");
+        assert_eq!(
+            index, "",
+            "mismatched file must not produce a dangling link: {index}"
+        );
         drop(dir);
     }
 
@@ -1101,8 +1141,12 @@ mod tests {
     fn store_same_name_update_writes_single_file_with_second_content() {
         let (dir, root) = tmp_root();
         let store = MemoryStore::new(root.clone(), "MEMORY.md");
-        store.write_memory("dup", "first desc", "project", "first body", None).unwrap();
-        store.write_memory("dup", "second desc", "feedback", "second body", None).unwrap();
+        store
+            .write_memory("dup", "first desc", "project", "first body", None)
+            .unwrap();
+        store
+            .write_memory("dup", "second desc", "feedback", "second body", None)
+            .unwrap();
 
         let files: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
@@ -1126,7 +1170,9 @@ mod tests {
     fn store_read_returns_raw_file_content() {
         let (dir, root) = tmp_root();
         let store = MemoryStore::new(root.clone(), "MEMORY.md");
-        store.write_memory("note", "d", "user", "remember this", None).unwrap();
+        store
+            .write_memory("note", "d", "user", "remember this", None)
+            .unwrap();
         let raw = store.read_memory("note").unwrap();
         assert!(raw.starts_with("---\n"));
         assert!(raw.contains("remember this"));
@@ -1146,8 +1192,12 @@ mod tests {
     fn store_delete_removes_file_and_index_row() {
         let (dir, root) = tmp_root();
         let store = MemoryStore::new(root.clone(), "MEMORY.md");
-        store.write_memory("gone", "d1", "user", "b1", None).unwrap();
-        store.write_memory("kept", "d2", "user", "b2", None).unwrap();
+        store
+            .write_memory("gone", "d1", "user", "b1", None)
+            .unwrap();
+        store
+            .write_memory("kept", "d2", "user", "b2", None)
+            .unwrap();
 
         store.delete_memory("gone").unwrap();
         assert!(!root.join("gone.md").exists());
@@ -1172,9 +1222,20 @@ mod tests {
         let (dir, root) = tmp_root();
         let store = MemoryStore::new(root.clone(), "MEMORY.md");
         assert!(store.write_memory("../x", "d", "user", "b", None).is_err());
-        assert!(store.write_memory("ok-name", "d", "wrong-type", "b", None).is_err());
-        assert!(store.write_memory("ok-name", "multi\nline", "user", "b", None).is_err());
-        assert!(!root.join("ok-name.md").exists(), "nothing may be written on rejection");
+        assert!(
+            store
+                .write_memory("ok-name", "d", "wrong-type", "b", None)
+                .is_err()
+        );
+        assert!(
+            store
+                .write_memory("ok-name", "multi\nline", "user", "b", None)
+                .is_err()
+        );
+        assert!(
+            !root.join("ok-name.md").exists(),
+            "nothing may be written on rejection"
+        );
         drop(dir);
     }
 
@@ -1182,8 +1243,12 @@ mod tests {
     fn store_list_skips_corrupt_and_sorts() {
         let (dir, root) = tmp_root();
         let store = MemoryStore::new(root.clone(), "MEMORY.md");
-        store.write_memory("zeta", "last", "project", "b", None).unwrap();
-        store.write_memory("alpha", "first", "user", "b", None).unwrap();
+        store
+            .write_memory("zeta", "last", "project", "b", None)
+            .unwrap();
+        store
+            .write_memory("alpha", "first", "user", "b", None)
+            .unwrap();
         std::fs::write(root.join("corrupt.md"), "garbage without frontmatter").unwrap();
 
         let entries = store.list_memories();
@@ -1216,7 +1281,13 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 let name = format!("mem-{i:03}");
                 store
-                    .write_memory(&name, &format!("desc {i}"), "project", &format!("body {i}"), None)
+                    .write_memory(
+                        &name,
+                        &format!("desc {i}"),
+                        "project",
+                        &format!("body {i}"),
+                        None,
+                    )
                     .unwrap();
             }));
         }
@@ -1249,7 +1320,13 @@ mod tests {
             let store = Arc::clone(&store);
             handles.push(std::thread::spawn(move || {
                 store
-                    .write_memory("shared", &format!("desc {i}"), "user", &format!("body {i}"), None)
+                    .write_memory(
+                        "shared",
+                        &format!("desc {i}"),
+                        "user",
+                        &format!("body {i}"),
+                        None,
+                    )
                     .unwrap();
             }));
         }

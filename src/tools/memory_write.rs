@@ -78,12 +78,11 @@ impl Tool for MemoryWriteTool {
     }
 
     async fn call(&self, args: &Value, ctx: &ToolContext) -> AgentResult<Vec<Content>> {
-        let parsed: WriteArgs = serde_json::from_value(args.clone()).map_err(|e| {
-            AgentError::ToolArgsInvalid {
+        let parsed: WriteArgs =
+            serde_json::from_value(args.clone()).map_err(|e| AgentError::ToolArgsInvalid {
                 name: self.name().to_string(),
                 raw: format!("{args}: {e}"),
-            }
-        })?;
+            })?;
 
         // Probe the index before writing so the confirmation can say whether
         // this call created a new memory or updated an existing one.
@@ -100,10 +99,7 @@ impl Tool for MemoryWriteTool {
         )?;
 
         let created_or_updated = if existed_before { "updated" } else { "created" };
-        let path = self
-            .store
-            .memory_root()
-            .join(format!("{}.md", parsed.name));
+        let path = self.store.memory_root().join(format!("{}.md", parsed.name));
         Ok(vec![Content::text(format!(
             "Memory `{}` {created_or_updated} at {} and the index was synced.",
             parsed.name,
@@ -161,7 +157,10 @@ mod tests {
         assert!(raw.contains("commit 永不带 Cargo 文件"));
 
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
-        assert!(index.contains("- [绝不主动 commit](cargo-commit-discipline.md) — 绝不主动 commit"), "{index}");
+        assert!(
+            index.contains("- [绝不主动 commit](cargo-commit-discipline.md) — 绝不主动 commit"),
+            "{index}"
+        );
     }
 
     #[tokio::test]
@@ -169,11 +168,17 @@ mod tests {
         let (_dir, store) = temp_store();
         let t = tool(&store);
         let ctx = ToolContext::for_test();
-        t.call(&json!({"name": "dup", "description": "v1", "type": "project", "body": "one"}), &ctx)
-            .await
-            .unwrap();
+        t.call(
+            &json!({"name": "dup", "description": "v1", "type": "project", "body": "one"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         let out = t
-            .call(&json!({"name": "dup", "description": "v2", "type": "project", "body": "two"}), &ctx)
+            .call(
+                &json!({"name": "dup", "description": "v2", "type": "project", "body": "two"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(crate::tools::test_support::first_text(&out).contains("updated"));
@@ -237,7 +242,9 @@ mod tests {
     #[tokio::test]
     async fn uses_external_session_id_when_present() {
         let (_dir, store) = temp_store();
-        let ctx = crate::tools::test_support::ctx_with_external_id("8ee16870-4dc8-4dd1-9d13-4fc7a9980f79");
+        let ctx = crate::tools::test_support::ctx_with_external_id(
+            "8ee16870-4dc8-4dd1-9d13-4fc7a9980f79",
+        );
         tool(&store)
             .call(
                 &json!({"name": "sess", "description": "d", "type": "reference", "body": "b"}),
@@ -246,7 +253,10 @@ mod tests {
             .await
             .unwrap();
         let raw = store.read_memory("sess").unwrap();
-        assert!(raw.contains("originSessionId: 8ee16870-4dc8-4dd1-9d13-4fc7a9980f79"), "{raw}");
+        assert!(
+            raw.contains("originSessionId: 8ee16870-4dc8-4dd1-9d13-4fc7a9980f79"),
+            "{raw}"
+        );
     }
 
     #[test]
@@ -254,7 +264,10 @@ mod tests {
         let schema = tool(&temp_store().1).schema();
         let required = schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 4);
-        assert_eq!(schema["properties"]["name"]["pattern"], "^[a-z0-9][a-z0-9-]*$");
+        assert_eq!(
+            schema["properties"]["name"]["pattern"],
+            "^[a-z0-9][a-z0-9-]*$"
+        );
         let variants: Vec<_> = schema["properties"]["type"]["enum"]
             .as_array()
             .unwrap()

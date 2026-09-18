@@ -1187,7 +1187,10 @@ pub fn build_memory_system_prompt_with_config(
         .prompt_template
         .replace("{memory_root}", &config.memory_root.to_string_lossy())
         .replace("{index_content}", &index)
-        .replace("{tools_description}", crate::tools::MEMORY_TOOLS_DESCRIPTION)
+        .replace(
+            "{tools_description}",
+            crate::tools::MEMORY_TOOLS_DESCRIPTION,
+        )
 }
 
 #[cfg(test)]
@@ -1626,11 +1629,12 @@ mod tests {
         #[test]
         fn prompt_with_config_substitutes_all_placeholders() {
             let (_dir, config) = temp_config();
-            let prompt = build_memory_system_prompt_with_config(
-                &config,
-                "- [alpha](alpha.md) — first\n",
+            let prompt =
+                build_memory_system_prompt_with_config(&config, "- [alpha](alpha.md) — first\n");
+            assert!(
+                prompt.contains(config.memory_root.to_string_lossy().as_ref()),
+                "{prompt}"
             );
-            assert!(prompt.contains(config.memory_root.to_string_lossy().as_ref()), "{prompt}");
             assert!(prompt.contains("- [alpha](alpha.md) — first"), "{prompt}");
             assert!(prompt.contains("memory_write"), "{prompt}");
             assert!(prompt.contains("memory_delete"), "{prompt}");
@@ -1684,17 +1688,27 @@ mod tests {
 
             // All four tools registered.
             let names = runtime_tool_names(&runtime);
-            for expected in ["memory_write", "memory_read", "memory_list", "memory_delete"] {
+            for expected in [
+                "memory_write",
+                "memory_read",
+                "memory_list",
+                "memory_delete",
+            ] {
                 assert!(names.contains(&expected.to_string()), "{names:?}");
             }
 
             // Prompt = base + memory section with the seeded index row.
-            let prompt = tokio::task::block_in_place(|| {
-                runtime.config().system_prompt.clone().unwrap()
-            });
+            let prompt =
+                tokio::task::block_in_place(|| runtime.config().system_prompt.clone().unwrap());
             assert!(prompt.starts_with("base prompt"), "{prompt}");
-            assert!(prompt.contains("- [seeded before build](seed-note.md) — seeded before build"), "{prompt}");
-            assert!(prompt.contains(dir.path().join("memory").to_string_lossy().as_ref()), "{prompt}");
+            assert!(
+                prompt.contains("- [seeded before build](seed-note.md) — seeded before build"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains(dir.path().join("memory").to_string_lossy().as_ref()),
+                "{prompt}"
+            );
         }
     }
 

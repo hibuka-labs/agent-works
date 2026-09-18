@@ -913,7 +913,10 @@ mod tests {
 
         // The parent force-closes b: terminal fact lands at cancel time,
         // then the child's unwind eventually posts Closed (the wake).
-        fx.registry.lock().unwrap().note_closing(&AgentPath::root().join("b"));
+        fx.registry
+            .lock()
+            .unwrap()
+            .note_closing(&AgentPath::root().join("b"));
         finish_and_post(&fx, "b", MailboxStatus::Closed, None);
         let _ = next_event(&mut fx).await; // Progress b (closed)
 
@@ -975,7 +978,10 @@ mod tests {
         assert_no_event(&mut fx).await; // held — b in-flight
 
         // b force-closed; its Closed post NEVER arrives (unwind never lands).
-        fx.registry.lock().unwrap().note_closing(&AgentPath::root().join("b"));
+        fx.registry
+            .lock()
+            .unwrap()
+            .note_closing(&AgentPath::root().join("b"));
 
         match next_event(&mut fx).await {
             ChildResultEvent::Batch { reports } => {

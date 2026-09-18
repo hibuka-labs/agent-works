@@ -70,8 +70,12 @@ mod tests {
     #[tokio::test]
     async fn returns_index_rows_after_writes() {
         let (_dir, store) = temp_store();
-        store.write_memory("alpha", "first", "user", "b", None).unwrap();
-        store.write_memory("beta", "second", "project", "b", None).unwrap();
+        store
+            .write_memory("alpha", "first", "user", "b", None)
+            .unwrap();
+        store
+            .write_memory("beta", "second", "project", "b", None)
+            .unwrap();
 
         let out = MemoryListTool::new(Arc::clone(&store))
             .call(&json!({}), &ToolContext::for_test())
@@ -97,7 +101,9 @@ mod tests {
     #[tokio::test]
     async fn reflects_deletes() {
         let (_dir, store) = temp_store();
-        store.write_memory("alpha", "first", "user", "b", None).unwrap();
+        store
+            .write_memory("alpha", "first", "user", "b", None)
+            .unwrap();
         store.delete_memory("alpha").unwrap();
 
         let out = MemoryListTool::new(store)
@@ -111,7 +117,9 @@ mod tests {
     #[tokio::test]
     async fn extra_args_are_ignored() {
         let (_dir, store) = temp_store();
-        store.write_memory("alpha", "first", "user", "b", None).unwrap();
+        store
+            .write_memory("alpha", "first", "user", "b", None)
+            .unwrap();
         let out = MemoryListTool::new(store)
             .call(&json!({"unused": true}), &ToolContext::for_test())
             .await

@@ -47,10 +47,9 @@ impl Tool for MemoryDeleteTool {
     }
 
     async fn call(&self, args: &Value, _ctx: &ToolContext) -> AgentResult<Vec<Content>> {
-        let name = args
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::internal("memory_delete requires a string `name` argument"))?;
+        let name = args.get("name").and_then(Value::as_str).ok_or_else(|| {
+            AgentError::internal("memory_delete requires a string `name` argument")
+        })?;
         validate_memory_name(name)?;
         self.store.delete_memory(name)?;
         Ok(vec![Content::text(format!(
@@ -73,8 +72,12 @@ mod tests {
     #[tokio::test]
     async fn deletes_file_and_index_row() {
         let (_dir, store) = temp_store();
-        store.write_memory("gone", "d1", "user", "b1", None).unwrap();
-        store.write_memory("kept", "d2", "user", "b2", None).unwrap();
+        store
+            .write_memory("gone", "d1", "user", "b1", None)
+            .unwrap();
+        store
+            .write_memory("kept", "d2", "user", "b2", None)
+            .unwrap();
 
         let out = MemoryDeleteTool::new(Arc::clone(&store))
             .call(&json!({"name": "gone"}), &ToolContext::for_test())

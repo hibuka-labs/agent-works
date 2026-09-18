@@ -101,7 +101,10 @@ mod tests {
     async fn rejects_path_escape_name() {
         let (_dir, store) = temp_store();
         let err = MemoryReadTool::new(store)
-            .call(&json!({"name": "../../etc/passwd"}), &ToolContext::for_test())
+            .call(
+                &json!({"name": "../../etc/passwd"}),
+                &ToolContext::for_test(),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid memory name"), "{err}");
