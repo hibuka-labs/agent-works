@@ -5,7 +5,7 @@
 //! first-out order), the tracked launch (`spawn_ready`) with its
 //! [`ChildCleanup`] drop-guard, and the child event loop itself. All spawn
 //! entry points — legacy positional, `ChildConfig`-driven, and the
-//! [`ChildBuilder`](super::super::ChildBuilder) fluent front — funnel through
+//! [`ChildBuilder`] fluent front — funnel through
 //! the same two steps, so the gate order and the cleanup credential exist
 //! exactly once.
 
@@ -282,7 +282,7 @@ impl MultiAgentRuntime {
 
     /// Test-facing convenience over [`spawn_with_config_forked`] with no
     /// pre-fill (the §5.4 two-arg signature). Production callers go through
-    /// [`ChildBuilder`](super::super::ChildBuilder), which always uses the forked
+    /// [`ChildBuilder`], which always uses the forked
     /// variant (with an empty message list when `fork_history` is unset).
     #[cfg(test)]
     pub(crate) async fn spawn_with_config(
@@ -299,7 +299,7 @@ impl MultiAgentRuntime {
     /// session exactly like
     /// [`spawn_child_with_history`](Self::spawn_child_with_history) (which
     /// resolves its own messages via [`resolve_fork_history`]). The
-    /// [`ChildBuilder::fork_history`](super::super::ChildBuilder::fork_history)
+    /// [`ChildBuilder::fork_history`]
     /// setter is the new entry to that route.
     ///
     /// The legacy positional [`spawn_child`](Self::spawn_child) /

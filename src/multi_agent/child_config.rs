@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 /// Configuration for one spawned child agent.
 ///
-/// Built fluently via [`ChildBuilder`](super::child_builder::ChildBuilder)
+/// Built fluently via [`ChildBuilder`]
 /// (stage-1 API, same feature gate), or constructed directly.
 #[derive(Debug, Clone, Default)]
 pub struct ChildConfig {

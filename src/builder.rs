@@ -1161,7 +1161,7 @@ You have a persistent file-based memory at `.phi/memory/`. Use `read_file` and `
         .to_string()
 }
 
-/// Build the memory system prompt from a [`MemoryConfig`](crate::memory::MemoryConfig)
+/// Build the memory system prompt from a [`MemoryConfig`]
 /// (Phase 9b).
 ///
 /// Renders `config.prompt_template`, substituting the placeholders:

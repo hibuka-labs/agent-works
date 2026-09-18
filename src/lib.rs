@@ -1,3 +1,4 @@
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
