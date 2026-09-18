@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-18
+
+### Added
+- **Auto-memory system** (behind `memory` feature): persistent project memory
+  compatible with Claude Code storage (`~/.claude/projects/<slug>/memory/`).
+  Includes `MemoryStore`, `MemoryConfig`, memory tools (write/read/list/delete),
+  frontmatter serde, atomic writes, line-level index management, and builder
+  integration across all 4 build paths. 66 unit + 6 integration tests.
+- **Session-scope slash commands**: slash-activated skills get `Session` scope
+  (stays in effect for the whole session instead of single-turn). Catalog
+  trigger copy distinguishes session-scope from single-turn skills.
+- **Active Skills bake sanitization** (`demote_h2_headings`): prevents skill
+  body `##` headings from colliding with prompt-surgery anchors.
+- **`closing` terminal fact** on `AgentEntry`: force-killed children count as
+  settled for fan-in quiescence immediately; `note_closing()` method +
+  `status()` derives to `Closed` on close.
+- **Held-batch reaper** (90s liveness backstop): hands over stranded reports
+  when quiescence is unachievable rather than deadlocking.
+- **Shutdown flush**: watcher force-hands-over held reports on cancel/hub-drop.
+
+### Changed
+- Default work budget increased from 96K → 210K (aligned with ~256K context
+  window × 90% minus base overhead).
+
 ## [0.7.0] - 2026-09-11
 
 ### Added
