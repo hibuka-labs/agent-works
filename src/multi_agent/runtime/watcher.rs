@@ -535,7 +535,7 @@ pub fn spawn_watcher_with_watchdog(
                         .and_then(|p| {
                             p.downcast_ref::<&str>()
                                 .map(|s| s.to_string())
-                                .or_else(|| p.downcast_ref::<String>().map(|s| s.clone()))
+                                .or_else(|| p.downcast_ref::<String>().cloned())
                         })
                         .unwrap_or_else(|| "unknown panic".to_string());
 

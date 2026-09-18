@@ -892,13 +892,7 @@ mod tests {
         assert_eq!(ts.len(), 24, "{ts}");
         assert!(ts.ends_with('Z'));
         let bytes = ts.as_bytes();
-        for (i, expected) in [
-            b'd', b'd', b'd', b'd', b'-', b'd', b'd', b'-', b'd', b'd', b'T', b'd', b'd', b':',
-            b'd', b'd', b':', b'd', b'd', b'.', b'd', b'd', b'd', b'Z',
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (i, expected) in b"dddd-dd-ddTdd:dd:dd.dddZ".iter().enumerate() {
             let actual = bytes[i];
             match expected {
                 b'd' => assert!(actual.is_ascii_digit(), "{ts}"),

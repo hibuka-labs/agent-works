@@ -220,11 +220,10 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
 async fn first_use_auto_creates_dir_and_index() {
     let fx = Fixture::new();
     assert!(!fx.root().exists(), "fixture must start absent");
-    assert_eq!(
+    assert!(
         call(fx.list.as_ref(), json!({}))
             .await
-            .contains("No memories"),
-        true
+            .contains("No memories")
     );
 
     call(

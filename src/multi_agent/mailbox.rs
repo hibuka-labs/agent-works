@@ -255,10 +255,10 @@ impl MailboxHub {
     /// tombstoned results (see `unregister`).
     pub fn try_recv_result(&self, agent_path: &AgentPath) -> Option<MailboxResult> {
         let mut entries = self.entries.lock().unwrap();
-        if let Some(e) = entries.get_mut(agent_path) {
-            if !e.results.is_empty() {
-                return Some(e.results.remove(0));
-            }
+        if let Some(e) = entries.get_mut(agent_path)
+            && !e.results.is_empty()
+        {
+            return Some(e.results.remove(0));
         }
         let mut tombstones = self.tombstones.lock().unwrap();
         tombstones
