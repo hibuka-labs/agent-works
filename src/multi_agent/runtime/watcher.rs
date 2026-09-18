@@ -47,6 +47,7 @@
 //!   sibling's result cannot fire a batch that would exclude it.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -171,6 +172,11 @@ fn error_reason(result_text: Option<&str>) -> Option<String> {
 /// Spawn the background watcher (fan-in coordinator) task.
 ///
 /// Returns a `JoinHandle` that the caller can store (or ignore — the task
+/// Production held-batch reap delay: a batch held this long while no agent
+/// can still post means quiescence failed on facts that will never settle
+/// (force-closed child, unwind that never lands) — hand the batch over.
+pub(crate) const HELD_BATCH_REAP_AFTER: Duration = Duration::from_secs(90);
+
 /// exits when the `cancel` token is fired or the channel sender is dropped).
 pub fn spawn_watcher(
     mailbox: Arc<MailboxHub>,
@@ -178,21 +184,60 @@ pub fn spawn_watcher(
     summarizer: Option<Arc<ProgressSummarizer>>,
     child_result_tx: Option<mpsc::UnboundedSender<ChildResultEvent>>,
     cancel: CancellationToken,
+    held_reap_after: Duration,
 ) -> tokio::task::JoinHandle<()> {
     let mut seq_rx = mailbox.subscribe_seq();
 
     tokio::spawn(async move {
         // Results held until the whole generation has returned.
         let mut batch: Vec<MailboxResult> = Vec::new();
+        // When the oldest held report arrived — drives the held-batch reaper.
+        let mut batch_first_at: Option<Instant> = None;
+        let mut reap_tick = tokio::time::interval(held_reap_after);
+        // Consume the interval's immediate first tick so reaping runs on a
+        // steady cadence from now on, not at spawn time.
+        reap_tick.tick().await;
 
         loop {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
+                    // Shutdown flush: reports already held must reach the
+                    // parent — a watcher's death must never bury them.
+                    force_handover(&mut batch, &registry, &child_result_tx);
                     break;
+                }
+                _ = reap_tick.tick() => {
+                    // Held-batch reaper (liveness backstop): a batch held past
+                    // `held_reap_after` while no agent can still post means
+                    // quiescence failed on facts that will never settle —
+                    // hand over anyway rather than strand the reports.
+                    let held = batch_first_at.is_some_and(|t| t.elapsed() >= held_reap_after);
+                    if !held {
+                        continue;
+                    }
+                    let any_working = registry
+                        .lock()
+                        .unwrap()
+                        .list()
+                        .iter()
+                        .any(|e| !e.closing && (e.in_flight || e.queue_len > 0));
+                    if any_working {
+                        continue;
+                    }
+                    tracing::info!(
+                        batch_len = batch.len(),
+                        held_for_secs = batch_first_at.map(|t| t.elapsed().as_secs()),
+                        "watcher: held-batch reaper firing — quiescence unachievable, forcing handover"
+                    );
+                    force_handover(&mut batch, &registry, &child_result_tx);
+                    batch_first_at = None;
                 }
                 result = seq_rx.changed() => {
                     if result.is_err() {
+                        // Hub dropped — same contract as cancel: flush what
+                        // the parent would otherwise never see.
+                        force_handover(&mut batch, &registry, &child_result_tx);
                         break;
                     }
 
@@ -317,6 +362,9 @@ pub fn spawn_watcher(
                                 }
                             }
                         }
+                        if batch_first_at.is_none() {
+                            batch_first_at = Some(Instant::now());
+                        }
                         batch.push(r);
                     }
 
@@ -351,6 +399,7 @@ pub fn spawn_watcher(
                         // above; the parent has nothing to synthesize. Reset
                         // so they cannot leak into a later generation.
                         batch.clear();
+                        batch_first_at = None;
                         continue;
                     }
                     // Stamp the delivery fact BEFORE draining: everything in
@@ -375,6 +424,7 @@ pub fn spawn_watcher(
                         .drain(..)
                         .map(|r| format_child_result(&r))
                         .collect();
+                    batch_first_at = None;
                     if let Some(tx) = &child_result_tx {
                         let _ = tx.send(ChildResultEvent::Batch { reports });
                     }
@@ -392,6 +442,53 @@ fn status_str(status: &MailboxStatus) -> &'static str {
     }
 }
 
+/// Fire a held batch unconditionally — the liveness backstop shared by the
+/// shutdown flush and the held-batch reaper.
+///
+/// The normal handover waits for registry quiescence, but registry facts can
+/// settle into a state quiescence can never accept (a force-closed child
+/// whose unwind never lands, an entry left mid-flight by an abnormal exit):
+/// without this, held reports are stranded until process death and the
+/// parent's final report is written blind (session 20260914_50cf809d — two
+/// specialist reports lost). Semantics mirror the main handover path: drop
+/// Closed-only batches, stamp `note_batch_handed_over` first, then drain.
+fn force_handover(
+    batch: &mut Vec<MailboxResult>,
+    registry: &Arc<Mutex<AgentRegistry>>,
+    child_result_tx: &Option<mpsc::UnboundedSender<ChildResultEvent>>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let any_real = batch
+        .iter()
+        .any(|b| !matches!(b.status, MailboxStatus::Closed));
+    if !any_real {
+        // Only close notifications — nothing to synthesize.
+        batch.clear();
+        return;
+    }
+    let batch_paths: Vec<AgentPath> = {
+        let mut seen = std::collections::BTreeSet::new();
+        batch
+            .iter()
+            .filter(|r| !matches!(r.status, MailboxStatus::Closed))
+            .filter(|r| seen.insert(r.agent_path.to_string()))
+            .map(|r| r.agent_path.clone())
+            .collect()
+    };
+    {
+        let mut reg = registry.lock().unwrap();
+        for path in &batch_paths {
+            reg.note_batch_handed_over(path);
+        }
+    }
+    let reports = batch.drain(..).map(|r| format_child_result(&r)).collect();
+    if let Some(tx) = child_result_tx {
+        let _ = tx.send(ChildResultEvent::Batch { reports });
+    }
+}
+
 /// Spawn a watchdog-wrapped watcher task.
 ///
 /// The watchdog monitors the inner watcher task and restarts it if it panics.
@@ -405,6 +502,7 @@ pub fn spawn_watcher_with_watchdog(
     summarizer: Option<Arc<ProgressSummarizer>>,
     child_result_tx: Option<mpsc::UnboundedSender<ChildResultEvent>>,
     cancel: CancellationToken,
+    held_reap_after: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut restart_count: u32 = 0;
@@ -420,6 +518,7 @@ pub fn spawn_watcher_with_watchdog(
                 summarizer.clone(),
                 child_result_tx.clone(),
                 cancel.clone(),
+                held_reap_after,
             );
 
             // Wait for the watcher to finish.
@@ -488,6 +587,21 @@ mod tests {
     }
 
     fn fixture_with_summarizer(summarizer: Option<Arc<ProgressSummarizer>>) -> Fixture {
+        fixture_with(Config {
+            summarizer,
+            held_reap_after: std::time::Duration::from_secs(1),
+        })
+    }
+
+    /// Fixture knobs that must differ per test (production uses
+    /// `HELD_BATCH_REAP_AFTER`; tests keep the reap window above the
+    /// `assert_no_event` windows except where the reaper is the subject).
+    struct Config {
+        summarizer: Option<Arc<ProgressSummarizer>>,
+        held_reap_after: std::time::Duration,
+    }
+
+    fn fixture_with(cfg: Config) -> Fixture {
         let mailbox = Arc::new(MailboxHub::new());
         let registry = Arc::new(Mutex::new(AgentRegistry::new(MultiAgentConfig::enabled())));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -495,9 +609,10 @@ mod tests {
         let handle = spawn_watcher_with_watchdog(
             mailbox.clone(),
             registry.clone(),
-            summarizer,
+            cfg.summarizer,
             Some(tx),
             cancel.clone(),
+            cfg.held_reap_after,
         );
         Fixture {
             mailbox,
@@ -778,6 +893,100 @@ mod tests {
         fx.cancel.cancel();
     }
 
+    /// Variant-B regression (session 20260914_50cf809d): a held report must
+    /// fire once the force-closed sibling is marked closing — even though it
+    /// will never deliver a real result. Before the `closing` fact, the
+    /// killed child's `in_flight=true, results_posted=0` blocked quiescence
+    /// forever and the report was lost (the parent's final review was then
+    /// written blind, claiming "both specialists completed").
+    #[tokio::test]
+    async fn force_closed_child_does_not_block_batch() {
+        let mut fx = fixture();
+        for name in ["a", "b"] {
+            spawn_running(&fx, name);
+        }
+
+        // a finishes; held because b is in-flight with no result.
+        finish_and_post(&fx, "a", MailboxStatus::Ok, Some("a done"));
+        let _ = next_event(&mut fx).await; // Progress a
+        assert_no_event(&mut fx).await;
+
+        // The parent force-closes b: terminal fact lands at cancel time,
+        // then the child's unwind eventually posts Closed (the wake).
+        fx.registry.lock().unwrap().note_closing(&AgentPath::root().join("b"));
+        finish_and_post(&fx, "b", MailboxStatus::Closed, None);
+        let _ = next_event(&mut fx).await; // Progress b (closed)
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => {
+                let paths: Vec<&str> = reports.iter().map(|r| r.agent_path.as_str()).collect();
+                assert!(
+                    paths.contains(&"root/a"),
+                    "a's held report must be delivered, got {paths:?}"
+                );
+            }
+            other => panic!("expected Batch after close, got {other:?}"),
+        }
+        fx.cancel.cancel();
+    }
+
+    /// A watcher's death must never bury held reports: on cancel the batch
+    /// is flushed to the parent (session 20260914_50cf809d — the stranded
+    /// batch died with the process).
+    #[tokio::test]
+    async fn watcher_shutdown_flush_delivers_held_batch() {
+        let mut fx = fixture();
+        for name in ["a", "b"] {
+            spawn_running(&fx, name);
+        }
+
+        // a's report held: b is in-flight and (in this test) never settles —
+        // no closing fact, no Closed post, no wake. Only the shutdown flush
+        // can deliver it.
+        finish_and_post(&fx, "a", MailboxStatus::Ok, Some("a done"));
+        let _ = next_event(&mut fx).await; // Progress a
+        assert_no_event(&mut fx).await;
+
+        fx.cancel.cancel();
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => {
+                let paths: Vec<&str> = reports.iter().map(|r| r.agent_path.as_str()).collect();
+                assert_eq!(paths, vec!["root/a"], "held report flushed on shutdown");
+            }
+            other => panic!("expected Batch on shutdown flush, got {other:?}"),
+        }
+    }
+
+    /// The reaper backstop: a batch held past the reap window while no agent
+    /// can still post is handed over even without any wake (here: b was
+    /// closed and its unwind never posts anything).
+    #[tokio::test]
+    async fn held_batch_reaper_fires_when_nothing_can_post() {
+        let mut fx = fixture_with(Config {
+            summarizer: None,
+            held_reap_after: std::time::Duration::from_millis(100),
+        });
+        for name in ["a", "b"] {
+            spawn_running(&fx, name);
+        }
+
+        finish_and_post(&fx, "a", MailboxStatus::Ok, Some("a done"));
+        let _ = next_event(&mut fx).await; // Progress a
+        assert_no_event(&mut fx).await; // held — b in-flight
+
+        // b force-closed; its Closed post NEVER arrives (unwind never lands).
+        fx.registry.lock().unwrap().note_closing(&AgentPath::root().join("b"));
+
+        match next_event(&mut fx).await {
+            ChildResultEvent::Batch { reports } => {
+                let paths: Vec<&str> = reports.iter().map(|r| r.agent_path.as_str()).collect();
+                assert_eq!(paths, vec!["root/a"], "reaper must deliver the held report");
+            }
+            other => panic!("expected reaper Batch, got {other:?}"),
+        }
+        fx.cancel.cancel();
+    }
+
     #[tokio::test]
     async fn watcher_exits_on_cancel() {
         let mailbox = Arc::new(MailboxHub::new());
@@ -785,7 +994,14 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
 
-        let handle = spawn_watcher(mailbox.clone(), registry, None, Some(tx), cancel.clone());
+        let handle = spawn_watcher(
+            mailbox.clone(),
+            registry,
+            None,
+            Some(tx),
+            cancel.clone(),
+            HELD_BATCH_REAP_AFTER,
+        );
         cancel.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
@@ -799,8 +1015,14 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
 
-        let handle =
-            spawn_watcher_with_watchdog(mailbox.clone(), registry, None, Some(tx), cancel.clone());
+        let handle = spawn_watcher_with_watchdog(
+            mailbox.clone(),
+            registry,
+            None,
+            Some(tx),
+            cancel.clone(),
+            HELD_BATCH_REAP_AFTER,
+        );
         cancel.cancel();
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(3), handle).await;

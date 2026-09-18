@@ -485,6 +485,7 @@ impl MultiAgentRuntime {
             Some(summarizer),
             Some(child_result_tx),
             self.root_cancel.clone(),
+            watcher::HELD_BATCH_REAP_AFTER,
         );
 
         (handle, child_result_rx)
@@ -513,8 +514,15 @@ impl MultiAgentRuntime {
                 .unwrap_or_else(|| "unknown".to_string())
         };
 
-        // Cancel only — do NOT remove the token or touch registry/mailbox:
-        // ChildCleanup is the single removal point on all exit paths.
+        // Cancel only — do NOT remove the token or touch the mailbox:
+        // ChildCleanup is the single removal point on all exit paths. The
+        // registry DOES get a terminal fact now (`note_closing`): the child
+        // may take arbitrarily long to unwind (cancellation lands at its
+        // next await point), and until it does its stale `in_flight=true,
+        // results_posted=0` facts would block fan-in quiescence forever —
+        // a held sibling report would never fire (session
+        // 20260914_50cf809d). Closing also derives the status to `Closed`
+        // so list_agents / the task panel reflect the close immediately.
         let closed = {
             let cancels = self.child_cancels.lock().unwrap();
             match cancels.get(&path) {
@@ -531,6 +539,11 @@ impl MultiAgentRuntime {
                 None => false,
             }
         };
+        if closed {
+            // Lock ordering: child_cancels (above, released) → registry.
+            // Idempotent beyond the first close (closing is sticky).
+            self.registry.lock().unwrap().note_closing(&path);
+        }
 
         Ok(CloseResult {
             closed,
@@ -609,9 +622,21 @@ impl MultiAgentRuntime {
 
     /// Cancel all child agents.
     pub fn cancel_all(&self) {
-        let mut cancels = self.child_cancels.lock().unwrap();
-        for (_, token) in cancels.drain() {
-            token.cancel();
+        let cancelled: Vec<AgentPath> = {
+            let mut cancels = self.child_cancels.lock().unwrap();
+            cancels
+                .drain()
+                .map(|(path, token)| {
+                    token.cancel();
+                    path
+                })
+                .collect()
+        };
+        // Same terminal-fact rationale as `close_agent`: every cancelled
+        // child stops counting against fan-in quiescence immediately.
+        let mut registry = self.registry.lock().unwrap();
+        for path in &cancelled {
+            registry.note_closing(path);
         }
     }
 }

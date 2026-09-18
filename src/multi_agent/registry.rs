@@ -140,6 +140,17 @@ pub struct AgentEntry {
     /// When the current `Running` period began (the last dequeue). `None`
     /// outside `Running`; feeds stall detection (Phase 6 reaper).
     pub running_since: Option<Instant>,
+    /// A cancel was requested for this agent (`close_agent` / `cancel_all`).
+    ///
+    /// Terminal fact: the child will never run its normal result epilogue
+    /// (`note_posted` lives in the child loop), so before this flag existed a
+    /// force-killed child stayed `in_flight=true, results_posted=0` forever
+    /// and permanently blocked fan-in quiescence — a held batch could never
+    /// fire (session 20260914_50cf809d: two specialist reports lost). A
+    /// closing agent counts as settled for `quiescent()` and derives to
+    /// `Closed` immediately (observers see the close land at cancel time,
+    /// not at the child's eventual unwind). Cleared only by unregistration.
+    pub closing: bool,
     /// Monotonic count of results this agent has delivered. Drives the
     /// fan-in delivery-completeness clause — a registered agent with zero
     /// deliveries (spawn→send window) can never be part of a settled batch.
@@ -171,7 +182,14 @@ pub struct AgentEntry {
 
 impl AgentEntry {
     /// Derived lifecycle status (this entry is by definition registered).
+    ///
+    /// A closing agent derives straight to `Closed`: the cancel decision is
+    /// the externally observable truth, the future's unwind is an internal
+    /// detail that may lag by seconds.
     pub fn status(&self) -> AgentStatus {
+        if self.closing {
+            return AgentStatus::Closed;
+        }
         derive_status(true, self.in_flight, self.queue_len)
     }
 }
@@ -343,6 +361,7 @@ impl AgentRegistry {
                 queue_len: 0,
                 in_flight: false,
                 running_since: None,
+                closing: false,
                 results_posted: 0,
                 results_handed_over: 0,
                 tool_calls: 0,
@@ -436,6 +455,29 @@ impl AgentRegistry {
         })
     }
 
+    /// Record that a cancel was requested for the agent (facts: `closing =
+    /// true`, `in_flight = false`, `queue_len = 0`, `running_since = None`).
+    ///
+    /// Called by `close_agent` / `cancel_all` the moment they fire the cancel
+    /// token — **before** the child's future unwinds (which may lag seconds
+    /// behind: cancellation only lands at its next await point). From this
+    /// moment the agent counts as settled for fan-in quiescence (`closing`
+    /// short-circuits the per-agent clause) and derives to `Closed`.
+    ///
+    /// Queued tasks are dropped from the facts: a closing agent will never
+    /// dequeue them, so keeping the count would block `busy_count` /
+    /// quiescence for work that is already abandoned.
+    ///
+    /// Returns `true` if the agent was found.
+    pub fn note_closing(&mut self, path: &AgentPath) -> bool {
+        self.transition(path, "closing", |e| {
+            e.closing = true;
+            e.in_flight = false;
+            e.queue_len = 0;
+            e.running_since = None;
+        })
+    }
+
     /// Roll back a `note_enqueued` whose `send_task` subsequently failed
     /// (mailbox entry vanished, or the task channel rejected the task). The
     /// enqueue fact is always recorded **before** the task is sent, so a
@@ -525,7 +567,7 @@ impl AgentRegistry {
     pub fn busy_count(&self) -> usize {
         self.agents
             .values()
-            .filter(|e| e.in_flight || e.queue_len > 0)
+            .filter(|e| !e.closing && (e.in_flight || e.queue_len > 0))
             .count()
     }
 
@@ -538,16 +580,23 @@ impl AgentRegistry {
     ///    freshly spawned agent would otherwise derive `Done` and let a
     ///    sibling's result fire a batch that excludes it);
     /// 3. (caller side) the batch itself is non-empty.
+    ///
+    /// A closing agent satisfies both clauses unconditionally: its cancel was
+    /// requested, so it will never post a result through the child-loop
+    /// epilogue that clause 2 counts on. Requiring a report from it would
+    /// deadlock the batch forever (session 20260914_50cf809d).
     pub fn quiescent(&self) -> bool {
         let all_quiet = self
             .agents
             .values()
-            .all(|e| !e.in_flight && e.queue_len == 0 && e.results_posted >= 1);
+            .all(|e| e.closing || (!e.in_flight && e.queue_len == 0 && e.results_posted >= 1));
         if !all_quiet {
             let blocking: Vec<String> = self
                 .agents
                 .values()
-                .filter(|e| e.in_flight || e.queue_len > 0 || e.results_posted < 1)
+                .filter(|e| {
+                    !e.closing && (e.in_flight || e.queue_len > 0 || e.results_posted < 1)
+                })
                 .map(|e| {
                     format!(
                         "{}: in_flight={}, queue_len={}, results_posted={}",

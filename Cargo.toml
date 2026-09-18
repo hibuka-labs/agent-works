@@ -27,7 +27,10 @@ multi_agent = ["focus"]
 # the RUSTFLAGS form leaks into tokio's own loom mode and breaks hyper-util.
 # Run: cargo test --features multi_agent,loom-check --lib loom
 loom-check = ["dep:loom"]
-full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression"]
+# Persistent auto-memory (Phase 9b): memory_* tools + index injection.
+# Claude Code compatible storage (~/.claude/projects/<slug>/memory/).
+memory = ["serde_yaml", "dep:dirs"]
+full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression", "memory"]
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
@@ -43,6 +46,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 reqwest = { version = "0.13", features = ["json"] }
 serde_yaml = { version = "0.9", optional = true }
+dirs = { version = "5", optional = true }
 notify = { version = "7", optional = true, default-features = false, features = ["macos_kqueue"] }
 loom = { version = "0.7", optional = true }
 
