@@ -34,7 +34,7 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.6.0" }
+agent-base = { version = "0.7.0" }
 async-trait = "0.1"
 dyn-clone = "1"
 futures-core = "0.3"
