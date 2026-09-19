@@ -75,6 +75,11 @@ pub struct ControlConfig {
     /// custom mutating tools add them here. In `Auto` mode this list is
     /// unused.
     pub write_tools: Vec<String>,
+
+    /// File-level write gate between children (design 2026-09-19 D6).
+    /// Default `true`; turning it off reverts to pure prompt discipline.
+    /// No effect on read-only children (they never get write tools).
+    pub child_write_gate: bool,
 }
 
 impl Default for ControlConfig {
@@ -86,6 +91,7 @@ impl Default for ControlConfig {
             task_timeout: None,
             autonomy: AgentAutonomy::default(),
             write_tools: super::preset::default_write_tools(),
+            child_write_gate: true,
         }
     }
 }
@@ -192,6 +198,18 @@ pub struct MultiAgentConfig {
     /// meant to write (the codex-style symmetric model).
     pub child_read_only: bool,
 
+    /// Whether child agents may request write capability via the spawn
+    /// `tools` argument (design 2026-09-19 D3). Default `false`: the upgrade
+    /// is zero-behaviour-change for existing deployments; enabling is an
+    /// explicit, per-deployment opt-in.
+    ///
+    /// When `false`, a `tools: "write"` (or write-carrying preset) request
+    /// **degrades to read-only** and the resolution carries the reason, which
+    /// the spawn output echoes — deployment-side tightening warns, it does
+    /// not error (§5.4 precedent), and the echo avoids the fake-completion
+    /// trap (§6.1).
+    pub allow_child_write: bool,
+
     /// Fork-history policy applied to every spawn, replacing the per-spawn
     /// LLM-supplied `fork_history` argument (removed from the tool schema —
     /// the LLM should not control context inheritance).
@@ -218,6 +236,7 @@ impl Default for MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            allow_child_write: false,
             child_fork_history: None,
             control: ControlConfig::default(),
         }
@@ -243,6 +262,7 @@ impl MultiAgentConfig {
             child_excluded_tools: Vec::new(),
             child_reasoning_effort: None,
             child_read_only: true,
+            allow_child_write: false,
             child_fork_history: None,
             control: ControlConfig::default(),
         }

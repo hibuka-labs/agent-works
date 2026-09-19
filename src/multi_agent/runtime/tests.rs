@@ -200,6 +200,7 @@ impl agent_base::llm_trait::LlmProvider for DelayedStub {
 
 // scenario modules (split from the former inline `mod tests`)
 mod autonomy;
+mod capability;
 mod cleanup;
 mod control;
 mod denied;
@@ -208,3 +209,4 @@ mod lifecycle;
 mod outcome;
 mod permission;
 mod whitelist;
+mod write_gate;

@@ -10,6 +10,7 @@
 //! exactly once.
 
 use super::*;
+use crate::multi_agent::capability::{CapabilityResolution, ChildToolCapability};
 
 impl MultiAgentRuntime {
     /// Spawn a child agent at the given path with a specific system prompt.
@@ -42,7 +43,7 @@ impl MultiAgentRuntime {
             ..Default::default()
         };
         let prepared = self
-            .spawn_inner(name, depth, &config, parent_messages)
+            .spawn_inner(name, depth, &config, parent_messages, None)
             .await
             // Legacy error strings preserved byte-for-byte: `ConfigError`
             // wraps the plain SpawnError / "mailbox already exists" /
@@ -74,6 +75,7 @@ impl MultiAgentRuntime {
         depth: i32,
         config: &ChildConfig,
         parent_messages: Vec<agent_base::ChatMessage>,
+        capability: Option<&ChildToolCapability>,
     ) -> Result<PreparedChild, AgentError> {
         let path = AgentPath::root().join(name);
 
@@ -130,8 +132,13 @@ impl MultiAgentRuntime {
         // the caller's contract, §5.4); every other build error is wrapped
         // with the historical "failed to build child runtime:" prefix so the
         // legacy spawn_child string output is unchanged.
-        let (child_runtime, spawned_tools) = self
-            .build_child_runtime_with_config(config, self.spawn_permission(config.full_permission))
+        let (child_runtime, spawned_tools, resolution) = self
+            .build_child_runtime_with_config(
+                config,
+                self.spawn_permission(config.full_permission),
+                capability,
+                &path.to_string(),
+            )
             .await
             .map_err(|e| {
                 self.registry.lock().unwrap().close(&path);
@@ -170,6 +177,7 @@ impl MultiAgentRuntime {
             slot,
             ticket,
             spawned_tools,
+            resolution,
         })
     }
 
@@ -191,6 +199,7 @@ impl MultiAgentRuntime {
             slot,
             ticket,
             spawned_tools: _spawned_tools,
+            resolution: _resolution,
         } = prepared;
 
         let task_timeout = self.task_timeout;
@@ -205,6 +214,8 @@ impl MultiAgentRuntime {
             registry: self.registry.clone(),
             child_cancels: self.child_cancels.clone(),
             path: agent_path.clone(),
+            write_gate: Arc::clone(&self.write_gate),
+            spawned_tools: Arc::clone(&self.spawned_tools),
         };
 
         self.join_set.lock().unwrap().spawn(async move {
@@ -243,6 +254,11 @@ impl MultiAgentRuntime {
     /// `parent_session_id`: the parent agent's session ID.
     /// `model`: requested model override, carried into `ChildConfig.model`.
     /// TODO(layer-3): inert today — see `ChildConfig::model`.
+    /// `capability`: the per-spawn capability request (design 2026-09-19 D2);
+    /// `None` is the legacy programmatic path (resolution skips the
+    /// capability layer, byte-identical to pre-upgrade behaviour).
+    /// Returns a [`SpawnEcho`]: path + actually-registered tools + the
+    /// degradation reason, if any (外部声音发现 9).
     #[allow(clippy::too_many_arguments)] // spawn config is naturally positional
     pub async fn spawn_child_with_history(
         &self,
@@ -251,8 +267,9 @@ impl MultiAgentRuntime {
         full_permission: bool,
         fork_history: Option<String>,
         model: Option<String>,
+        capability: Option<ChildToolCapability>,
         parent_session_id: &SessionId,
-    ) -> Result<String, String> {
+    ) -> Result<SpawnEcho, String> {
         let parent_messages = self
             .resolve_fork_history(fork_history, parent_session_id)
             .await;
@@ -262,14 +279,23 @@ impl MultiAgentRuntime {
             model,
             ..Default::default()
         };
-        self.spawn_with_config_forked(name.to_string(), config, parent_messages)
-            .await
-            // Legacy error strings preserved byte-for-byte (see spawn_child).
-            .map_err(|e| match e {
-                AgentError::ConfigError(s) => s,
-                other => other.to_string(),
-            })
-            .map(|spawned| spawned.path.to_string())
+        self.spawn_with_config_forked(
+            name.to_string(),
+            config,
+            parent_messages,
+            capability,
+        )
+        .await
+        // Legacy error strings preserved byte-for-byte (see spawn_child).
+        .map_err(|e| match e {
+            AgentError::ConfigError(s) => s,
+            other => other.to_string(),
+        })
+        .map(|spawned| SpawnEcho {
+            agent_path: spawned.path.to_string(),
+            registered_tools: spawned.spawned_tools.clone(),
+            degraded_reason: spawned.resolution().degraded_reason.clone(),
+        })
     }
 
     /// Fluent entry point for the new spawn API (§5.3). Takes `&Arc<Self>`
@@ -290,7 +316,7 @@ impl MultiAgentRuntime {
         name: String,
         config: ChildConfig,
     ) -> Result<SpawnedChild, AgentError> {
-        self.spawn_with_config_forked(name, config, Vec::new())
+        self.spawn_with_config_forked(name, config, Vec::new(), None)
             .await
     }
 
@@ -316,6 +342,7 @@ impl MultiAgentRuntime {
         name: String,
         config: ChildConfig,
         parent_messages: Vec<agent_base::ChatMessage>,
+        capability: Option<ChildToolCapability>,
     ) -> Result<SpawnedChild, AgentError> {
         // Required-field check (runtime, fail-fast — §5.1).
         if config.system_prompt.as_deref().unwrap_or("").is_empty() {
@@ -327,14 +354,25 @@ impl MultiAgentRuntime {
         // Nesting is structurally absent (K5 / §10.1 B4): a config child is
         // always a direct child of root. The *actual* registered tool set is
         // echoed in `SpawnedChild::spawned_tools`.
-        let prepared = self.spawn_inner(&name, 1, &config, parent_messages).await?;
+        let prepared = self
+            .spawn_inner(&name, 1, &config, parent_messages, capability.as_ref())
+            .await?;
 
         let path = prepared.path.clone();
         let spawned_tools = prepared.spawned_tools.clone();
+        let resolution = prepared.resolution.clone();
         self.spawn_ready(prepared);
+        // T8 wiring: publish the echo for `list_agents`. The child is live
+        // from `spawn_ready` on, and the entry leaves with it via
+        // `ChildCleanup::drop` — same lifetime as the registry entry itself.
+        self.spawned_tools.lock().unwrap().insert(
+            path.to_string(),
+            spawned_tools.iter().cloned().collect(),
+        );
         Ok(SpawnedChild {
             path,
             spawned_tools,
+            resolution,
         })
     }
 }
@@ -366,6 +404,8 @@ struct PreparedChild {
     /// child's real capability set (§5.4). Empty for the legacy path's
     /// internal bookkeeping is unused, but always accurate.
     spawned_tools: BTreeSet<String>,
+    /// 能力解析摘要（T6 回显通道）。
+    resolution: CapabilityResolution,
 }
 
 /// Result of [`MultiAgentRuntime::spawn_with_config`] (design §5.4).
@@ -377,6 +417,7 @@ struct PreparedChild {
 pub(crate) struct SpawnedChild {
     path: AgentPath,
     spawned_tools: BTreeSet<String>,
+    resolution: CapabilityResolution,
 }
 
 impl SpawnedChild {
@@ -388,6 +429,22 @@ impl SpawnedChild {
     pub(crate) fn spawned_tools(&self) -> &BTreeSet<String> {
         &self.spawned_tools
     }
+    /// 能力解析摘要（spawn 回显通道，外部声音发现 9）。
+    pub(crate) fn resolution(&self) -> &CapabilityResolution {
+        &self.resolution
+    }
+}
+
+/// spawn 回显（设计文档 v3 外部声音发现 9）：path + 实际注册工具 + 降级
+/// 摘要。spawn 工具层拼进输出 message，父 agent 看得到降级事实（避免
+/// "假完成"）。
+#[derive(Clone, Debug)]
+pub struct SpawnEcho {
+    pub agent_path: String,
+    /// 实际注册的工具（post-exclusion）。
+    pub registered_tools: BTreeSet<String>,
+    /// 降级原因（None = 未降级）。
+    pub degraded_reason: Option<String>,
 }
 
 /// The child task's cleanup credential (design doc §5.4, review B-2/M-2/M-7).
@@ -413,6 +470,12 @@ struct ChildCleanup {
     registry: Arc<Mutex<AgentRegistry>>,
     child_cancels: Arc<Mutex<HashMap<AgentPath, CancellationToken>>>,
     path: AgentPath,
+    /// 写门（D6）：drop 时释放该 agent 的全部文件声明。超时 reaper 不走
+    /// 这里（agent 存活，声明继续有效）——只有终局清理释放。
+    write_gate: Arc<crate::multi_agent::write_gate::WorkspaceWriteGate>,
+    /// 注册工具回显表（T8 接线）：drop 时移除该 agent 的条目，与写门同一
+    /// 终局清理点。
+    spawned_tools: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Drop for ChildCleanup {
@@ -436,10 +499,18 @@ impl Drop for ChildCleanup {
         // 3. remove the mailbox entry (bumps seq again — the waiter's
         //    deterministic close→wait wake point).
         self.mailbox.unregister(&self.path);
-        // 4. drop the cancellation token if `close_agent` left it in place
+        // 4. remove the cancellation token if `close_agent` left it in place
         //    (`close_agent` cancels but no longer removes; this is the single
         //    removal point).
         self.child_cancels.lock().unwrap().remove(&self.path);
+        // 5. release the write-gate claims held by this agent (D6). Normal
+        //    close, panic unwind and abort all run this Drop — the single
+        //    release point. The task-timeout reaper does NOT (the agent
+        //    survives; its claims stay valid).
+        self.write_gate.release_all(self.path.to_string().as_str());
+        // 6. remove this agent's spawned-tools echo entry (T8 wiring) — the
+        //    agent is leaving the listing entirely, so its echo goes with it.
+        self.spawned_tools.lock().unwrap().remove(&self.path.to_string());
         // `_slot` drops at the end of this function → live concurrency − 1.
     }
 }

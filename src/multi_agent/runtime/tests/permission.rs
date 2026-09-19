@@ -84,7 +84,29 @@ async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
     // Codex-style: a restricted child routes the approval decision up to the
     // parent's handler (human-in-the-loop / auto) rather than hard-denying
     // locally. This is what makes `ask` mode coherent for sub-agents.
-    let parent_handler: Arc<dyn ApprovalHandler> = Arc::new(AllowAllApprovalHandler);
+    //
+    // D4: since the wrapping `SourcedApprovalHandler` sits between the child
+    // and the parent handler, the delegation is asserted behaviourally —
+    // approving through the child's handler must reach the parent handler
+    // with the source stamped (child path), and the decision must come back.
+    struct RecordingParent {
+        seen: std::sync::Mutex<Vec<agent_base::ApprovalRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalHandler for RecordingParent {
+        async fn approve(
+            &self,
+            request: agent_base::ApprovalRequest,
+            _cancel_token: tokio_util::sync::CancellationToken,
+        ) -> agent_base::AgentResult<agent_base::ApprovalDecision> {
+            self.seen.lock().unwrap().push(request);
+            Ok(agent_base::ApprovalDecision::AllowOnce)
+        }
+    }
+
+    let parent = Arc::new(RecordingParent { seen: Default::default() });
+    let parent_handler: Arc<dyn ApprovalHandler> = parent.clone();
     let ma = make_runtime_full_with_approval(
         ChildPermissionMode::None,
         None,
@@ -97,7 +119,31 @@ async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
     let child_handler = child
         .approval_handler()
         .expect("child should carry an approval handler");
-    assert!(Arc::ptr_eq(child_handler, &parent_handler));
+    let decision = child_handler
+        .approve(
+            agent_base::ApprovalRequest {
+                title: "write_file".into(),
+                message: "m".into(),
+                action_key: None,
+                risk_level: agent_base::RiskLevel::Sensitive,
+                raw: None,
+                source: None,
+            },
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("delegation resolves");
+    assert!(matches!(
+        decision,
+        agent_base::ApprovalDecision::AllowOnce
+    ));
+    let seen = parent.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "request must reach the parent handler");
+    assert_eq!(
+        seen[0].source.as_deref(),
+        Some("root/test-child"),
+        "D4: wrapper stamps the child path as source"
+    );
 }
 
 #[tokio::test]
@@ -120,6 +166,7 @@ async fn build_child_runtime_none_denies_when_parent_has_no_handler() {
                 action_key: None,
                 risk_level: agent_base::RiskLevel::Sensitive,
                 raw: None,
+                source: None,
             },
             tokio_util::sync::CancellationToken::new(),
         )
@@ -184,4 +231,100 @@ async fn build_child_runtime_excludes_root_level_tools() {
         registry.get("read_file").is_some(),
         "non-excluded tools must still be inherited"
     );
+}
+
+// ── SourcedApprovalHandler (design 2026-09-19 D4) ──
+
+/// D4：SourcedApprovalHandler 填充 source、不覆盖已有值、Err 透传。
+mod sourced_handler {
+    use std::sync::Arc;
+
+    use agent_base::{ApprovalDecision, ApprovalHandler, ApprovalRequest, RiskLevel};
+
+    /// 记录收到的请求；`fail` 为 true 时返回 Err（测透传）。
+    struct RecordingHandler {
+        seen: std::sync::Mutex<Vec<ApprovalRequest>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalHandler for RecordingHandler {
+        async fn approve(
+            &self,
+            request: ApprovalRequest,
+            _cancel_token: tokio_util::sync::CancellationToken,
+        ) -> agent_base::AgentResult<ApprovalDecision> {
+            self.seen.lock().unwrap().push(request);
+            if self.fail {
+                Err(agent_base::AgentError::internal("boom"))
+            } else {
+                Ok(ApprovalDecision::AllowOnce)
+            }
+        }
+    }
+
+    fn request() -> ApprovalRequest {
+        ApprovalRequest {
+            title: "write_file".into(),
+            message: "m".into(),
+            action_key: None,
+            risk_level: RiskLevel::Sensitive,
+            raw: None,
+            source: None,
+        }
+    }
+
+    fn handler() -> Arc<RecordingHandler> {
+        Arc::new(RecordingHandler { seen: Default::default(), fail: false })
+    }
+
+    #[tokio::test]
+    async fn fills_source_when_absent() {
+        let inner = handler();
+        let h = crate::multi_agent::runtime::build::SourcedApprovalHandler {
+            inner: inner.clone(),
+            source: "root/coder-1".to_string(),
+        };
+        let d = h
+            .approve(request(), tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(d, ApprovalDecision::AllowOnce));
+        assert_eq!(
+            inner.seen.lock().unwrap()[0].source.as_deref(),
+            Some("root/coder-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn never_overwrites_existing_source() {
+        let inner = handler();
+        let h = crate::multi_agent::runtime::build::SourcedApprovalHandler {
+            inner: inner.clone(),
+            source: "root/coder-1".to_string(),
+        };
+        let mut req = request();
+        req.source = Some("root/other".into());
+        h.approve(req, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        // 内部 handler 看到的仍是原值——包装器只在 None 时填充。
+        assert_eq!(
+            inner.seen.lock().unwrap()[0].source.as_deref(),
+            Some("root/other")
+        );
+    }
+
+    #[tokio::test]
+    async fn passes_through_inner_decision_and_error() {
+        let inner = Arc::new(RecordingHandler { seen: Default::default(), fail: true });
+        let h = crate::multi_agent::runtime::build::SourcedApprovalHandler {
+            inner,
+            source: "root/x".to_string(),
+        };
+        let out = h
+            .approve(request(), tokio_util::sync::CancellationToken::new())
+            .await;
+        assert!(out.is_err(), "inner Err must propagate");
+    }
 }

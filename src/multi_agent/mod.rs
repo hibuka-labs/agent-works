@@ -25,6 +25,7 @@
 //! The 6 LLM tools that use this infrastructure live in `phi-kernel-tools`.
 
 pub mod budget;
+pub mod capability;
 pub mod child;
 pub mod child_builder;
 pub mod child_config;
@@ -37,8 +38,10 @@ pub mod path;
 pub mod preset;
 pub mod registry;
 pub mod runtime;
+pub mod write_gate;
 
 pub use budget::{BudgetError, RolloutBudget, SpawnTicket, usage_total};
+pub use capability::{CapabilityResolution, ChildToolCapability, resolve_capability};
 pub use child::{ChildGuard, ChildHandle, ChildOutcome};
 pub use child_builder::ChildBuilder;
 pub use child_config::ChildConfig;
@@ -50,3 +53,4 @@ pub use path::AgentPath;
 pub use preset::ChildPreset;
 pub use runtime::MultiAgentRuntime;
 pub use runtime::{ChildReport, ChildResultEvent};
+pub use write_gate::{GatedTool, WorkspaceWriteGate, WRITE_GATE_TOOLS};

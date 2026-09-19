@@ -47,8 +47,22 @@ fn autonomy_floors_permission_and_forces_nudge() {
     let manual_full = make_runtime_bits(Full, false, AgentAutonomy::Manual);
     assert!(!manual_full.spawn_permission(Some(true)));
 
-    // Nudge: configured on Auto, forced on under Manual (§7.5 layer ③).
-    assert!(auto_full.effective_read_only_nudge());
-    assert!(!make_runtime_bits(Full, false, AgentAutonomy::Auto).effective_read_only_nudge());
-    assert!(make_runtime_bits(Full, false, AgentAutonomy::Manual).effective_read_only_nudge());
+    // Nudge (D3.1): the per-child three-condition rule lives in
+    // `capability::read_only_nudge` — Manual forces it on, the
+    // `child_read_only` switch forces it on, and a child whose exclusion
+    // set no longer covers the write set (i.e. a write-capable child)
+    // gets no nudge.
+    // (Deployment-bits derivation was removed with the per-child rule;
+    // the full matrix is covered by `capability.rs::nudge_three_conditions`.)
+    let write_tools: Vec<String> = vec!["write_file".to_string(), "edit_file".to_string()];
+    let no_exclusions = std::collections::BTreeSet::new();
+    assert!(crate::multi_agent::capability::read_only_nudge(
+        AgentAutonomy::Manual, false, &no_exclusions, &write_tools
+    ));
+    assert!(!crate::multi_agent::capability::read_only_nudge(
+        AgentAutonomy::Auto, false, &no_exclusions, &write_tools
+    ));
+    assert!(crate::multi_agent::capability::read_only_nudge(
+        AgentAutonomy::Auto, true, &no_exclusions, &write_tools
+    ));
 }

@@ -98,14 +98,34 @@ pub struct MultiAgentRuntime {
     /// [`MultiAgentConfig::child_read_only`]).
     child_read_only: bool,
 
+    /// Whether children may request write capability via the spawn `tools`
+    /// argument (design 2026-09-19 D3; see
+    /// [`MultiAgentConfig::allow_child_write`]).
+    allow_child_write: bool,
+
+    /// Write gate (D6): process-wide file-level write-mutual-exclusion table
+    /// shared by all children of this runtime (parent exempt — only child
+    /// tool instances get wrapped).
+    write_gate: Arc<super::write_gate::WorkspaceWriteGate>,
+
+    /// Write-gate switch (`ControlConfig.child_write_gate`). `false` wraps
+    /// nothing.
+    write_gate_enabled: bool,
+
+    /// Per-child echo of the actually-registered tool set (design
+    /// 2026-09-19 T8 wiring): filled at spawn, surfaced through
+    /// [`list_agents`](Self::list_agents), removed when the child leaves
+    /// (same drop-guard as the write gate).
+    spawned_tools: Arc<Mutex<HashMap<String, Vec<String>>>>,
+
     /// Fork-history policy applied to every spawn (see
     /// [`MultiAgentConfig::child_fork_history`]).
     child_fork_history: Option<String>,
 
     /// Deployment autonomy mode (design §7.5). Drives the `Manual`
-    /// three-layer expansion in `spawn_permission`,
-    /// `effective_read_only_nudge` (both in `build`), and
-    /// the exclusion merge in `build_child_runtime_with_config`. `Auto`
+    /// three-layer expansion in `spawn_permission`, the per-child
+    /// `capability::read_only_nudge` gate (both in `build`), and
+    /// the exclusion merge inside `resolve_capability`. `Auto`
     /// (default) keeps every layer exactly as configured.
     autonomy: AgentAutonomy,
 
@@ -175,6 +195,11 @@ impl MultiAgentRuntime {
         let child_excluded_tools = config.child_excluded_tools.clone();
         let child_reasoning_effort = config.child_reasoning_effort.clone();
         let child_read_only = config.child_read_only;
+        let allow_child_write = config.allow_child_write;
+        let write_gate = Arc::new(super::write_gate::WorkspaceWriteGate::new());
+        let write_gate_enabled = config.control.child_write_gate;
+        let spawned_tools: Arc<Mutex<HashMap<String, Vec<String>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let child_fork_history = config.child_fork_history.clone();
         // Control plane: the config knobs land in `AgentControl` (budget +
         // limiter). `None` knobs → unlimited gates that still count (§7.2).
@@ -194,6 +219,10 @@ impl MultiAgentRuntime {
             child_excluded_tools,
             child_reasoning_effort,
             child_read_only,
+            allow_child_write,
+            write_gate,
+            write_gate_enabled,
+            spawned_tools,
             child_fork_history,
             autonomy,
             write_tools,
@@ -225,6 +254,13 @@ impl MultiAgentRuntime {
     /// an LLM-supplied argument.
     pub fn child_fork_history(&self) -> Option<&str> {
         self.child_fork_history.as_deref()
+    }
+
+    /// Test-only view of the write gate (D6): integration tests probe
+    /// claims directly.
+    #[cfg(test)]
+    pub(crate) fn write_gate_for_test(&self) -> &Arc<super::write_gate::WorkspaceWriteGate> {
+        &self.write_gate
     }
 
     /// Set the event sender for bridging child events to parent.
@@ -562,6 +598,7 @@ impl MultiAgentRuntime {
     /// the same view the lifecycle watch channel publishes — so the tool and
     /// any UI consumer always see one identical truth.
     pub fn list_agents(&self) -> Vec<AgentInfo> {
+        let tools = self.spawned_tools.lock().unwrap();
         self.registry
             .lock()
             .unwrap()
@@ -569,13 +606,14 @@ impl MultiAgentRuntime {
             .agents
             .into_iter()
             .map(|a| AgentInfo {
-                agent_path: a.path,
+                agent_path: a.path.clone(),
                 status: a.status,
                 tool_calls: a.tool_calls,
                 running_secs: a.running_secs,
                 last_activity_secs: a.last_activity_secs,
                 task: a.task,
                 pending_results: a.pending_results,
+                spawned_tools: tools.get(&a.path).cloned().unwrap_or_default(),
             })
             .collect()
     }
@@ -716,6 +754,11 @@ pub struct AgentInfo {
     /// future batch — do not redo the work, end the turn to receive it.
     #[serde(skip_serializing_if = "is_zero")]
     pub pending_results: usize,
+    /// The tools this child was **actually** registered with (post-exclusion,
+    /// post-whitelist; design 2026-09-19 外部声音发现 9 / T8 wiring). Empty
+    /// for read-only children — the omission IS the fact.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spawned_tools: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {

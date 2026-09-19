@@ -58,18 +58,19 @@ async fn test_spawn_send_task_wait_close_lifecycle() {
 async fn test_spawn_child_with_history_defaults_to_none() {
     let ma = make_ma_runtime();
     // No session manager set → fork_history resolves to empty; spawn still succeeds.
-    let path = ma
+    let echo = ma
         .spawn_child_with_history(
             "w2",
             "prompt".to_string(),
             false,
             None,
             None,
+            None,
             &agent_base::SessionId::new(0),
         )
         .await
         .expect("spawn with history");
-    assert_eq!(path, "root/w2");
+    assert_eq!(echo.agent_path, "root/w2");
 }
 
 #[tokio::test(flavor = "multi_thread")]

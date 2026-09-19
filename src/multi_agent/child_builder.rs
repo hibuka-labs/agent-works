@@ -152,7 +152,7 @@ impl ChildBuilder {
         };
         let spawned = self
             .runtime
-            .spawn_with_config_forked(name, self.draft, parent_messages)
+            .spawn_with_config_forked(name, self.draft, parent_messages, None)
             .await?;
         Ok(ChildHandle::new(
             Arc::clone(&self.runtime),
