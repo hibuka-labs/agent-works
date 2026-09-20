@@ -53,13 +53,104 @@ impl agent_base::llm_trait::LlmProvider for StreamingStub {
     }
 }
 
+/// Stub provider that emits one tool call on its first turn and plain text
+/// afterwards: drives a real child task through the full
+/// "LLM → tool execution → LLM → completion" chain (the write-gate and
+/// recycle tests depend on that timing). The tool-call chunk shape matches
+/// the llm_engine aggregator (OpenAI delta form).
+pub(crate) struct ToolCallOnceStub {
+    pub tool: &'static str,
+    pub arguments: &'static str,
+    turns: std::sync::atomic::AtomicUsize,
+}
+
+impl ToolCallOnceStub {
+    pub(crate) fn new(tool: &'static str, arguments: &'static str) -> Self {
+        Self {
+            tool,
+            arguments,
+            turns: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl agent_base::llm_trait::LlmProvider for ToolCallOnceStub {
+    async fn stream(
+        &self,
+        _request: agent_base::llm_trait::ChatRequest,
+    ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
+        let turn = self
+            .turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let chunks: Vec<Result<agent_base::StreamChunk, agent_base::llm_trait::LlmError>> =
+            if turn == 0 {
+                vec![
+                    Ok(agent_base::StreamChunk::ToolCall(serde_json::json!({
+                        "delta": { "tool_calls": [
+                            { "index": 0, "id": "call_1",
+                              "function": { "name": self.tool, "arguments": self.arguments } }
+                        ] }
+                    }))),
+                    Ok(agent_base::StreamChunk::Stop {
+                        finish_reason: Some("tool_calls".to_string()),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(agent_base::StreamChunk::Text("stub done".to_string())),
+                    Ok(agent_base::StreamChunk::Stop {
+                        finish_reason: Some("stop".to_string()),
+                    }),
+                ]
+            };
+        Ok(agent_base::llm_trait::ChatStream::new(Box::pin(
+            futures_util::stream::iter(chunks),
+        )))
+    }
+
+    async fn chat(
+        &self,
+        _request: agent_base::llm_trait::ChatRequest,
+    ) -> Result<agent_base::llm_trait::ChatResponse, agent_base::llm_trait::LlmError> {
+        Ok(agent_base::llm_trait::ChatResponse {
+            content: "stub done".to_string(),
+            tool_calls: vec![],
+            usage: agent_base::llm_trait::types::UsageInfo::default(),
+            finish_reason: agent_base::llm_trait::response::FinishReason::Stop,
+            raw: None,
+            reasoning_content: None,
+            thinking_signature: None,
+        })
+    }
+
+    fn capabilities(&self) -> agent_base::llm_trait::Capabilities {
+        agent_base::llm_trait::Capabilities::default()
+    }
+
+    fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+        agent_base::llm_trait::ProviderInfo {
+            name: "tool-call-once-stub".to_string(),
+            model: "stub-model".to_string(),
+            version: None,
+        }
+    }
+}
+
 fn make_ma_runtime_with(
     client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+) -> Arc<MultiAgentRuntime> {
+    make_ma_runtime_with_tools(client, vec![])
+}
+
+fn make_ma_runtime_with_tools(
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+    tools: Vec<Arc<dyn Tool>>,
 ) -> Arc<MultiAgentRuntime> {
     Arc::new(MultiAgentRuntime::new(
         MultiAgentConfig::enabled(),
         client,
-        vec![],
+        tools,
         tokio_util::sync::CancellationToken::new(),
         None,
         agent_base::Language::En,

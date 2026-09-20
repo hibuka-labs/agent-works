@@ -19,6 +19,44 @@ use agent_base::{Content, Tool, ToolContext};
 /// gate 拦截的工具（框架已知的注册名，设计 D6）。
 pub const WRITE_GATE_TOOLS: &[&str] = &["write_file", "edit_file"];
 
+/// Claim key: a stable spelling that does not depend on whether the file
+/// exists at claim time.
+///
+/// If the file exists → `canonicalize` (resolves `..`, relative spellings,
+/// symlinks); if it does not yet exist → `canonicalize` the nearest existing
+/// ancestor and append the remaining components verbatim. Falls back to the
+/// raw path only when nothing along the way exists.
+///
+/// Why "on failure return the raw path" is not enough: on macOS `/tmp` is a
+/// symlink to `/private/tmp` (session 20260920_b979a4f7). The first writer
+/// claims before the file exists and gets the raw-path key; once the file
+/// exists, every later writer canonicalizes successfully and gets the
+/// resolved key — two keys for one file, mutual exclusion structurally
+/// bypassed.
+fn stable_key(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    while let Some(name) = cur.file_name() {
+        suffix.push(name.to_os_string());
+        let parent = match cur.parent() {
+            Some(p) if p != cur => p.to_path_buf(),
+            _ => break,
+        };
+        if let Ok(canonical) = parent.canonicalize() {
+            let mut key = canonical;
+            for part in suffix.iter().rev() {
+                key.push(part);
+            }
+            return key;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
 /// 进程内写门。一个
 /// [`MultiAgentRuntime`](crate::multi_agent::runtime::MultiAgentRuntime)
 /// 一个实例（跨子 agent 共享才能互斥）；父 agent 豁免（gate 只包子
@@ -36,9 +74,7 @@ impl WorkspaceWriteGate {
     /// 空闲 → 占用并 Ok；已被自己持有 → 幂等 Ok；他人持有 → 立即
     /// Err（指名，不不等待）。
     pub fn try_claim(&self, path: &Path, agent: &str) -> Result<(), String> {
-        // canonicalize 让同一文件的不同相对/绝对拼写指向同一条目；
-        // 失败（尚不存在的文件）退回原路径——同拼写仍互斥，诚实降级。
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical = stable_key(path);
         let mut holders = self.holders.lock().unwrap();
         match holders.get(&canonical) {
             Some(owner) if owner == agent => Ok(()),
@@ -56,6 +92,16 @@ impl WorkspaceWriteGate {
             .lock()
             .unwrap()
             .retain(|_, owner| owner != agent);
+    }
+
+    /// Read-only observation: the current holder of a path (None when
+    /// unclaimed). For tests/diagnostics — unlike `try_claim` it does
+    /// **not** create a claim (lesson from the session 20260920_5ba1bed4
+    /// regression test: a try_claim probe would grab the lock itself and
+    /// starve the child under test).
+    pub fn holder_of(&self, path: &Path) -> Option<String> {
+        let canonical = stable_key(path);
+        self.holders.lock().unwrap().get(&canonical).cloned()
     }
 }
 
@@ -156,6 +202,19 @@ mod tests {
         serde_json::json!({ "path": path })
     }
 
+    /// Read-only observation creates no claim: the gate table is unchanged
+    /// across holder_of calls — the probe never grabs the lock.
+    #[test]
+    fn holder_of_observes_without_claiming() {
+        let gate = WorkspaceWriteGate::new();
+        assert_eq!(gate.holder_of(Path::new("a.txt")), None);
+        gate.try_claim(Path::new("a.txt"), "root/x").unwrap();
+        assert_eq!(
+            gate.holder_of(Path::new("a.txt")).as_deref(),
+            Some("root/x")
+        );
+    }
+
     #[tokio::test]
     async fn claim_then_delegate() {
         let (_g, tool, wrapped) = gated();
@@ -248,5 +307,44 @@ mod tests {
         assert!(err.contains("root/a"));
         gate.release_all("root/a");
         gate.try_claim(&file, "root/b").unwrap();
+    }
+
+    /// Session 20260920_b979a4f7 regression (root cause of the round-2
+    /// acceptance failure): under a symlinked directory (macOS
+    /// `/tmp` → `/private/tmp`), the first writer claims while the file
+    /// does not yet exist — canonicalize fails and the key falls back to
+    /// the raw path. After that writer creates the file, later writers
+    /// canonicalize the same spelling successfully, resolving the symlink
+    /// → a different key → mutual exclusion bypassed (writer-b-v2 wrote
+    /// inside writer-a-v2's sleep-60 hold window and the final file was
+    /// "B"). The claim key must not depend on whether the file existed at
+    /// claim time.
+    #[cfg(unix)]
+    #[test]
+    fn claim_key_survives_file_creation_through_symlinked_dir() {
+        let tmp = std::env::temp_dir().join(format!("phimint_gate_link_{}", std::process::id()));
+        let real = tmp.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.join("link")).unwrap();
+        let gate = WorkspaceWriteGate::new();
+        let via_link = tmp.join("link").join("gate.txt");
+
+        // writer-a: claims while the file does not exist (round-2
+        // 10:21:55 "Created file").
+        gate.try_claim(&via_link, "root/a").expect("first claim on not-yet-existing file");
+
+        // writer-a creates the file.
+        std::fs::write(real.join("gate.txt"), b"A").unwrap();
+
+        // writer-b: same spelling, file now exists — must hit root/a's
+        // lock (round-2 10:22:20 bypassed exactly here; final file "B").
+        let err = gate
+            .try_claim(&via_link, "root/b")
+            .expect_err("second writer must be blocked after the file exists");
+        assert!(err.contains("root/a"), "named-owner error, got {err:?}");
+
+        gate.release_all("root/a");
+        gate.try_claim(&via_link, "root/b").expect("released file is claimable");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

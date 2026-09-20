@@ -31,6 +31,18 @@ impl Tool for StubWrite {
 }
 
 fn runtime_with_gate(gate_enabled: bool) -> Arc<MultiAgentRuntime> {
+    runtime_with_gate_and_tools(
+        gate_enabled,
+        Arc::new(StreamingStub),
+        vec![Arc::new(StubWrite)],
+    )
+}
+
+fn runtime_with_gate_and_tools(
+    gate_enabled: bool,
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+    tools: Vec<Arc<dyn Tool>>,
+) -> Arc<MultiAgentRuntime> {
     let config = MultiAgentConfig {
         allow_child_write: true,
         child_excluded_tools: vec![],
@@ -41,10 +53,9 @@ fn runtime_with_gate(gate_enabled: bool) -> Arc<MultiAgentRuntime> {
         },
         ..MultiAgentConfig::enabled()
     };
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubWrite)];
     Arc::new(MultiAgentRuntime::new(
         config,
-        Arc::new(StreamingStub),
+        client,
         tools,
         tokio_util::sync::CancellationToken::new(),
         None,
@@ -121,4 +132,93 @@ async fn close_releases_gate_claims() {
             .is_ok()
     })
     .await;
+}
+
+/// Write-tool stub that sleeps inside `call`, creating an observable window
+/// where the task is running and the claim is held (ToolCallOnceStub alone
+/// finishes in milliseconds — Fix B would release before the first poll;
+/// this is the race guard).
+struct SlowWrite(std::time::Duration);
+
+#[async_trait::async_trait]
+impl Tool for SlowWrite {
+    fn name(&self) -> &'static str {
+        "write_file"
+    }
+    fn description(&self) -> &'static str {
+        "fixture (slow)"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
+    }
+    async fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> agent_base::AgentResult<Vec<Content>> {
+        tokio::time::sleep(self.0).await;
+        Ok(vec![Content::text("ok")])
+    }
+}
+
+/// Claims are released when the task ends (session 20260920_5ba1bed4 case 2
+/// regression): a lock's lifetime is the **task's**, not the registration's.
+/// Case 2 showed writer-b's +80s retry colliding with finished writer-a's
+/// "corpse lock" — the report was only delivered at 11:20:49, nobody closed
+/// the agent, and the claim was held until close. After the fix: the moment
+/// a child task ends (before the result is posted), every claim it took via
+/// GatedTool is released; the close-path release in ChildCleanup::drop
+/// stays as the terminal backstop (idempotent).
+#[tokio::test(flavor = "multi_thread")]
+async fn task_completion_releases_gate_claims() {
+    let ma = runtime_with_gate_and_tools(
+        true,
+        Arc::new(ToolCallOnceStub::new(
+            "write_file",
+            "{\"path\":\"x.rs\"}",
+        )),
+        vec![Arc::new(SlowWrite(std::time::Duration::from_millis(500)))],
+    );
+
+    let echo = ma
+        .spawn_child_with_history(
+            "wg",
+            "p".to_string(),
+            true,
+            None,
+            None,
+            Some(ChildToolCapability::Write),
+            &agent_base::SessionId::new(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(echo.agent_path, "root/wg");
+    ma.send_task("root/wg", "write it".to_string(), false)
+        .unwrap();
+
+    // 1) Mid-task: the child holds x.rs via GatedTool (named) — the slow
+    //    write tool holds the 500ms window so the poll always lands inside
+    //    it. Observation must go through the read-only holder_of: a
+    //    try_claim probe would grab the lock itself and evict the child
+    //    under test.
+    poll_until("child claims x.rs via GatedTool", || {
+        ma.write_gate_for_test()
+            .holder_of(std::path::Path::new("x.rs"))
+            .as_deref()
+            == Some("root/wg")
+    })
+    .await;
+
+    // 2) Task ended — no close_agent.
+    poll_until("child task done", || {
+        ma.list_agents()
+            .iter()
+            .any(|a| a.agent_path == "root/wg" && a.status == "done")
+    })
+    .await;
+
+    // 3) Assert: the claim was released when the task ended (this failed
+    //    before the fix — the lock hung until close).
+    assert!(
+        ma.write_gate_for_test()
+            .try_claim(std::path::Path::new("x.rs"), "root/probe")
+            .is_ok(),
+        "claims must be released when the task ends, not held until close"
+    );
 }

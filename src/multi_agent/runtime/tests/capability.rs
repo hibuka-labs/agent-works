@@ -220,3 +220,39 @@ async fn list_agents_echoes_spawned_tools_and_close_clears_them() {
     })
     .await;
 }
+
+/// Session 20260919_f65b754c: read-only children echoed their full 14-tool
+/// read/search baseline on every `list_agents` poll — accurate but token
+/// burn, and it contradicted the list_agents contract ("empty spawned_tools
+/// ⇒ read-only"). The echo is capability news only: read-only spawns leave
+/// no entry, so the omission IS the fact. The one-time spawn message still
+/// carries the complete registered set.
+#[tokio::test]
+async fn read_only_spawn_leaves_no_spawned_tools_echo() {
+    let ma = runtime_with_config(
+        write_enabled_config(AgentAutonomy::Auto, true),
+        Arc::new(StreamingStub),
+    );
+    let echo = ma
+        .spawn_child_with_history(
+            "ro-l",
+            "prompt".to_string(),
+            false,
+            None,
+            None,
+            Some(ChildToolCapability::ReadOnly),
+            &agent_base::SessionId::new(1),
+        )
+        .await
+        .unwrap();
+    let row = ma
+        .list_agents()
+        .into_iter()
+        .find(|a| a.agent_path == echo.agent_path)
+        .expect("spawned agent listed");
+    assert!(
+        row.spawned_tools.is_empty(),
+        "read-only child must not echo its baseline tool set, got {:?}",
+        row.spawned_tools
+    );
+}

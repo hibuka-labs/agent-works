@@ -152,6 +152,13 @@ pub struct MultiAgentRuntime {
     /// path without borrowing the runtime).
     child_cancels: Arc<Mutex<HashMap<AgentPath, CancellationToken>>>,
 
+    /// Per-path spawn generation (same-name recycle, session
+    /// 20260920_5ba1bed4): bumped on every recycle so a superseded
+    /// predecessor's `ChildCleanup` — which unwinds asynchronously, possibly
+    /// AFTER the successor is fully registered — can detect it no longer
+    /// owns the path and skip the path-scoped teardown.
+    child_generations: Arc<Mutex<HashMap<AgentPath, u64>>>,
+
     /// Error recovery strategy (inherited from parent).
     error_recovery: Option<Arc<dyn agent_base::ToolErrorRecovery>>,
 
@@ -231,6 +238,7 @@ impl MultiAgentRuntime {
             root_cancel,
             join_set: Mutex::new(JoinSet::new()),
             child_cancels: Arc::new(Mutex::new(HashMap::new())),
+            child_generations: Arc::new(Mutex::new(HashMap::new())),
             error_recovery,
             language,
             child_permission_mode,

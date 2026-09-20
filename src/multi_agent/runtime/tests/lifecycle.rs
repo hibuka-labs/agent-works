@@ -1,6 +1,33 @@
 use super::*;
 
+use agent_base::{Content, ToolContext};
+
 // ── lifecycle: spawn / send / wait / close ──
+
+/// 30s slow tool: pins the child task in Running (paired with the
+/// ToolCallOnceStub tool-call turn).
+struct SlowTool;
+
+#[async_trait::async_trait]
+impl Tool for SlowTool {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+    fn description(&self) -> &'static str {
+        "slow fixture"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn call(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> agent_base::AgentResult<Vec<Content>> {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        Ok(vec![Content::text("slow done")])
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_spawn_send_task_wait_close_lifecycle() {
@@ -537,4 +564,103 @@ async fn test_close_running_child_result_still_delivered() {
             other => panic!("unexpected extra event {other:?}"),
         }
     }
+}
+
+// ── same-name spawn recycle (session 20260920_5ba1bed4 case 2 regression) ──
+//
+// Rough edge proven across three acceptance rounds: a done child lingers in
+// the registry and a same-name respawn collides with
+// "agent with this path already exists", forcing the parent to manually
+// close → respawn. Recycle semantics: a spawn meeting a done/closed
+// same-path predecessor takes over automatically (registry, mailbox and
+// cancel token all hand over to the new instance), and the echo carries the
+// recycled fact; the old instance's ChildCleanup detects it was superseded
+// during its asynchronous unwind and must not tear down the successor's
+// state.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_recycles_finished_same_path_agent() {
+    let ma = make_ma_runtime();
+
+    ma.spawn_child("r", "prompt".to_string(), 0, false, vec![])
+        .await
+        .expect("first spawn");
+    ma.send_task("root/r", "task one".to_string(), false)
+        .unwrap();
+    poll_until("first child done", || {
+        ma.list_agents()
+            .iter()
+            .any(|a| a.agent_path == "root/r" && a.status == "done")
+    })
+    .await;
+
+    let second = ma
+        .spawn_child_with_history(
+            "r",
+            "prompt2".to_string(),
+            false,
+            None,
+            None,
+            None,
+            &agent_base::SessionId::new(0),
+        )
+        .await
+        .expect("same-name respawn after done must recycle, not collide");
+    assert!(second.recycled, "echo must carry the recycle fact");
+    assert_eq!(second.agent_path, "root/r");
+
+    // The superseded guard's delayed Drop must not remove the successor's
+    // registration (supersession check).
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        ma.list_agents().iter().any(|a| a.agent_path == "root/r"),
+        "superseded guard's delayed drop must not remove the successor's registration"
+    );
+
+    // The successor is usable: run a task and collect the result.
+    ma.send_task("root/r", "task two".to_string(), false)
+        .unwrap();
+    let result = ma.wait_for_result(Some("root/r"), 2000).await;
+    assert_eq!(result.status, "ok");
+    ma.close_agent("root/r").unwrap();
+}
+
+/// A running same-path predecessor is still rejected — recycling only
+/// recognizes terminal states (done/closed) and leaves the close_agent
+/// misfire guard's semantics untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn running_agent_still_blocks_same_path_spawn() {
+    // SlowTool is really invoked via ToolCallOnceStub: the child task sits
+    // inside tool execution for 30s, so Running is structural rather than a
+    // timing race.
+    let ma = make_ma_runtime_with_tools(
+        Arc::new(ToolCallOnceStub::new("slow", "{}")),
+        vec![Arc::new(SlowTool) as Arc<dyn Tool>],
+    );
+
+    ma.spawn_child("b", "prompt".to_string(), 0, false, vec![])
+        .await
+        .expect("spawn");
+    ma.send_task("root/b", "slow work".to_string(), false)
+        .unwrap();
+    poll_until("child running in slow tool", || {
+        ma.list_agents()
+            .iter()
+            .any(|a| a.agent_path == "root/b" && a.status == "running")
+    })
+    .await;
+
+    let err = ma
+        .spawn_child_with_history(
+            "b",
+            "prompt2".to_string(),
+            false,
+            None,
+            None,
+            None,
+            &agent_base::SessionId::new(0),
+        )
+        .await
+        .expect_err("running predecessor must still block same-path spawn");
+    assert!(err.contains("already exists"), "{err}");
 }

@@ -85,9 +85,13 @@ fn tools() -> Vec<Arc<dyn Tool>> {
 }
 
 fn runtime_with(config: MultiAgentConfig) -> Arc<MultiAgentRuntime> {
+    runtime_with_client(Arc::new(StubLlm), config)
+}
+
+fn runtime_with_client(client: Arc<dyn LlmProvider>, config: MultiAgentConfig) -> Arc<MultiAgentRuntime> {
     Arc::new(MultiAgentRuntime::new(
         config,
-        Arc::new(StubLlm),
+        client,
         tools(),
         CancellationToken::new(),
         None,
@@ -95,6 +99,32 @@ fn runtime_with(config: MultiAgentConfig) -> Arc<MultiAgentRuntime> {
         None,
         None,
     ))
+}
+
+/// `stream` never returns — keeps spawned children inside `run_turn`
+/// (`running`) for the whole test, so a same-name re-spawn keeps hitting the
+/// registry rejection instead of recycling a finished predecessor.
+struct HangingLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for HangingLlm {
+    async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        unreachable!("the child is aborted long before this returns")
+    }
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        unreachable!("unused")
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            name: "hanging".into(),
+            model: "hanging".into(),
+            version: None,
+        }
+    }
 }
 
 /// Teardown (ChildCleanup) runs on the child task's exit, so post-close
@@ -226,22 +256,45 @@ async fn concurrent_storm_respects_cap_exactly() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_spawns_never_charge_the_spawn_budget() {
+    // Same-name recycle (session 20260920_5ba1bed4) makes a re-spawn of a
+    // finished predecessor succeed — and a freshly spawned child with no
+    // task derives `done` immediately. The duplicate rejections this test
+    // needs therefore require a predecessor that is verifiably mid-task:
+    // u0 gets a hanging task and the loop waits for `running` before any
+    // dupe attempt.
     const UNIQUE: usize = 50; // even attempts
-    const DUPES: usize = 50; // odd attempts reuse a taken name
-    let rt = runtime_with(MultiAgentConfig {
-        max_sub_agents: 128,
-        control: ControlConfig {
-            max_spawns: Some(UNIQUE + 10), // cap high enough to admit all uniques
-            ..Default::default()
+    const DUPES: usize = 50; // odd attempts reuse the running u0
+    let rt = runtime_with_client(
+        Arc::new(HangingLlm),
+        MultiAgentConfig {
+            max_sub_agents: 128,
+            control: ControlConfig {
+                max_spawns: Some(UNIQUE + 10), // cap high enough to admit all spawns
+                ..Default::default()
+            },
+            ..MultiAgentConfig::enabled()
         },
-        ..MultiAgentConfig::enabled()
-    });
+    );
+
+    let u0 = rt
+        .child()
+        .system_prompt("worker")
+        .spawn("u0")
+        .await
+        .expect("u0 spawn ok");
+    u0.task("hang").unwrap();
+    poll_until("u0 verifiably running", || {
+        rt.list_agents()
+            .iter()
+            .any(|a| a.agent_path == "root/u0" && a.status == "running")
+    })
+    .await;
 
     let mut ok = 0;
     let mut err = 0;
     for i in 0..UNIQUE + DUPES {
         let name = if i % 2 == 0 {
-            format!("u{}", i / 2)
+            format!("v{}", i / 2)
         } else {
             "u0".to_string() // registry duplicate → spawn fails after reserve
         };
@@ -254,9 +307,11 @@ async fn failed_spawns_never_charge_the_spawn_budget() {
     assert_eq!(err, DUPES);
     // Ticket discipline (§7.2): only the committed spawns remain counted —
     // the 50 registry rejections rolled their reservation straight back.
+    // UNIQUE + 1: u0 (the dupe target, spawned above the loop) plus the 50
+    // fresh v-names; a hanging task charges no extra ticket.
     assert_eq!(
         rt.control().status().spawn_count,
-        UNIQUE,
+        UNIQUE + 1,
         "rolled-back spawns must not charge the budget"
     );
 }

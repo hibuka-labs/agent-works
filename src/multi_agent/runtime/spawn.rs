@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::multi_agent::capability::{CapabilityResolution, ChildToolCapability};
+use crate::multi_agent::registry::AgentStatus;
 
 impl MultiAgentRuntime {
     /// Spawn a child agent at the given path with a specific system prompt.
@@ -90,6 +91,13 @@ impl MultiAgentRuntime {
             .try_reserve_spawn()
             .map_err(|e| AgentError::ConfigError(e.to_string()))?;
 
+        // 1.5 Same-name recycle (session 20260920_5ba1bed4): a done/closed
+        // predecessor is stale registration state — its task finished, only
+        // its guard's asynchronous unwind is pending. Hand the path over to
+        // this spawn instead of failing with "already exists" (which forced
+        // the parent into close→respawn dance every acceptance round).
+        let recycled = self.recycle_predecessor(&path);
+
         // 2. Check limits and register
         {
             let mut registry = self.registry.lock().unwrap();
@@ -168,6 +176,16 @@ impl MultiAgentRuntime {
             cancels.insert(path.clone(), child_cancel.clone());
         }
 
+        // 8. Claim this spawn's generation (same-name recycle): the
+        // `ChildCleanup` guard carries it and skips the path-scoped teardown
+        // if a newer spawn owns the path by the time the guard drops.
+        let generation = {
+            let mut gens = self.child_generations.lock().unwrap();
+            let g = gens.entry(path.clone()).or_insert(0);
+            *g += 1;
+            *g
+        };
+
         Ok(PreparedChild {
             path,
             child_mailbox,
@@ -178,7 +196,58 @@ impl MultiAgentRuntime {
             ticket,
             spawned_tools,
             resolution,
+            generation,
+            recycled,
         })
+    }
+
+    /// Hand a finished same-path predecessor's registration over to a new
+    /// spawn (session 20260920_5ba1bed4): `done`/`closed` agents are stale
+    /// state — task finished, claims released at task end, only the guard's
+    /// asynchronous unwind pending. Cancel the old token, remove the
+    /// registry entry and mailbox, bump the generation (the superseded
+    /// guard's `Drop` then skips all path-scoped teardown), and clear the
+    /// echo entry. Running/queued predecessors keep the `AlreadyExists`
+    /// rejection (recycling only recognizes terminal states).
+    ///
+    /// Synchronous and race-safe: every step is either idempotent
+    /// (`registry::close`, `mailbox::unregister`, `release_all`) or guarded
+    /// by the generation check, so the old guard unwinding at any point
+    /// during or after this sequence cannot damage the successor.
+    fn recycle_predecessor(&self, path: &AgentPath) -> bool {
+        let finished = {
+            let registry = self.registry.lock().unwrap();
+            matches!(
+                registry.get(path).map(|e| e.status()),
+                Some(AgentStatus::Done) | Some(AgentStatus::Closed)
+            )
+        };
+        if !finished {
+            return false;
+        }
+
+        // Generation first: the moment the token below is cancelled, the old
+        // loop may wake and its guard may drop — it must already see itself
+        // superseded.
+        {
+            let mut gens = self.child_generations.lock().unwrap();
+            *gens.entry(path.clone()).or_insert(0) += 1;
+        }
+        let old_token = self.child_cancels.lock().unwrap().remove(path);
+        if let Some(token) = old_token {
+            token.cancel();
+        }
+        self.registry.lock().unwrap().close(path);
+        self.mailbox.unregister(path);
+        // Terminal-state backstops: claims are normally already released at
+        // task end (fix session 20260920_5ba1bed4); the echo entry dies with
+        // the predecessor either way — the successor republishes its own.
+        self.write_gate.release_all(path.to_string().as_str());
+        self.spawned_tools
+            .lock()
+            .unwrap()
+            .remove(&path.to_string());
+        true
     }
 
     /// Step 6 of spawning: run the child's event loop inside a tracked tokio
@@ -200,6 +269,8 @@ impl MultiAgentRuntime {
             ticket,
             spawned_tools: _spawned_tools,
             resolution: _resolution,
+            generation,
+            recycled: _recycled,
         } = prepared;
 
         let task_timeout = self.task_timeout;
@@ -207,6 +278,7 @@ impl MultiAgentRuntime {
         let mailbox_for_task = self.mailbox.clone();
         let registry_for_task = self.registry.clone();
         let event_tx = self.event_tx.lock().unwrap().clone();
+        let write_gate_for_loop = Arc::clone(&self.write_gate);
 
         let cleanup = ChildCleanup {
             _slot: slot,
@@ -216,6 +288,8 @@ impl MultiAgentRuntime {
             path: agent_path.clone(),
             write_gate: Arc::clone(&self.write_gate),
             spawned_tools: Arc::clone(&self.spawned_tools),
+            child_generations: Arc::clone(&self.child_generations),
+            generation,
         };
 
         self.join_set.lock().unwrap().spawn(async move {
@@ -230,6 +304,7 @@ impl MultiAgentRuntime {
                 event_tx,
                 child_cancel,
                 task_timeout,
+                write_gate_for_loop,
             )
             .await;
         });
@@ -295,6 +370,7 @@ impl MultiAgentRuntime {
             agent_path: spawned.path.to_string(),
             registered_tools: spawned.spawned_tools.clone(),
             degraded_reason: spawned.resolution().degraded_reason.clone(),
+            recycled: spawned.recycled,
         })
     }
 
@@ -361,18 +437,26 @@ impl MultiAgentRuntime {
         let path = prepared.path.clone();
         let spawned_tools = prepared.spawned_tools.clone();
         let resolution = prepared.resolution.clone();
+        let prepared_recycled = prepared.recycled;
         self.spawn_ready(prepared);
-        // T8 wiring: publish the echo for `list_agents`. The child is live
-        // from `spawn_ready` on, and the entry leaves with it via
-        // `ChildCleanup::drop` — same lifetime as the registry entry itself.
-        self.spawned_tools.lock().unwrap().insert(
-            path.to_string(),
-            spawned_tools.iter().cloned().collect(),
-        );
+        // T8 wiring: publish the echo for `list_agents` — but only when the
+        // child actually holds write tools. A read-only child's registered
+        // set is the static read/search baseline; repeating it on every
+        // `list_agents` poll is token burn, and the omission IS the fact
+        // (the list_agents contract: empty spawned_tools ⇒ read-only).
+        // Legacy/`None` and write/preset grants keep the full echo. The
+        // one-time spawn message still carries the complete registered set.
+        if spawned_tools.iter().any(|t| self.write_tools.contains(t)) {
+            self.spawned_tools.lock().unwrap().insert(
+                path.to_string(),
+                spawned_tools.iter().cloned().collect(),
+            );
+        }
         Ok(SpawnedChild {
             path,
             spawned_tools,
             resolution,
+            recycled: prepared_recycled,
         })
     }
 }
@@ -406,6 +490,12 @@ struct PreparedChild {
     spawned_tools: BTreeSet<String>,
     /// 能力解析摘要（T6 回显通道）。
     resolution: CapabilityResolution,
+    /// This spawn's generation (bumped on same-path recycle, see
+    /// `child_generations`).
+    generation: u64,
+    /// Whether a finished same-path predecessor was recycled (the fact
+    /// echoed to the parent agent).
+    recycled: bool,
 }
 
 /// Result of [`MultiAgentRuntime::spawn_with_config`] (design §5.4).
@@ -418,6 +508,9 @@ pub(crate) struct SpawnedChild {
     path: AgentPath,
     spawned_tools: BTreeSet<String>,
     resolution: CapabilityResolution,
+    /// True when a finished same-path predecessor was recycled to make room
+    /// for this spawn (surfaced in the spawn echo).
+    recycled: bool,
 }
 
 impl SpawnedChild {
@@ -445,6 +538,10 @@ pub struct SpawnEcho {
     pub registered_tools: BTreeSet<String>,
     /// 降级原因（None = 未降级）。
     pub degraded_reason: Option<String>,
+    /// True when a finished (done/closed) same-path predecessor was
+    /// recycled by this spawn (session 20260920_5ba1bed4) — the parent
+    /// agent sees the fact instead of a silent takeover.
+    pub recycled: bool,
 }
 
 /// The child task's cleanup credential (design doc §5.4, review B-2/M-2/M-7).
@@ -476,10 +573,31 @@ struct ChildCleanup {
     /// 注册工具回显表（T8 接线）：drop 时移除该 agent 的条目，与写门同一
     /// 终局清理点。
     spawned_tools: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// This spawn's generation plus the generation table (same-path
+    /// recycle, session 20260920_5ba1bed4): at drop time, if the table's
+    /// generation has moved past ours, a successor owns the path and we
+    /// **skip every path-scoped teardown step** (otherwise the superseded
+    /// guard's delayed unwind would rip out the successor's registry
+    /// entry, mailbox and cancel token).
+    child_generations: Arc<Mutex<HashMap<AgentPath, u64>>>,
+    generation: u64,
 }
 
 impl Drop for ChildCleanup {
     fn drop(&mut self) {
+        // 0. Supersession check (same-name recycle): when a newer spawn owns
+        //    the path (generation moved on), every path-scoped step below
+        //    would destroy the SUCCESSOR's state. Only the slot is ours to
+        //    release. The guard may drop long after the recycle — the old
+        //    loop wakes on cancel or on its closed task channel, and the
+        //    unwind to this Drop is asynchronous by nature.
+        {
+            let mut gens = self.child_generations.lock().unwrap();
+            if gens.get(&self.path).copied() != Some(self.generation) {
+                return; // superseded — the successor owns the path now
+            }
+            gens.remove(&self.path);
+        }
         // Order is load-bearing. §5.4 lists post → unregister → close; we
         // close the registry BEFORE unregistering the mailbox — the K1 fix
         // (Closed posted while the entry still exists) is preserved, and it
@@ -506,7 +624,9 @@ impl Drop for ChildCleanup {
         // 5. release the write-gate claims held by this agent (D6). Normal
         //    close, panic unwind and abort all run this Drop — the single
         //    release point. The task-timeout reaper does NOT (the agent
-        //    survives; its claims stay valid).
+        //    survives; its claims stay valid). Task-normal completion
+        //    releases earlier (run_child_loop, same session fix) — this is
+        //    the terminal backstop.
         self.write_gate.release_all(self.path.to_string().as_str());
         // 6. remove this agent's spawned-tools echo entry (T8 wiring) — the
         //    agent is leaving the listing entirely, so its echo goes with it.
@@ -582,6 +702,7 @@ async fn run_child_loop(
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
     child_cancel: CancellationToken,
     task_timeout: Option<Duration>,
+    write_gate: Arc<crate::multi_agent::write_gate::WorkspaceWriteGate>,
 ) {
     let mut task_rx = child_mailbox.task_rx;
 
@@ -666,6 +787,16 @@ async fn run_child_loop(
                         // post's seq bump and must see `in_flight` already
                         // cleared — that ordering is what makes "result
                         // drained ⇒ producer quiescent" structural.
+                        //
+                        // Fix B (session 20260920_5ba1bed4, case 2): the
+                        // write-gate claims this task took via GatedTool
+                        // live as long as the TASK, not the registration —
+                        // a done child must not hold a "corpse lock" that a
+                        // sibling's later retry (+80s) collides with.
+                        // All exit paths (normal/timeout/cancel) flow
+                        // through here; ChildCleanup::drop stays as the
+                        // terminal backstop (release_all is idempotent).
+                        write_gate.release_all(agent_path.to_string().as_str());
                         registry.lock().unwrap().note_posted(&agent_path);
                         mailbox.post_result(MailboxResult {
                             agent_path: agent_path.clone(),
