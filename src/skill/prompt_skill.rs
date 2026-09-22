@@ -340,6 +340,8 @@ impl PromptSkill {
     ///
     /// Each subdirectory that contains a `SKILL.md` file is loaded as a
     /// [`PromptSkill`]. Subdirectories without `SKILL.md` are silently skipped.
+    /// Subdirectories whose name starts with `_` are treated as disabled by
+    /// user convention and silently skipped, even if they contain a SKILL.md.
     ///
     /// Returns an empty `Vec` if the directory does not exist.
     pub fn scan_dir(path: impl AsRef<Path>) -> Result<Vec<Self>, String> {
@@ -358,6 +360,16 @@ impl PromptSkill {
                 Err(_) => continue,
             };
             let entry_path = entry.path();
+            // `_`-prefixed directories are a user convention for disabled/hidden
+            // skills (users share `~/.claude/skills` with other agents and park
+            // skills there by renaming) — skip silently, no warning.
+            if entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('_'))
+            {
+                continue;
+            }
             if entry_path.is_dir() && entry_path.join("SKILL.md").exists() {
                 match Self::from_dir(&entry_path) {
                     Ok(skill) => skills.push(skill),
@@ -832,6 +844,28 @@ Body
 
         let names: Vec<&str> = skills.iter().map(|s| s.name()).collect();
         assert_eq!(names, &["deploy", "review", "test"]); // sorted
+    }
+
+    #[test]
+    fn test_scan_dir_skips_underscore_prefixed_dirs_silently() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A live skill alongside a `_`-parked one whose SKILL.md would fail
+        // validation anyway (dir name != skill name). The `_` dir must be
+        // skipped without an error and without entering the result.
+        for (name, skill_name) in &[("deploy", "deploy"), ("_disabled", "realname")] {
+            let skill_dir = dir.path().join(name);
+            std::fs::create_dir(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {skill_name}\ndescription: d\n---\nBody"),
+            )
+            .unwrap();
+        }
+
+        let skills = PromptSkill::scan_dir(dir.path()).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name()).collect();
+        assert_eq!(names, &["deploy"]);
     }
 
     #[test]
