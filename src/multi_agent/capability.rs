@@ -242,7 +242,10 @@ mod tests {
             assert!(res.excluded_tools.contains(*t));
         }
         let why = res.degraded_reason.expect("must carry degraded reason");
-        assert!(why.contains("allow_child_write"), "reason should name the flag: {why}");
+        assert!(
+            why.contains("allow_child_write"),
+            "reason should name the flag: {why}"
+        );
     }
 
     /// Manual 优先级最高：写请求被压回只读 + 原因。
@@ -326,16 +329,37 @@ mod tests {
     /// D3.1：nudge 三条件（per-child，依据解析器输出的排除集）。
     #[test]
     fn nudge_three_conditions() {
-        let read_only_excluded: BTreeSet<String> = WRITE_TOOLS.iter().map(|s| s.to_string()).collect();
+        let read_only_excluded: BTreeSet<String> =
+            WRITE_TOOLS.iter().map(|s| s.to_string()).collect();
         let write_exempted: BTreeSet<String> = ["task_output".to_string()].into_iter().collect();
 
         // 条件一：Manual 强制。
-        assert!(super::read_only_nudge(AgentAutonomy::Manual, false, &write_exempted, &write_tools()));
+        assert!(super::read_only_nudge(
+            AgentAutonomy::Manual,
+            false,
+            &write_exempted,
+            &write_tools()
+        ));
         // 条件二：child_read_only 偏执开关（默认部署路径）。
-        assert!(super::read_only_nudge(AgentAutonomy::Auto, true, &write_exempted, &write_tools()));
+        assert!(super::read_only_nudge(
+            AgentAutonomy::Auto,
+            true,
+            &write_exempted,
+            &write_tools()
+        ));
         // 条件三：解析后排除集仍含全部 write_tools（子 agent 实际无写工具）。
-        assert!(super::read_only_nudge(AgentAutonomy::Auto, false, &read_only_excluded, &write_tools()));
+        assert!(super::read_only_nudge(
+            AgentAutonomy::Auto,
+            false,
+            &read_only_excluded,
+            &write_tools()
+        ));
         // 写子 agent（豁免后）：无 nudge。
-        assert!(!super::read_only_nudge(AgentAutonomy::Auto, false, &write_exempted, &write_tools()));
+        assert!(!super::read_only_nudge(
+            AgentAutonomy::Auto,
+            false,
+            &write_exempted,
+            &write_tools()
+        ));
     }
 }

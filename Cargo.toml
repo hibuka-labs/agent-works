@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -34,7 +34,7 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.7.0" }
+agent-base = { version = "0.8.0" }
 async-trait = "0.1"
 dyn-clone = "1"
 futures-core = "0.3"

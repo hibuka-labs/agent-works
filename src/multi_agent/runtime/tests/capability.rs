@@ -26,7 +26,11 @@ impl Tool for StubWriteFile {
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
     }
-    async fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> agent_base::AgentResult<Vec<Content>> {
+    async fn call(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> agent_base::AgentResult<Vec<Content>> {
         Ok(vec![Content::text("ok")])
     }
 }
@@ -44,7 +48,10 @@ fn write_enabled_config(autonomy: AgentAutonomy, allow: bool) -> MultiAgentConfi
     }
 }
 
-fn runtime_with_config(config: MultiAgentConfig, client: Arc<dyn agent_base::llm_trait::LlmProvider>) -> Arc<MultiAgentRuntime> {
+fn runtime_with_config(
+    config: MultiAgentConfig,
+    client: Arc<dyn agent_base::llm_trait::LlmProvider>,
+) -> Arc<MultiAgentRuntime> {
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(NoopReadFileTool) as Arc<dyn Tool>,
         Arc::new(StubWriteFile),
@@ -74,10 +81,18 @@ async fn write_capability_child_registers_write_file() {
         ..Default::default()
     };
     let (_child, registered, _res) = ma
-        .build_child_runtime_with_config(&config, true, Some(&ChildToolCapability::Write), "root/test")
+        .build_child_runtime_with_config(
+            &config,
+            true,
+            Some(&ChildToolCapability::Write),
+            "root/test",
+        )
         .await
         .expect("spawn builds");
-    assert!(registered.contains("write_file"), "write child must hold write_file, got {registered:?}");
+    assert!(
+        registered.contains("write_file"),
+        "write child must hold write_file, got {registered:?}"
+    );
     assert!(registered.contains("read_file"));
 }
 
@@ -94,10 +109,18 @@ async fn default_spawn_child_never_registers_write_tools() {
         ..Default::default()
     };
     let (_child, registered, _res) = ma
-        .build_child_runtime_with_config(&config, true, Some(&ChildToolCapability::ReadOnly), "root/test")
+        .build_child_runtime_with_config(
+            &config,
+            true,
+            Some(&ChildToolCapability::ReadOnly),
+            "root/test",
+        )
         .await
         .expect("spawn builds");
-    assert!(!registered.contains("write_file"), "read-only child must not hold write_file");
+    assert!(
+        !registered.contains("write_file"),
+        "read-only child must not hold write_file"
+    );
     assert!(registered.contains("read_file"));
 }
 
@@ -116,20 +139,30 @@ async fn legacy_path_still_excludes_by_table() {
         .build_child_runtime_with_config(&config, true, None, "root/test")
         .await
         .expect("spawn builds");
-    assert!(!registered.contains("write_file"), "legacy path keeps the deployment table");
+    assert!(
+        !registered.contains("write_file"),
+        "legacy path keeps the deployment table"
+    );
 }
 
 /// 解析器输出的排除集与 build 消费的一致性（框架层 CRITICAL 断言）：
 /// phimint 形状的部署表下，ReadOnly 解析后的排除集覆盖全部写工具。
 #[test]
 fn read_only_resolution_covers_all_write_tools() {
-    let table: Vec<String> = ["write_file", "task_output"].iter().map(|s| s.to_string()).collect();
+    let table: Vec<String> = ["write_file", "task_output"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let res = resolve_capability(
         Some(&ChildToolCapability::ReadOnly),
         AgentAutonomy::Auto,
         true,
         &table,
-        &["write_file".to_string(), "edit_file".to_string(), "execute_command".to_string()],
+        &[
+            "write_file".to_string(),
+            "edit_file".to_string(),
+            "execute_command".to_string(),
+        ],
     );
     for t in ["write_file", "edit_file", "execute_command"] {
         assert!(res.excluded_tools.contains(t));
@@ -216,7 +249,9 @@ async fn list_agents_echoes_spawned_tools_and_close_clears_them() {
     );
     ma.close_agent(&echo.agent_path).unwrap();
     poll_until("spawned_tools echo cleared", || {
-        !ma.list_agents().iter().any(|a| a.agent_path == echo.agent_path)
+        !ma.list_agents()
+            .iter()
+            .any(|a| a.agent_path == echo.agent_path)
     })
     .await;
 }

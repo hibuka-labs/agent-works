@@ -57,12 +57,21 @@ fn autonomy_floors_permission_and_forces_nudge() {
     let write_tools: Vec<String> = vec!["write_file".to_string(), "edit_file".to_string()];
     let no_exclusions = std::collections::BTreeSet::new();
     assert!(crate::multi_agent::capability::read_only_nudge(
-        AgentAutonomy::Manual, false, &no_exclusions, &write_tools
+        AgentAutonomy::Manual,
+        false,
+        &no_exclusions,
+        &write_tools
     ));
     assert!(!crate::multi_agent::capability::read_only_nudge(
-        AgentAutonomy::Auto, false, &no_exclusions, &write_tools
+        AgentAutonomy::Auto,
+        false,
+        &no_exclusions,
+        &write_tools
     ));
     assert!(crate::multi_agent::capability::read_only_nudge(
-        AgentAutonomy::Auto, true, &no_exclusions, &write_tools
+        AgentAutonomy::Auto,
+        true,
+        &no_exclusions,
+        &write_tools
     ));
 }

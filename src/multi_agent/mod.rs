@@ -53,4 +53,4 @@ pub use path::AgentPath;
 pub use preset::ChildPreset;
 pub use runtime::MultiAgentRuntime;
 pub use runtime::{ChildReport, ChildResultEvent};
-pub use write_gate::{GatedTool, WorkspaceWriteGate, WRITE_GATE_TOOLS};
+pub use write_gate::{GatedTool, WRITE_GATE_TOOLS, WorkspaceWriteGate};

@@ -306,6 +306,7 @@ mod tests {
                 action_key: None,
                 risk_level: agent_base::RiskLevel::Safe,
                 raw: None,
+                source: None,
             },
             agent_id: None,
             trace_id: None,

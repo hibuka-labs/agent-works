@@ -243,10 +243,7 @@ impl MultiAgentRuntime {
         // task end (fix session 20260920_5ba1bed4); the echo entry dies with
         // the predecessor either way — the successor republishes its own.
         self.write_gate.release_all(path.to_string().as_str());
-        self.spawned_tools
-            .lock()
-            .unwrap()
-            .remove(&path.to_string());
+        self.spawned_tools.lock().unwrap().remove(&path.to_string());
         true
     }
 
@@ -354,24 +351,19 @@ impl MultiAgentRuntime {
             model,
             ..Default::default()
         };
-        self.spawn_with_config_forked(
-            name.to_string(),
-            config,
-            parent_messages,
-            capability,
-        )
-        .await
-        // Legacy error strings preserved byte-for-byte (see spawn_child).
-        .map_err(|e| match e {
-            AgentError::ConfigError(s) => s,
-            other => other.to_string(),
-        })
-        .map(|spawned| SpawnEcho {
-            agent_path: spawned.path.to_string(),
-            registered_tools: spawned.spawned_tools.clone(),
-            degraded_reason: spawned.resolution().degraded_reason.clone(),
-            recycled: spawned.recycled,
-        })
+        self.spawn_with_config_forked(name.to_string(), config, parent_messages, capability)
+            .await
+            // Legacy error strings preserved byte-for-byte (see spawn_child).
+            .map_err(|e| match e {
+                AgentError::ConfigError(s) => s,
+                other => other.to_string(),
+            })
+            .map(|spawned| SpawnEcho {
+                agent_path: spawned.path.to_string(),
+                registered_tools: spawned.spawned_tools.clone(),
+                degraded_reason: spawned.resolution().degraded_reason.clone(),
+                recycled: spawned.recycled,
+            })
     }
 
     /// Fluent entry point for the new spawn API (§5.3). Takes `&Arc<Self>`
@@ -447,10 +439,10 @@ impl MultiAgentRuntime {
         // Legacy/`None` and write/preset grants keep the full echo. The
         // one-time spawn message still carries the complete registered set.
         if spawned_tools.iter().any(|t| self.write_tools.contains(t)) {
-            self.spawned_tools.lock().unwrap().insert(
-                path.to_string(),
-                spawned_tools.iter().cloned().collect(),
-            );
+            self.spawned_tools
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), spawned_tools.iter().cloned().collect());
         }
         Ok(SpawnedChild {
             path,
@@ -630,7 +622,10 @@ impl Drop for ChildCleanup {
         self.write_gate.release_all(self.path.to_string().as_str());
         // 6. remove this agent's spawned-tools echo entry (T8 wiring) — the
         //    agent is leaving the listing entirely, so its echo goes with it.
-        self.spawned_tools.lock().unwrap().remove(&self.path.to_string());
+        self.spawned_tools
+            .lock()
+            .unwrap()
+            .remove(&self.path.to_string());
         // `_slot` drops at the end of this function → live concurrency − 1.
     }
 }

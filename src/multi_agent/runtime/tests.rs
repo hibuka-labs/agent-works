@@ -80,9 +80,7 @@ impl agent_base::llm_trait::LlmProvider for ToolCallOnceStub {
         &self,
         _request: agent_base::llm_trait::ChatRequest,
     ) -> Result<agent_base::llm_trait::ChatStream, agent_base::llm_trait::LlmError> {
-        let turn = self
-            .turns
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let turn = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let chunks: Vec<Result<agent_base::StreamChunk, agent_base::llm_trait::LlmError>> =
             if turn == 0 {
                 vec![

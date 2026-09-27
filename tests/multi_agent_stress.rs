@@ -88,7 +88,10 @@ fn runtime_with(config: MultiAgentConfig) -> Arc<MultiAgentRuntime> {
     runtime_with_client(Arc::new(StubLlm), config)
 }
 
-fn runtime_with_client(client: Arc<dyn LlmProvider>, config: MultiAgentConfig) -> Arc<MultiAgentRuntime> {
+fn runtime_with_client(
+    client: Arc<dyn LlmProvider>,
+    config: MultiAgentConfig,
+) -> Arc<MultiAgentRuntime> {
     Arc::new(MultiAgentRuntime::new(
         config,
         client,

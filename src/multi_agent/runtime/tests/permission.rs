@@ -105,7 +105,9 @@ async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
         }
     }
 
-    let parent = Arc::new(RecordingParent { seen: Default::default() });
+    let parent = Arc::new(RecordingParent {
+        seen: Default::default(),
+    });
     let parent_handler: Arc<dyn ApprovalHandler> = parent.clone();
     let ma = make_runtime_full_with_approval(
         ChildPermissionMode::None,
@@ -133,10 +135,7 @@ async fn build_child_runtime_none_delegates_to_parent_approval_handler() {
         )
         .await
         .expect("delegation resolves");
-    assert!(matches!(
-        decision,
-        agent_base::ApprovalDecision::AllowOnce
-    ));
+    assert!(matches!(decision, agent_base::ApprovalDecision::AllowOnce));
     let seen = parent.seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "request must reach the parent handler");
     assert_eq!(
@@ -275,7 +274,10 @@ mod sourced_handler {
     }
 
     fn handler() -> Arc<RecordingHandler> {
-        Arc::new(RecordingHandler { seen: Default::default(), fail: false })
+        Arc::new(RecordingHandler {
+            seen: Default::default(),
+            fail: false,
+        })
     }
 
     #[tokio::test]
@@ -317,7 +319,10 @@ mod sourced_handler {
 
     #[tokio::test]
     async fn passes_through_inner_decision_and_error() {
-        let inner = Arc::new(RecordingHandler { seen: Default::default(), fail: true });
+        let inner = Arc::new(RecordingHandler {
+            seen: Default::default(),
+            fail: true,
+        });
         let h = crate::multi_agent::runtime::build::SourcedApprovalHandler {
             inner,
             source: "root/x".to_string(),

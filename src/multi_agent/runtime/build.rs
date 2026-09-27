@@ -9,8 +9,8 @@
 //! [`build_child_runtime_with_config`](MultiAgentRuntime::build_child_runtime_with_config).
 
 use super::*;
-use agent_base::{ApprovalDecision, ApprovalRequest};
 use crate::multi_agent::capability::{self, CapabilityResolution, ChildToolCapability};
+use agent_base::{ApprovalDecision, ApprovalRequest};
 
 /// D4（设计 2026-09-19）：子 agent 的审批请求包装器——委托父 handler 前
 /// 填充发起方标识（仅当为 None 时填充，不覆盖）。委托机制本身零改动。
@@ -203,18 +203,17 @@ impl MultiAgentRuntime {
             // D6 写门：注册面里的 write_file/edit_file 逐子包装（父豁免——
             // 父的工具实例不经此路径）。只读子 agent 到不了这里（写工具已被
             // 排除集拦下）。开关关闭时直接透传（纯 prompt 纪律）。
-            let hand_to_child: Arc<dyn Tool> =
-                if self.write_gate_enabled
-                    && crate::multi_agent::write_gate::WRITE_GATE_TOOLS.contains(&name)
-                {
-                    Arc::new(crate::multi_agent::write_gate::GatedTool::new(
-                        tool.clone(),
-                        Arc::clone(&self.write_gate),
-                        child_path.to_string(),
-                    ))
-                } else {
-                    tool.clone()
-                };
+            let hand_to_child: Arc<dyn Tool> = if self.write_gate_enabled
+                && crate::multi_agent::write_gate::WRITE_GATE_TOOLS.contains(&name)
+            {
+                Arc::new(crate::multi_agent::write_gate::GatedTool::new(
+                    tool.clone(),
+                    Arc::clone(&self.write_gate),
+                    child_path.to_string(),
+                ))
+            } else {
+                tool.clone()
+            };
             builder = builder.register_tool_arc(hand_to_child);
             registered.insert(name.to_string());
         }

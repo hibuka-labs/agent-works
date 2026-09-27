@@ -25,7 +25,11 @@ impl Tool for StubWrite {
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
     }
-    async fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> agent_base::AgentResult<Vec<Content>> {
+    async fn call(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> agent_base::AgentResult<Vec<Content>> {
         Ok(vec![Content::text("ok")])
     }
 }
@@ -72,7 +76,10 @@ async fn gated_tool_wraps_write_file_on_spawned_children() {
     let ma = runtime_with_gate(true);
     // 直接从 build 路径拿 child runtime，检查注册的 write_file 是 GatedTool
     // 的名字（名字透传），并经 gate 抢占验证互斥：
-    let config = ChildConfig { system_prompt: Some("p".into()), ..Default::default() };
+    let config = ChildConfig {
+        system_prompt: Some("p".into()),
+        ..Default::default()
+    };
     let (child_a, _reg, _res) = ma
         .build_child_runtime_with_config(&config, true, Some(&ChildToolCapability::Write), "root/a")
         .await
@@ -86,8 +93,12 @@ async fn gated_tool_wraps_write_file_on_spawned_children() {
     // 路径对两个不同 child_path 都完成了包装且 spawn 不报错。
     let _ = (child_a, child_b);
     let shared = Arc::new(WorkspaceWriteGate::new());
-    shared.try_claim(std::path::Path::new("x.rs"), "root/a").unwrap();
-    let err = shared.try_claim(std::path::Path::new("x.rs"), "root/b").unwrap_err();
+    shared
+        .try_claim(std::path::Path::new("x.rs"), "root/a")
+        .unwrap();
+    let err = shared
+        .try_claim(std::path::Path::new("x.rs"), "root/b")
+        .unwrap_err();
     assert!(err.contains("root/a"));
 }
 
@@ -96,7 +107,10 @@ async fn gated_tool_wraps_write_file_on_spawned_children() {
 #[tokio::test(flavor = "multi_thread")]
 async fn gate_disabled_still_spawns_write_children() {
     let ma = runtime_with_gate(false);
-    let config = ChildConfig { system_prompt: Some("p".into()), ..Default::default() };
+    let config = ChildConfig {
+        system_prompt: Some("p".into()),
+        ..Default::default()
+    };
     let (_child, registered, _res) = ma
         .build_child_runtime_with_config(&config, true, Some(&ChildToolCapability::Write), "root/a")
         .await
@@ -151,7 +165,11 @@ impl Tool for SlowWrite {
     fn schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
     }
-    async fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> agent_base::AgentResult<Vec<Content>> {
+    async fn call(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> agent_base::AgentResult<Vec<Content>> {
         tokio::time::sleep(self.0).await;
         Ok(vec![Content::text("ok")])
     }
@@ -169,10 +187,7 @@ impl Tool for SlowWrite {
 async fn task_completion_releases_gate_claims() {
     let ma = runtime_with_gate_and_tools(
         true,
-        Arc::new(ToolCallOnceStub::new(
-            "write_file",
-            "{\"path\":\"x.rs\"}",
-        )),
+        Arc::new(ToolCallOnceStub::new("write_file", "{\"path\":\"x.rs\"}")),
         vec![Arc::new(SlowWrite(std::time::Duration::from_millis(500)))],
     );
 

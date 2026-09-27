@@ -239,14 +239,8 @@ mod tests {
             gate,
             "root/b".to_string(),
         );
-        let err = wrapped_b
-            .call(&args("tmp/x.txt"), &ctx)
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("file locked by root/a"),
-            "{err}"
-        );
+        let err = wrapped_b.call(&args("tmp/x.txt"), &ctx).await.unwrap_err();
+        assert!(err.to_string().contains("file locked by root/a"), "{err}");
     }
 
     #[tokio::test]
@@ -255,11 +249,7 @@ mod tests {
         let ctx = ToolContext::for_test();
         wrapped.call(&args("tmp/x.txt"), &ctx).await.unwrap();
         wrapped.call(&args("tmp/x.txt"), &ctx).await.unwrap();
-        assert_eq!(
-            tool.calls.load(Ordering::SeqCst),
-            2,
-            "自己重入幂等放行"
-        );
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2, "自己重入幂等放行");
     }
 
     #[tokio::test]
@@ -275,10 +265,7 @@ mod tests {
             gate,
             "root/b".to_string(),
         );
-        wrapped_b
-            .call(&args("tmp/x.txt"), &ctx)
-            .await
-            .unwrap();
+        wrapped_b.call(&args("tmp/x.txt"), &ctx).await.unwrap();
     }
 
     #[tokio::test]
@@ -301,9 +288,7 @@ mod tests {
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").unwrap();
         gate.try_claim(&file, "root/a").unwrap();
-        let err = gate
-            .try_claim(&dir.join("./f.txt"), "root/b")
-            .unwrap_err();
+        let err = gate.try_claim(&dir.join("./f.txt"), "root/b").unwrap_err();
         assert!(err.contains("root/a"));
         gate.release_all("root/a");
         gate.try_claim(&file, "root/b").unwrap();
@@ -331,7 +316,8 @@ mod tests {
 
         // writer-a: claims while the file does not exist (round-2
         // 10:21:55 "Created file").
-        gate.try_claim(&via_link, "root/a").expect("first claim on not-yet-existing file");
+        gate.try_claim(&via_link, "root/a")
+            .expect("first claim on not-yet-existing file");
 
         // writer-a creates the file.
         std::fs::write(real.join("gate.txt"), b"A").unwrap();
@@ -344,7 +330,8 @@ mod tests {
         assert!(err.contains("root/a"), "named-owner error, got {err:?}");
 
         gate.release_all("root/a");
-        gate.try_claim(&via_link, "root/b").expect("released file is claimable");
+        gate.try_claim(&via_link, "root/b")
+            .expect("released file is claimable");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

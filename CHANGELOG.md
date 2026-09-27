@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-27
+
+### Added
+- **Child write capability framework** (multi-agent): `ChildToolCapability` +
+  `resolve_capability` (presets / exclusion sets / role hints / degradation),
+  `MultiAgentConfig::allow_child_write` (default `false`) + `child_write_gate`,
+  `WorkspaceWriteGate` (`try_claim` never blocks, held for the task lifetime,
+  released by `ChildCleanup::drop`, parent agent exempt), build-time tool
+  registration filtering by the capability exclusion set with write-class tools
+  wrapped in `GatedTool`, spawn echo carrying `SpawnEcho`
+  (agent_path / registered_tools / degraded_reason), and `list_agents`
+  exposing `spawned_tools`.
+- `WorkspaceWriteGate::holder_of()` read-only observation.
+
+### Fixed
+- **Write-gate claim keys** no longer depend on whether the file existed at
+  claim time — on macOS (`/tmp` -> `/private/tmp`) first-writer and later-writer
+  canonicalization produced two keys for one file, structurally bypassing
+  mutual exclusion.
+- **Same-path spawn recycling**: spawning over a done/closed same-path
+  predecessor takes over its registration (cancel token, registry, mailbox,
+  generation bump, claim/echo clear) instead of failing with `AlreadyExists`;
+  `SpawnEcho` carries `recycled: true`. Running predecessors still reject;
+  per-path generation counters guard cleanup races.
+- **Write-gate claims released at task end** (before `note_posted`) instead of
+  held until close — a finished child no longer holds a lock a sibling's later
+  retry collides with. The close-path release remains as an idempotent backstop.
+- Skill scanning silently skips `_-prefixed` dirs (parked/disabled skills)
+  instead of WARN-logging a name mismatch.
+
+### Changed
+- Bump `agent-base` to 0.8.0.
+
 ## [0.8.0] - 2026-09-18
 
 ### Added

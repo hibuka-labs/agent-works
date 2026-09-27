@@ -25,13 +25,13 @@ agent-works        Batteries-included toolbox (wraps agent-base + enhancements)
 
 ```toml
 [dependencies]
-agent-works = { version = "0.1.7", features = ["full"] }
+agent-works = { version = "0.9.0", features = ["full"] }
 ```
 
 Or pick specific features:
 
 ```toml
-agent-works = { version = "0.1.7", features = ["mcp", "skill"] }
+agent-works = { version = "0.9.0", features = ["mcp", "skill"] }
 ```
 
 ## Feature Flags
