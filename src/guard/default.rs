@@ -1,7 +1,7 @@
 use agent_base::engine::react_loop_guard::{GuardCtx, GuardDecision, ReactLoopGuard};
 use agent_base::llm_trait::LlmProvider;
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::config::{DefaultGuardConfig, ReasoningOnlyAction};
 use super::judge::call_completion_judge;
@@ -12,6 +12,9 @@ use super::judge::call_completion_judge;
 pub struct DefaultGuard {
     config: DefaultGuardConfig,
     llm_client: Option<Arc<dyn LlmProvider>>,
+    /// Notice handle injected by the engine (Batch E). `None` until
+    /// `set_notice` is called — without it, guard behavior is unchanged.
+    notice: Mutex<Option<agent_base::NoticeHandle>>,
 }
 
 impl DefaultGuard {
@@ -19,6 +22,7 @@ impl DefaultGuard {
         Self {
             config,
             llm_client: None,
+            notice: Mutex::new(None),
         }
     }
 
@@ -27,7 +31,13 @@ impl DefaultGuard {
         Self {
             config,
             llm_client: Some(llm_client),
+            notice: Mutex::new(None),
         }
+    }
+
+    /// Snapshot the notice handle, if the engine injected one.
+    fn notice_handle(&self) -> Option<agent_base::NoticeHandle> {
+        self.notice.lock().unwrap().clone()
     }
 
     // ── Scene handlers ──────────────────────────────────────────────────
@@ -155,6 +165,7 @@ impl DefaultGuard {
                     self.config.judge_fail_open,
                     self.config.judge_timeout_secs,
                     self.config.recent_user_count,
+                    self.notice_handle().as_ref(),
                 )
                 .await
                 {
@@ -226,6 +237,7 @@ impl DefaultGuard {
                 self.config.judge_fail_open,
                 self.config.judge_timeout_secs,
                 self.config.recent_user_count,
+                self.notice_handle().as_ref(),
             )
             .await
             {
@@ -264,6 +276,10 @@ impl DefaultGuard {
 
 #[async_trait]
 impl ReactLoopGuard for DefaultGuard {
+    fn set_notice(&self, handle: agent_base::NoticeHandle) {
+        *self.notice.lock().unwrap() = Some(handle);
+    }
+
     async fn on_turn(&self, ctx: &GuardCtx) -> GuardDecision {
         if ctx.is_reasoning_only {
             self.handle_reasoning_only(ctx).await

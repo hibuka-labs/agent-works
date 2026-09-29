@@ -85,6 +85,7 @@ pub(crate) fn truncate_for_log(s: &str, max_chars: usize) -> &str {
 /// Parse failures get exactly one strict retry (the re-ask demands raw JSON
 /// only) before the configured fail-open/fail-closed behavior applies —
 /// a model formatting quirk must not silently end a run (issue #31).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_completion_judge(
     client: Option<&Arc<dyn LlmProvider>>,
     user_input: &str,
@@ -93,6 +94,7 @@ pub(crate) async fn call_completion_judge(
     judge_fail_open: bool,
     judge_timeout_secs: u64,
     recent_user_count: usize,
+    notice: Option<&agent_base::NoticeHandle>,
 ) -> Result<JudgeResult, String> {
     let Some(client) = client else {
         // No LLM client available — use configured behavior
@@ -188,6 +190,16 @@ pub(crate) async fn call_completion_judge(
         "completion judge failed"
     );
     if judge_fail_open {
+        // Honest fail-open (issue #31): the decision is Complete, but the
+        // user must see why — surface a TUI notice via the engine handle
+        // (best-effort: no handle / closed channel = silently dropped).
+        if let Some(handle) = notice {
+            handle.send(
+                agent_base::types::NoticeKind::Warning,
+                "guard",
+                "guard judge unparsed — treating as complete",
+            );
+        }
         // Fail-open: trust the model
         Ok(JudgeResult {
             done: true,
