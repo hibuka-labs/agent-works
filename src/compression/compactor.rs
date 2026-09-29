@@ -690,7 +690,7 @@ impl agent_base::ContextCompaction for ContextCompactor {
         &self,
         session_id: &SessionId,
         messages: &[ChatMessage],
-    ) -> Option<Vec<ChatMessage>> {
+    ) -> Option<agent_base::CompactionOutcome> {
         // Delegate to the existing compact() method with InlineCompaction trigger
         match self
             .compact(
@@ -701,7 +701,16 @@ impl agent_base::ContextCompaction for ContextCompactor {
             )
             .await
         {
-            Ok(result) => result,
+            Ok(Some(result)) => {
+                // This compactor always replaces the history wholesale, which
+                // is the Reset kind for logging — the react loop must say
+                // "compaction" here (issue #33).
+                Some(agent_base::CompactionOutcome {
+                    kind: agent_base::CompactionKind::Reset,
+                    messages: result,
+                })
+            }
+            Ok(None) => None,
             Err(e) => {
                 tracing::warn!(
                     session_id = session_id.id,
