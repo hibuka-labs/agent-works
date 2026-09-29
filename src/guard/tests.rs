@@ -8,6 +8,7 @@ use agent_base::llm_trait::response::{
 use agent_base::llm_trait::{Capabilities, ChatRequest, LlmError, LlmProvider};
 use agent_base::types::{FinishReason, SessionId};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -87,6 +88,13 @@ impl MockJudgeClient {
             response: response.to_string(),
         }
     }
+
+    /// Fixed verbatim response — for fence/prose-wrapped JSON tests (issue #31).
+    fn raw(response: &str) -> Self {
+        Self {
+            response: response.to_string(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -129,7 +137,20 @@ impl LlmProvider for MockJudgeClient {
 }
 
 /// Mock StreamClient that never resolves (for timeout testing).
-struct MockTimeoutClient;
+///
+/// `calls` counts `chat()` invocations — issue #31 asserts transport failures
+/// are NOT retried.
+struct MockTimeoutClient {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl MockTimeoutClient {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for MockTimeoutClient {
@@ -149,6 +170,7 @@ impl LlmProvider for MockTimeoutClient {
     }
 
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Never resolve — will be interrupted by timeout.
         std::future::pending().await
     }
@@ -160,6 +182,79 @@ impl LlmProvider for MockTimeoutClient {
     fn info(&self) -> agent_base::llm_trait::ProviderInfo {
         agent_base::llm_trait::ProviderInfo {
             name: "mock-timeout".to_string(),
+            model: "mock-model".to_string(),
+            version: None,
+        }
+    }
+}
+
+/// Mock client that serves queued responses in order and counts chat() calls.
+///
+/// Issue #31: asserts the judge retries parse failures exactly once.
+struct SequenceJudgeClient {
+    responses: std::sync::Mutex<VecDeque<String>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl SequenceJudgeClient {
+    fn new(responses: &[&str]) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses.iter().map(|s| s.to_string()).collect()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SequenceJudgeClient {
+    async fn stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        let content = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
+        let chunks = vec![
+            Ok(StreamChunk::Text(content)),
+            Ok(StreamChunk::Stop {
+                finish_reason: Some("stop".to_string()),
+            }),
+        ];
+        Ok(ChatStream::new(Box::pin(futures_util::stream::iter(
+            chunks,
+        ))))
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let content = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
+        Ok(ChatResponse {
+            content,
+            tool_calls: vec![],
+            usage: agent_base::UsageInfo::default(),
+            finish_reason: LlmFinishReason::Stop,
+            raw: None,
+            reasoning_content: None,
+            thinking_signature: None,
+        })
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+
+    fn info(&self) -> agent_base::llm_trait::ProviderInfo {
+        agent_base::llm_trait::ProviderInfo {
+            name: "mock-sequence".to_string(),
             model: "mock-model".to_string(),
             version: None,
         }
@@ -568,7 +663,7 @@ async fn test_text_only_skip_judge_when_input_too_large() {
 
 #[tokio::test]
 async fn test_text_only_judge_timeout_fail_open() {
-    let judge_client = Arc::new(MockTimeoutClient);
+    let judge_client = Arc::new(MockTimeoutClient::new());
     let config = DefaultGuardConfig {
         judge_fail_open: true,
         judge_timeout_secs: 1,
@@ -587,7 +682,7 @@ async fn test_text_only_judge_timeout_fail_open() {
 
 #[tokio::test]
 async fn test_text_only_judge_timeout_fail_closed() {
-    let judge_client = Arc::new(MockTimeoutClient);
+    let judge_client = Arc::new(MockTimeoutClient::new());
     let config = DefaultGuardConfig {
         judge_fail_open: false,
         judge_timeout_secs: 1,
@@ -664,7 +759,7 @@ async fn test_text_only_judge_error_fail_open() {
 
 #[tokio::test]
 async fn test_text_only_short_response_judge_timeout_fail_closed() {
-    let judge_client = Arc::new(MockTimeoutClient);
+    let judge_client = Arc::new(MockTimeoutClient::new());
     let config = DefaultGuardConfig {
         judge_fail_open: false,
         judge_timeout_secs: 1,
@@ -1437,7 +1532,7 @@ mod judge_function_tests {
 
     #[tokio::test]
     async fn test_judge_timeout_fail_open() {
-        let client = to_dyn(Arc::new(MockTimeoutClient));
+        let client = to_dyn(Arc::new(MockTimeoutClient::new()));
 
         let result = call_completion_judge(
             Some(&client),
@@ -1456,7 +1551,7 @@ mod judge_function_tests {
 
     #[tokio::test]
     async fn test_judge_timeout_fail_closed() {
-        let client = to_dyn(Arc::new(MockTimeoutClient));
+        let client = to_dyn(Arc::new(MockTimeoutClient::new()));
 
         let result = call_completion_judge(
             Some(&client),
@@ -1542,6 +1637,198 @@ mod judge_function_tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    // ── Parse tolerance (issue #31): fences / prose around the JSON object ──
+
+    #[tokio::test]
+    async fn test_judge_fenced_json_parses() {
+        let raw = "```json\n{\"done\": true, \"reason\": \"complete\"}\n```";
+        let client = to_dyn(Arc::new(MockJudgeClient::raw(raw)));
+
+        // fail_closed: a parse failure surfaces as Err, so Ok proves it parsed.
+        let result = call_completion_judge(
+            Some(&client),
+            "do something",
+            "done",
+            &["do something".to_string()],
+            false,
+            10,
+            5,
+        )
+        .await;
+
+        let judge = result.expect("fenced JSON should parse (issue #31)");
+        assert!(judge.done);
+        assert_eq!(judge.reason, "complete");
+    }
+
+    #[tokio::test]
+    async fn test_judge_prose_wrapped_json_parses() {
+        let raw = "Sure, here is my assessment: {\"done\": false, \"reason\": \"still incomplete\"} Let me know if you need more.";
+        let client = to_dyn(Arc::new(MockJudgeClient::raw(raw)));
+
+        let result = call_completion_judge(
+            Some(&client),
+            "do something",
+            "response",
+            &["do something".to_string()],
+            false,
+            10,
+            5,
+        )
+        .await;
+
+        let judge = result.expect("prose-wrapped JSON should parse (issue #31)");
+        assert!(!judge.done);
+        assert_eq!(judge.reason, "still incomplete");
+    }
+
+    #[tokio::test]
+    async fn test_judge_json_with_braces_inside_string_parses() {
+        // Braces and escaped quotes inside the value must not break the
+        // balanced-object scan.
+        let raw =
+            "Result: {\"done\": true, \"reason\": \"used {braces} and \\\"quotes\\\" inside\"}";
+        let client = to_dyn(Arc::new(MockJudgeClient::raw(raw)));
+
+        let result = call_completion_judge(
+            Some(&client),
+            "do something",
+            "response",
+            &["do something".to_string()],
+            false,
+            10,
+            5,
+        )
+        .await;
+
+        let judge = result.expect("JSON with braces inside strings should parse");
+        assert!(judge.done);
+        assert_eq!(judge.reason, "used {braces} and \"quotes\" inside");
+    }
+
+    // ── Strict single retry on parse failure (issue #31) ──
+
+    #[tokio::test]
+    async fn test_judge_garbage_retries_once_then_fails_open() {
+        let client = Arc::new(SequenceJudgeClient::new(&[
+            "total garbage",
+            "still garbage",
+        ]));
+
+        let result = call_completion_judge(
+            Some(&(Arc::clone(&client) as Arc<dyn LlmProvider>)),
+            "do something",
+            "response",
+            &["do something".to_string()],
+            true, // fail_open
+            10,
+            5,
+        )
+        .await;
+
+        // Exactly one retry: two calls total, never a loop.
+        assert_eq!(
+            client.call_count(),
+            2,
+            "parse failure must retry exactly once"
+        );
+        // Honest fail-open: Ok(done=true) but reason carries the raw text.
+        let judge = result.expect("fail_open must convert failure to done=true");
+        assert!(judge.done);
+        assert!(
+            judge.reason.contains("still garbage"),
+            "reason must carry the raw judge text (WARN detail): {}",
+            judge.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn test_judge_garbage_then_valid_retry_succeeds() {
+        let valid = r#"{"done": true, "reason": "complete"}"#;
+        let client = Arc::new(SequenceJudgeClient::new(&["I cannot answer that", valid]));
+
+        let result = call_completion_judge(
+            Some(&(Arc::clone(&client) as Arc<dyn LlmProvider>)),
+            "do something",
+            "response",
+            &["do something".to_string()],
+            false,
+            10,
+            5,
+        )
+        .await;
+
+        assert_eq!(
+            client.call_count(),
+            2,
+            "garbage → valid retry uses both calls"
+        );
+        let judge = result.expect("retry with valid JSON should succeed");
+        assert!(judge.done);
+        assert_eq!(judge.reason, "complete");
+    }
+
+    #[tokio::test]
+    async fn test_judge_timeout_does_not_retry() {
+        let client = Arc::new(MockTimeoutClient::new());
+
+        let result = call_completion_judge(
+            Some(&(Arc::clone(&client) as Arc<dyn LlmProvider>)),
+            "input",
+            "response",
+            &["input".to_string()],
+            false, // fail_closed: timeout surfaces as Err
+            1,     // 1s timeout
+            5,
+        )
+        .await;
+
+        assert!(result.is_err(), "timeout + fail_closed → Err");
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "transport failures must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_judge_garbage_fail_closed_retries_then_errs() {
+        let client = Arc::new(SequenceJudgeClient::new(&["garbage one", "garbage two"]));
+
+        let result = call_completion_judge(
+            Some(&(Arc::clone(&client) as Arc<dyn LlmProvider>)),
+            "do something",
+            "response",
+            &["do something".to_string()],
+            false, // fail_closed
+            10,
+            5,
+        )
+        .await;
+
+        assert_eq!(
+            client.call_count(),
+            2,
+            "fail_closed parse failure also retries once"
+        );
+        let err = result.expect_err("fail_closed + unparseable → Err");
+        assert!(
+            err.contains("garbage two"),
+            "error must carry the raw judge text (WARN detail): {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_truncate_respects_char_boundary() {
+        // Chinese chars are multi-byte; a byte-slice cut would panic.
+        let raw = "解析失败原文".repeat(200);
+        let truncated = super::super::judge::truncate_for_log(&raw, 500);
+        assert!(truncated.chars().count() <= 500);
+        // Short input passes through untouched.
+        assert_eq!(super::super::judge::truncate_for_log("short", 500), "short");
     }
 }
 
