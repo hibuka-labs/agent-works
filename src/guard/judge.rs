@@ -99,6 +99,15 @@ pub(crate) async fn call_completion_judge(
     let Some(client) = client else {
         // No LLM client available — use configured behavior
         if judge_fail_open {
+            // Same honesty contract as the call-failure fail-open below: the
+            // degradation must be visible in the UI, never silent.
+            if let Some(handle) = notice {
+                handle.send(
+                    agent_base::types::NoticeKind::Warning,
+                    "guard",
+                    "guard judge unavailable — treating as complete",
+                );
+            }
             return Ok(JudgeResult {
                 done: true,
                 reason: "no LLM client available for judge".to_string(),
@@ -193,12 +202,14 @@ pub(crate) async fn call_completion_judge(
         // Honest fail-open (issue #31): the decision is Complete, but the
         // user must see why — surface a TUI notice via the engine handle
         // (best-effort: no handle / closed channel = silently dropped).
+        // The text names the actual mechanism: an unparseable response is
+        // not a failed call.
         if let Some(handle) = notice {
-            handle.send(
-                agent_base::types::NoticeKind::Warning,
-                "guard",
-                "guard judge unparsed — treating as complete",
-            );
+            let text = match &failure {
+                JudgeFailure::Unparseable { .. } => "guard judge unparsed — treating as complete",
+                JudgeFailure::Transport(_) => "guard judge call failed — treating as complete",
+            };
+            handle.send(agent_base::types::NoticeKind::Warning, "guard", text);
         }
         // Fail-open: trust the model
         Ok(JudgeResult {
