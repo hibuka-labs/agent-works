@@ -26,7 +26,7 @@ pub use memory_write::MemoryWriteTool;
 /// the `{tools_description}` placeholder of the memory prompt template.
 pub const MEMORY_TOOLS_DESCRIPTION: &str = "\
 - `memory_write(name, description, type, body)` — create or update one memory and sync the index.
-- `memory_read(name)` — read one memory's full content.
+- `memory_read(name, offset_chars?, limit_chars?)` — read one memory's content (paginated; use offset_chars to continue).
 - `memory_list()` — return the current index (refreshes the stale startup snapshot).
 - `memory_delete(name)` — delete a memory and remove its index line.";
 
