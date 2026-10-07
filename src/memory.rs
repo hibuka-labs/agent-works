@@ -239,7 +239,15 @@ pub fn render_memory_file(
     modified: Option<&str>,
     body: &str,
 ) -> AgentResult<String> {
-    render_memory_file_merged(None, name, description, memory_type, origin_session_id, modified, body)
+    render_memory_file_merged(
+        None,
+        name,
+        description,
+        memory_type,
+        origin_session_id,
+        modified,
+        body,
+    )
 }
 
 /// Render a memory file, merging into `original_raw` when updating.
@@ -265,7 +273,10 @@ fn render_memory_file_merged(
     use serde_yaml::{Mapping, Value};
 
     fn upsert(map: &mut Mapping, key: &str, value: &str) {
-        map.insert(Value::String(key.to_string()), Value::String(value.to_string()));
+        map.insert(
+            Value::String(key.to_string()),
+            Value::String(value.to_string()),
+        );
     }
 
     let mut map: Mapping = match original_raw.and_then(split_frontmatter) {
@@ -1100,11 +1111,7 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
             "---\nname: ours\ndescription: ours\nmetadata:\n  node_type: memory\n  type: project\n---\n\nb\n",
         )
         .unwrap();
-        let names: Vec<_> = store
-            .list_memories()
-            .into_iter()
-            .map(|e| e.name)
-            .collect();
+        let names: Vec<_> = store.list_memories().into_iter().map(|e| e.name).collect();
         assert_eq!(names, vec!["cc-note".to_string(), "ours".to_string()]);
         drop(dir);
     }
@@ -1387,8 +1394,7 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
         rebuild_index(&root, "MEMORY.md").unwrap();
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert_eq!(
-            index,
-            "- [破](broken.md) — 尽量保留\n- [改名](mismatch.md) — 也要保留\n",
+            index, "- [破](broken.md) — 尽量保留\n- [改名](mismatch.md) — 也要保留\n",
             "unparseable rows survive; stale rows go: {index}"
         );
         drop(dir);
@@ -1411,7 +1417,10 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
         assert!(raw.contains("modified: "));
         assert!(raw.ends_with("the body"));
         let index = store.read_index();
-        assert!(index.contains("- [my-note](my-note.md) — a note"), "{index}");
+        assert!(
+            index.contains("- [my-note](my-note.md) — a note"),
+            "{index}"
+        );
         drop(dir);
     }
 
@@ -1461,7 +1470,10 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
         assert_eq!(doc.body, "new body");
         // Keys neither writer owns must survive the update (round-trip).
         assert!(raw.contains("tags:"), "top-level `tags` dropped:\n{raw}");
-        assert!(raw.contains("[a, b]") || raw.contains("- a"), "`tags` values dropped:\n{raw}");
+        assert!(
+            raw.contains("[a, b]") || raw.contains("- a"),
+            "`tags` values dropped:\n{raw}"
+        );
         assert!(
             raw.contains("created: 2026-01-01"),
             "metadata.created dropped:\n{raw}"
@@ -1718,7 +1730,10 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert_eq!(index.lines().count(), 2, "no duplication, no loss: {index}");
         assert!(index.contains("- [人类](alpha.md) — 旧"), "{index}");
-        assert!(index.contains("- [beta](beta.md) — see [x](alpha.md)"), "{index}");
+        assert!(
+            index.contains("- [beta](beta.md) — see [x](alpha.md)"),
+            "{index}"
+        );
         drop(dir);
     }
 
@@ -1739,7 +1754,10 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
             .write_memory("crlf", "new desc", "feedback", "new body", None)
             .unwrap();
         let raw = std::fs::read_to_string(root.join("crlf.md")).unwrap();
-        assert!(raw.contains("tags:"), "CRLF file lost foreign keys:\n{raw:?}");
+        assert!(
+            raw.contains("tags:"),
+            "CRLF file lost foreign keys:\n{raw:?}"
+        );
         assert!(raw.contains("new body"), "{raw:?}");
         drop(dir);
     }
@@ -1850,7 +1868,11 @@ metadata:\n  node_type: memory\n  type: project\n  created: 2026-01-01\n\
             "---\nname: beta\ndescription: file says this now\nmetadata:\n  node_type: memory\n  type: project\n---\n\nbody\n",
         )
         .unwrap();
-        std::fs::write(root.join("MEMORY.md"), "- [人类标题](beta.md) — stale tail\n").unwrap();
+        std::fs::write(
+            root.join("MEMORY.md"),
+            "- [人类标题](beta.md) — stale tail\n",
+        )
+        .unwrap();
         rebuild_index(&root, "MEMORY.md").unwrap();
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert_eq!(index, "- [人类标题](beta.md) — stale tail\n", "{index}");

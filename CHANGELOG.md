@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-07
+
+### Added
+- **`DefaultGuard`** surfaces judge fail-open as a Warning notice
+
+### Fixed
+- `memory_read` paginates output instead of hitting the tool-output cap
+- Memory shared-writer contract honored alongside Claude Code
+- Judge fail-open messages carry the cause; one retry on parse failure before
+  fail-open
+- Compression compactor adapts to `CompactionOutcome` (#33)
+
 ## [0.9.0] - 2026-09-27
 
 ### Added
