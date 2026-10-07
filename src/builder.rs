@@ -1702,7 +1702,7 @@ mod tests {
                 tokio::task::block_in_place(|| runtime.config().system_prompt.clone().unwrap());
             assert!(prompt.starts_with("base prompt"), "{prompt}");
             assert!(
-                prompt.contains("- [seeded before build](seed-note.md) — seeded before build"),
+                prompt.contains("- [seed-note](seed-note.md) — seeded before build"),
                 "{prompt}"
             );
             assert!(

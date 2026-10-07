@@ -271,6 +271,54 @@ async fn corrupt_files_are_skipped_and_rebuild_repairs_index() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cross-writer compatibility: Claude Code and phimint share one memory
+// directory. Neither may destroy what the other wrote (format, unknown
+// frontmatter keys, human index titles).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn claude_code_written_memory_survives_phimint_update() {
+    let fx = Fixture::new();
+    // Claude Code writes a memory file in its own documented format —
+    // `metadata` carries only `type` (no node_type/stamps) — plus a frontmatter
+    // key neither writer owns, and an index row with a human title.
+    std::fs::create_dir_all(fx.root()).unwrap();
+    std::fs::write(
+        fx.root().join("cc-note.md"),
+        "---\nname: cc-note\ndescription: old desc\ntags: [a, b]\nmetadata:\n  type: feedback\n---\n\nold body\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fx.root().join("MEMORY.md"),
+        "- [人类标题](cc-note.md) — old desc\n",
+    )
+    .unwrap();
+
+    // phimint sees Claude Code's memory (list) and can read it.
+    let listed = call(fx.list.as_ref(), json!({})).await;
+    assert!(listed.contains("(cc-note.md)"), "{listed}");
+
+    // phimint updates the same memory through its tool.
+    call(
+        fx.write.as_ref(),
+        json!({"name": "cc-note", "description": "new desc", "type": "feedback", "body": "new body"}),
+    )
+    .await;
+
+    // Unknown frontmatter keys survive; the known fields are refreshed.
+    let raw = std::fs::read_to_string(fx.root().join("cc-note.md")).unwrap();
+    assert!(raw.contains("tags:"), "unknown key dropped:\n{raw}");
+    assert!(raw.contains("type: feedback"), "type dropped:\n{raw}");
+    assert!(raw.contains("new body"), "{raw}");
+    // The human title in the index row survives; only the description refreshes.
+    let index = fx.index();
+    assert_eq!(
+        index, "- [人类标题](cc-note.md) — new desc\n",
+        "update must not clobber the human title: {index}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // In-process concurrency: parallel tokio tasks must not lose index rows
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -350,7 +398,7 @@ async fn builder_memory_config_end_to_end() {
     assert!(prompt.starts_with("base"), "{prompt}");
     assert!(prompt.contains("## Memory"), "{prompt}");
     assert!(
-        prompt.contains("- [first memory](alpha.md) — first memory"),
+        prompt.contains("- [alpha](alpha.md) — first memory"),
         "{prompt}"
     );
 

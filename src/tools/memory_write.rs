@@ -158,7 +158,7 @@ mod tests {
 
         let index = std::fs::read_to_string(root.join("MEMORY.md")).unwrap();
         assert!(
-            index.contains("- [绝不主动 commit](cargo-commit-discipline.md) — 绝不主动 commit"),
+            index.contains("- [cargo-commit-discipline](cargo-commit-discipline.md) — 绝不主动 commit"),
             "{index}"
         );
     }

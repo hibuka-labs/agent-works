@@ -82,8 +82,8 @@ mod tests {
             .await
             .unwrap();
         let text = crate::tools::test_support::first_text(&out);
-        assert!(text.contains("[first](alpha.md) — first"), "{text}");
-        assert!(text.contains("[second](beta.md) — second"), "{text}");
+        assert!(text.contains("[alpha](alpha.md) — first"), "{text}");
+        assert!(text.contains("[beta](beta.md) — second"), "{text}");
         assert_eq!(text.lines().count(), 2, "{text}");
     }
 
