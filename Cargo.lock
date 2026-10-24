@@ -19,9 +19,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-base"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0268793c807e5c372431b2f22fc0432768a1eb71746c13f58b0a5d63cfcf9a5d"
+checksum = "ce6daeba3291427426b3e73ed190fd48786667621870b7b5c9200088e0edd097"
 dependencies = [
  "agent-types",
  "anyhow",
@@ -46,9 +46,9 @@ dependencies = [
 
 [[package]]
 name = "agent-types"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c74182e96d19f6ccdd9c6a1298ee55002c4449eb56b4d67838a4f62d2d41df53"
+checksum = "0a1f3f84a55a947beb9f58f4fb8b5086a231e62bed672a414ea872f62bcc2afa"
 dependencies = [
  "llm-trait",
  "serde",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agent-works"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "agent-base",
  "anyhow",

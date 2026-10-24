@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-24
+
+### Fixed
+- **A run parked on a human answer completes instead of nudging "continue".**
+  The latest tool batch can park on a human step (a design-canvas screen
+  awaiting a pick); the completion judge saw the whole multi-step task and
+  pushed the model on, and the model decided the user's design choices for
+  them (session 20261022_bb8c2dc3). `DefaultGuard` now returns `Complete`
+  when `GuardCtx.awaiting_human` is set without consulting the judge.
+  Degenerate turns (reasoning-only etc.) still fail while a pick is pending.
+
+### Changed
+- Bump `agent-base` requirement to 0.11.0 (`awaiting_human` park tracking).
+
 ## [0.11.0] - 2026-10-18
 
 ### Added
