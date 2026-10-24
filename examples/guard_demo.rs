@@ -223,6 +223,7 @@ fn make_test_ctx(
         is_reasoning_only,
         is_empty_response,
         is_text_only,
+        awaiting_human: false,
         thinking_disabled: false,
         original_thinking_enabled: true,
     }

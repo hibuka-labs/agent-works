@@ -38,6 +38,7 @@ fn make_ctx(
         is_reasoning_only,
         is_empty_response,
         is_text_only,
+        awaiting_human: false,
         thinking_disabled: false,
         original_thinking_enabled: true,
         remaining_turns: 50,
@@ -69,6 +70,7 @@ fn make_ctx_with_text(
         is_reasoning_only: false,
         is_empty_response: false,
         is_text_only,
+        awaiting_human: false,
         thinking_disabled: false,
         original_thinking_enabled: true,
         remaining_turns: 50,
@@ -549,6 +551,52 @@ async fn test_text_only_judge_reason_propagated_to_nudge() {
         }
         other => panic!("expected Continue, got: {:?}", other),
     }
+}
+
+// ── Awaiting-human park: a run parked on a human answer is waiting, not incomplete ──
+
+/// Session 20261022_bb8c2dc3: `canvas_push` parked on a pick, the completion
+/// judge saw the whole multi-step task and nudged "continue", and the model
+/// decided the user's design choices for them. A parked run must complete
+/// without the judge being consulted — a judge that says "not done" here would
+/// reproduce the steamroll exactly.
+#[tokio::test]
+async fn awaiting_human_park_completes_even_when_judge_would_nudge() {
+    let judge_client = Arc::new(MockJudgeClient::new(serde_json::json!({
+        "done": false,
+        "reason": "four design steps are still unanswered"
+    })));
+    let guard = DefaultGuard::with_llm_client(DefaultGuardConfig::default(), judge_client);
+    let mut ctx = make_ctx_with_text(
+        "design a dashboard and let me pick each option",
+        "The screen is up — click an option on the canvas and I'll continue.",
+        true,
+        true,
+    );
+    ctx.awaiting_human = true;
+
+    let decision = guard.on_turn(&ctx).await;
+    assert!(
+        matches!(decision, GuardDecision::Complete),
+        "parked-on-human must Complete even when the judge would nudge, got: {:?}",
+        decision
+    );
+}
+
+/// Degenerate turns still fail while a pick is pending — a reasoning-only
+/// response is broken regardless of the park.
+#[tokio::test]
+async fn awaiting_human_does_not_mask_degenerate_turns() {
+    let guard = DefaultGuard::new(DefaultGuardConfig::default());
+    let mut ctx = make_ctx(1, 0, true, true, false, false);
+    ctx.awaiting_human = true;
+
+    let decision = guard.on_turn(&ctx).await;
+    assert!(
+        !matches!(decision, GuardDecision::Complete),
+        "reasoning-only must not Complete just because a pick is pending, got: {:?}",
+        decision
+    );
 }
 
 // ── Short response detection tests ──

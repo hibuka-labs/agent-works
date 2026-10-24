@@ -285,6 +285,15 @@ impl ReactLoopGuard for DefaultGuard {
             self.handle_reasoning_only(ctx).await
         } else if ctx.is_empty_response {
             self.handle_empty_response(ctx).await
+        } else if ctx.awaiting_human {
+            // The latest tool batch parked on a human step (a design-canvas
+            // screen awaiting a pick) and no tool ran after it: ending here is
+            // *waiting for the user*, not an incomplete task — their pick (or
+            // skip) is the next input. A "continue working" nudge in this
+            // state steamrolls interactive flows (session 20261022_bb8c2dc3:
+            // the completion judge pushed the model on and it decided the
+            // user's design choices for them).
+            GuardDecision::Complete
         } else if ctx.is_text_only {
             self.handle_text_only(ctx).await
         } else {
