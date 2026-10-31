@@ -278,6 +278,7 @@ async fn prefill_child_session_user_and_assistant() {
             tool_call_id: "call_123".into(),
             name: None,
             content: "tool output".into(),
+            images: Vec::new(),
         },
     ];
 

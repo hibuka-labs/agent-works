@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -32,11 +32,18 @@ loom-check = ["dep:loom"]
 memory = ["serde_yaml", "dep:dirs"]
 # Plugin wasm form: wasmtime component runtime (WIT phi:tool@0.1.0).
 wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:http"]
-full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression", "memory", "wasm"]
+# CodeAct main road (codexec-design §11): the `code_cell` tool — one resident
+# interpreter behind one agent tool. The engine + namespace contract land here;
+# the capability packs stay at the assembly host (sdk-assembly §9.3).
+code-exec = ["dep:codexec", "dep:phi-ns", "dep:base64", "dep:image"]
+full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focus", "multi_agent", "compression", "memory", "wasm", "code-exec"]
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.11.0" }
+agent-base = { version = "0.12.0" }
+# Shared capability vocabulary (phi-cap): one set of types for every shape
+# that declares capabilities — plugins and capability packs alike.
+phi-cap = { version = "0.1.0", features = ["serde"] }
 async-trait = "0.1"
 dyn-clone = "1"
 futures-core = "0.3"
@@ -63,6 +70,19 @@ http = { version = "1", optional = true }
 
 # 安装完整性哈希（manifest / .wasm 钉死值）
 sha2 = "0.10"
+
+# code-exec（`code_cell` 工具）：引擎 + 命名空间契约。能力包刻意不拉进来——
+# 装配在挂接层/应用层（sdk-assembly §9.3，三条禁令）。
+codexec = { version = "0.1.0", optional = true }
+phi-ns = { version = "0.1.0", optional = true }
+# 图片事件 → Content::Image 的字节编码（phi-ns 同 minor）
+base64 = { version = "0.23", optional = true }
+# Model-facing image budget: a large PNG screenshot is transcoded to JPEG at
+# unchanged dimensions before it rides a tool result (same `image` minor as
+# the desktop stub). The decoders cover exactly the mime list phi-ns admits;
+# anything this build cannot decode keeps its original bytes.
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+
 # 压缩包解压（plugin add 归档通道；解压做 zip-slip 路径检查）
 flate2 = "1"
 tar = "0.4"
@@ -85,6 +105,22 @@ wit-parser = "0.262.0"
 # wasm 形态 net 白名单钩子测试：构造 http::Request<WasiBody>
 bytes = "1"
 http-body-util = "0.1"
+
+# P2/P3 acceptance (sdk-assembly §10): the assembled stack — codexec with the
+# real `b.*` / `desk.*` / `m.*` packs — lives in the挂接层 (§9.3), never inside
+# the engine or the pack. phi-tools is here to measure Path A of the 并存对账.
+codexec = { version = "0.1.0" }
+phi-ns = { version = "0.1.0" }
+phi-ns-browser = { version = "0.1.0" }
+phi-ns-desktop = { version = "0.1.0" }
+phi-ns-mobile = { version = "0.1.0" }
+phi-tools = { version = "0.8.0", features = ["browser"] }
+tiktoken-rs = "0.12"
+
+# M2 acceptance through the agent Tool seam (runs with --features code-exec)
+[[test]]
+name = "code_cell_tool"
+required-features = ["code-exec"]
 
 [[bench]]
 name = "agent_builder"

@@ -104,62 +104,23 @@ impl std::fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-/// Payload of a `fs:read` capability entry (`paths`; extra fields rejected —
-/// strict oneOf law).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FsReadSpec {
-    /// Readable directories/files relative to the plugin root.
-    pub paths: Vec<String>,
-}
-
-/// Payload of a `net:http` capability entry (`hosts`; extra fields rejected —
-/// strict oneOf law).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NetHttpSpec {
-    /// Outbound HTTP host allow-list.
-    pub hosts: Vec<String>,
-}
-
-/// Capability allow-list entry (declaration form; fail-closed, undeclared =
-/// not granted). wasm form only.
+/// Capability vocabulary — **one** set of types, owned by `phi-cap`
+/// (sdk-assembly §4.1): declaration layer [`CapabilitySpec`], pinned layer
+/// [`ResolvedCapability`], decision layer `phi_cap::Capability`, with
+/// `class_of` the only translation between them. This module re-exports the
+/// same type names so existing plugin code is unchanged (the old "wasm form
+/// only" law is lifted: *every* shape that declares capabilities uses these).
 ///
-/// `fs:read` must come with `paths` (WASI preopens are path-scoped: no preopen
-/// = can read nothing, preopening `/` = giving everything); `net:http` must
-/// come with a `hosts` allow-list (filtered at outbound-request time, not on
-/// the list = rejected). Cross fields (fs with hosts / net with paths) are
-/// enforced by the payload structs' `deny_unknown_fields`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CapabilitySpec {
-    /// Readable directories/files relative to the plugin root (resolved to
-    /// absolute paths at install time and pinned into the registry).
-    #[serde(rename = "fs:read")]
-    FsRead(FsReadSpec),
-    /// Outbound HTTP host allow-list (normalized and pinned into the registry at
-    /// install time).
-    #[serde(rename = "net:http")]
-    NetHttp(NetHttpSpec),
-}
+/// Which variants a **form** may declare is that form's enforcement face —
+/// see [`PluginManifest::validate_tool`]: declared means enforceable.
+pub use phi_cap::{
+    CapabilitySpec, DeviceCaptureSpec, DeviceInputSpec, FsReadSpec, NetHttpSpec, ProcessSpawnSpec,
+    ResolvedCapability,
+};
 
-/// Capability allow-list entry (resolved form: paths absolutized / hosts
-/// normalized) — the pinned values in the registry.
-///
-/// Capability enforcement **reads only this** (the external registry), never
-/// the plugin's own manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ResolvedCapability {
-    /// Absolute path list (pinned at install time via [`resolve_under_root`]).
-    #[serde(rename = "fs:read")]
-    FsRead { paths: Vec<String> },
-    /// Normalized host allow-list (lowercased, whitespace stripped).
-    #[serde(rename = "net:http")]
-    NetHttp { hosts: Vec<String> },
-}
-
-/// Resolve a batch of capability declarations (relative to `plugin_root`).
+/// Resolve a batch of capability declarations (relative to `plugin_root`):
+/// paths absolutized under the root, hosts normalized, everything else pinned
+/// as declared — "whoever declares, pins".
 pub fn resolve_capabilities(
     caps: &[CapabilitySpec],
     plugin_root: &Path,
@@ -179,6 +140,15 @@ pub fn resolve_capabilities(
                     .iter()
                     .map(|h| h.trim().to_ascii_lowercase())
                     .collect(),
+            }),
+            CapabilitySpec::ProcessSpawn(spec) => Ok(ResolvedCapability::ProcessSpawn {
+                programs: spec.programs.clone(),
+            }),
+            CapabilitySpec::DeviceInput(spec) => Ok(ResolvedCapability::DeviceInput {
+                targets: spec.targets.clone(),
+            }),
+            CapabilitySpec::DeviceCapture(spec) => Ok(ResolvedCapability::DeviceCapture {
+                targets: spec.targets.clone(),
             }),
         })
         .collect()
@@ -474,7 +444,22 @@ impl PluginManifest {
                                 reason: "net:http host must not be empty".into(),
                             });
                         }
-                        _ => {}
+                        // Declared = enforceable. The wasm host opens fs
+                        // preopens and filters outbound hosts — nothing else.
+                        // A capability it cannot enforce must not be declarable
+                        // here (a declared-but-inert grant is a lie); the form
+                        // opens up when its enforcement face does.
+                        CapabilitySpec::FsRead(_) | CapabilitySpec::NetHttp(_) => {}
+                        CapabilitySpec::ProcessSpawn(_)
+                        | CapabilitySpec::DeviceInput(_)
+                        | CapabilitySpec::DeviceCapture(_) => {
+                            return Err(ManifestError::BadCapability {
+                                tool: name.to_string(),
+                                reason: "wasm tools may only declare fs:read / net:http \
+                                         (the faces the wasm host enforces)"
+                                    .into(),
+                            });
+                        }
                     }
                 }
             }

@@ -46,7 +46,7 @@ fn text_delta(text: &str, agent_id: Option<&str>) -> agent_base::RuntimeEvent {
 }
 
 fn tool_started(tool_name: &str) -> agent_base::RuntimeEvent {
-    agent_base::RuntimeEvent::ToolCallStarted {
+    agent_base::RuntimeEvent::ActionStarted {
         session_id: agent_base::SessionId::new(1),
         tool_name: tool_name.to_string(),
         args_json: "{}".to_string(),
@@ -117,7 +117,7 @@ fn test_build_child_result_failed_keeps_error() {
 // ── collect_denied_tools ──
 
 fn tool_finished(tool_name: &str, denied: bool) -> agent_base::RuntimeEvent {
-    agent_base::RuntimeEvent::ToolCallFinished {
+    agent_base::RuntimeEvent::ActionFinished {
         session_id: agent_base::SessionId::new(1),
         tool_name: tool_name.to_string(),
         summary: "summary".to_string(),
@@ -155,7 +155,7 @@ fn test_collect_denied_tools_excludes_grandchild_denials() {
     // A grandchild's denial carries an agent_id and must not be attributed to
     // the child.
     let events = vec![
-        agent_base::RuntimeEvent::ToolCallFinished {
+        agent_base::RuntimeEvent::ActionFinished {
             session_id: agent_base::SessionId::new(1),
             tool_name: "grandchild_tool".to_string(),
             summary: "summary".to_string(),

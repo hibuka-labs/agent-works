@@ -46,7 +46,10 @@ const MAX_DESCRIPTION_CHARS: usize = 120;
 /// catalog is the model's trigger surface, so listing a denied skill would
 /// contradict the trait's "the LLM cannot auto-trigger this skill" contract.
 /// `user-invocable: false` internals are still listed: that flag only gates
-/// the user's slash path, not the model. Bounded: at most `MAX_CATALOG_SKILLS`
+/// the user's slash path, not the model. Session-active skills (baked into
+/// the system prompt) keep their entry but gain an `[active]` marker — the
+/// body is already in the prompt and must not be loaded again. Bounded: at
+/// most `MAX_CATALOG_SKILLS`
 /// entries with a "... N more" tail, descriptions cut to 120 chars. Returns
 /// `None` when nothing is model-visible so the caller can keep the prompt
 /// byte-identical to the no-skills baseline.
@@ -69,9 +72,18 @@ pub fn render_catalog(resolver: &SkillResolver) -> Option<String> {
 
     let shown = visible.len().min(MAX_CATALOG_SKILLS);
     for skill in &visible[..shown] {
+        // `[active]` = the body is already baked into the system prompt
+        // (single-injection, survey P4): the entry stays visible for routing,
+        // but the model must not load it again through the `skill` tool.
+        let active_marker = if resolver.active().is_active(skill.name()) {
+            " [active]"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "- {}: {}\n",
+            "- {}{}: {}\n",
             skill.name(),
+            active_marker,
             truncate_description(&skill.brief_description())
         ));
     }
@@ -92,6 +104,10 @@ pub fn render_catalog(resolver: &SkillResolver) -> Option<String> {
     out.push_str(
         "- How to load: call the `skill` tool with the skill's name. \
          Read the returned instructions completely before acting on the task.\n",
+    );
+    out.push_str(
+        "- Skills marked `[active]` are already baked into your system prompt — \
+         follow them from there and never load them with the `skill` tool.\n",
     );
     out.push_str("- Announce which skill(s) you're using and why (one short line).\n");
     debug_assert_eq!(
@@ -541,6 +557,33 @@ mod tests {
         assert!(catalog.ends_with(CATALOG_FOOTER_LINE));
         // Callers join with a \n\n prefix → the full anchor must appear
         assert!(composed(&resolver, "").contains(CATALOG_ANCHOR));
+    }
+
+    #[test]
+    fn active_skills_gain_the_marker_and_a_no_reload_hint() {
+        // Survey P4 single-injection: the catalog is the routing surface —
+        // the active entry stays listed but marked, and the usage rules tell
+        // the model to stop loading it.
+        let tmp = tempfile::tempdir().unwrap();
+        make_skill_dir(tmp.path(), "alpha", "body", true);
+        make_skill_dir(tmp.path(), "beta", "body", true);
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        resolver.active().mark_active("beta");
+        let catalog = render_catalog(&resolver).unwrap();
+
+        assert!(
+            catalog.contains("- alpha: "),
+            "unmarked entry stays unchanged:\n{catalog}"
+        );
+        assert!(!catalog.contains("- alpha [active]"), "{catalog}");
+        assert!(catalog.contains("- beta [active]: "), "{catalog}");
+        assert!(
+            catalog.contains("never load them with the `skill` tool"),
+            "usage rules must steer the model away from re-loading: {catalog}"
+        );
+        // Markers live inside the catalog block — strip/refresh anchors intact.
+        assert!(catalog.starts_with(CATALOG_HEADER));
+        assert!(catalog.ends_with(CATALOG_FOOTER_LINE));
     }
 
     #[test]

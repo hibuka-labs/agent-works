@@ -141,11 +141,11 @@ impl DefaultGuard {
                 output_chars = output_len,
                 min_input = self.config.short_response_min_input,
                 max_output = self.config.short_response_max_output,
-                run_has_tool_calls = ctx.run_has_tool_calls,
+                run_has_actions = ctx.run_has_actions,
                 "short response detected in text-only branch"
             );
 
-            if ctx.run_has_tool_calls && self.config.use_llm_judge {
+            if ctx.run_has_actions && self.config.use_llm_judge {
                 // Skip LLM judge for very large inputs — judge would be too slow
                 const INPUT_LEN_LIMIT: usize = 10_000;
                 if input_len > INPUT_LEN_LIMIT {
@@ -202,7 +202,7 @@ impl DefaultGuard {
                     nudge: Some(self.config.short_response_nudge.clone()),
                 }
             }
-        } else if ctx.run_has_tool_calls && self.config.use_llm_judge {
+        } else if ctx.run_has_actions && self.config.use_llm_judge {
             // Non-short response after tools — check skip threshold
             if output_len >= self.config.judge_skip_threshold {
                 tracing::debug!(

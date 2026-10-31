@@ -546,7 +546,7 @@ impl AgentRegistry {
     /// Record one executed tool call: bumps the monotonic counter and the
     /// activity timestamp.
     ///
-    /// Called from the child event bridge on every `ToolCallStarted`, so
+    /// Called from the child event bridge on every `ActionStarted`, so
     /// `list_agents` can show real progress (see [`AgentEntry::tool_calls`]).
     /// Returns `true` if the agent was found and updated.
     pub fn record_tool_call(&mut self, path: &AgentPath) -> bool {
@@ -974,6 +974,34 @@ mod tests {
         // A queued follow-up re-blocks quiescence even though b delivered.
         assert!(reg.note_enqueued(&b));
         assert!(!reg.quiescent(), "queued work blocks the batch");
+    }
+
+    #[test]
+    fn a_killed_child_settles_quiescence() {
+        // Force-kill regression (20260914_50cf809d report loss, survey §5.1):
+        // cancel must land a terminal fact (`note_closing`) instead of leaving
+        // the entry `in_flight=true` forever. Before that, one force-kill made
+        // quiescence structurally unreachable and the watcher could never
+        // hand the held batch over — the sibling's report died with it.
+        let (mut reg, a) = registered(test_config(), "a");
+        let b = test_path("b");
+        reg.register(&b, 1).unwrap();
+
+        // a delivered; b is mid-run when root kills it.
+        assert!(reg.note_enqueued(&a));
+        assert!(reg.note_dequeued(&a));
+        assert!(reg.note_posted(&a));
+        assert!(reg.note_enqueued(&b));
+        assert!(reg.note_dequeued(&b));
+        assert!(!reg.quiescent(), "b is in flight");
+
+        // The cancel lands the terminal fact: b never delivered, yet it no
+        // longer blocks the batch.
+        assert!(reg.note_closing(&b));
+        assert!(
+            reg.quiescent(),
+            "a closing child counts as settled — its cancel is the terminal fact"
+        );
     }
 
     #[test]

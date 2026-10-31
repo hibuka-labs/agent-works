@@ -67,7 +67,7 @@ impl<W: Write> CliEventPrinter<W> {
                     agent_base::AgentError::internal(format!("flush stdout failed: {e}"))
                 })?;
             }
-            RuntimeEvent::ToolCallStarted {
+            RuntimeEvent::ActionStarted {
                 tool_name,
                 args_json,
                 ..
@@ -76,7 +76,7 @@ impl<W: Write> CliEventPrinter<W> {
                 writeln!(self.write, "[Tool Start] {tool_name} {args_json}")
                     .map_err(|e| agent_base::AgentError::internal(format!("write failed: {e}")))?;
             }
-            RuntimeEvent::ToolCallFinished {
+            RuntimeEvent::ActionFinished {
                 tool_name, summary, ..
             } => {
                 self.finish();
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_tool_call_started() {
         let mut cep = CliEventPrinter::with_writer(Vec::new());
-        let event = RuntimeEvent::ToolCallStarted {
+        let event = RuntimeEvent::ActionStarted {
             session_id: SessionId::new(0),
             tool_name: "tool_started".to_string(),
             args_json: "tool_args".to_string(),
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn test_tool_call_finished() {
         let mut cep = CliEventPrinter::with_writer(Vec::new());
-        let event = RuntimeEvent::ToolCallFinished {
+        let event = RuntimeEvent::ActionFinished {
             session_id: SessionId::new(0),
             tool_name: "tool_name".to_string(),
             summary: "tool call finished\nthis is a test\n".to_string(),

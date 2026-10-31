@@ -107,7 +107,7 @@ impl ReactLoopGuard for StrictGuard {
                 error: "no tool calls or text produced".into(),
             };
         }
-        if ctx.is_text_only && !ctx.run_has_tool_calls {
+        if ctx.is_text_only && !ctx.run_has_actions {
             return GuardDecision::Fail {
                 error: "model responded with text only — no tool calls were made".into(),
             };
@@ -205,7 +205,7 @@ fn make_test_ctx(
     is_text_only: bool,
     reasoning_strikes: usize,
     empty_strikes: usize,
-    run_has_tool_calls: bool,
+    run_has_actions: bool,
 ) -> GuardCtx {
     GuardCtx {
         session_id: agent_base::SessionId::new(1),
@@ -216,7 +216,7 @@ fn make_test_ctx(
         available_tools: vec!["echo".into()],
         reasoning_only_strikes: reasoning_strikes,
         empty_response_strikes: empty_strikes,
-        run_has_tool_calls,
+        run_has_actions,
         last_tool_calls_invalid: false,
         remaining_turns: 100,
         all_user_inputs: vec!["test input".into()],

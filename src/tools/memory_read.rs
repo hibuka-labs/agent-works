@@ -6,7 +6,7 @@
 //! the model gets `ToolOutputTooLarge` and no way to page in. Caps run as low
 //! as 4,000 chars (phi-agent's default; phimint sets 16,000), so every
 //! response is bounded at [`DEFAULT_READ_LIMIT`] chars and carries the offset
-//! to continue from — same shape as `history.read_item`.
+//! to continue from — same shape as `history_read_item`.
 
 use std::sync::Arc;
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use agent_base::{PlanItem, Tool};
 use serde::Serialize;
 
+pub mod active;
 pub mod prompter;
 pub mod registry;
 
@@ -28,6 +29,7 @@ pub mod telemetry;
 #[cfg(feature = "prompt_skill")]
 pub mod tool;
 
+pub use active::ActiveSkillSet;
 pub use prompter::{FullDetailPrompter, LazySkillPrompter};
 pub use registry::{SkillRegistry, SkillSummary};
 

@@ -50,7 +50,9 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const INTERPRETER_WHITELIST: [&str; 3] = ["powershell", "pwsh", "cmd"];
 
 /// Output truncation marker (same convention as phi-kernel-tools `local_shell::truncate_output`).
-const TRUNCATION_MARKER: &str = "...[output truncated]";
+/// The elision marker of the output truncation convention (one vocabulary
+/// across the family: kernel tools, script tools, code cells).
+pub(crate) const TRUNCATION_MARKER: &str = "...[output truncated]";
 
 /// Path-law violation at definition/install time. Fail-closed: reject what is illegal, no compromises.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,15 +544,22 @@ fn substitute_element(
     Ok(out)
 }
 
-/// Output truncation convention (copied verbatim from phi-kernel-tools `local_shell::truncate_output`):
-/// first 1/3 + `...[output truncated]` + last 2/3.
-fn truncate_output(s: &str, max_chars: Option<usize>) -> String {
+/// Output truncation convention (copied from phi-kernel-tools `local_shell::truncate_output`):
+/// first 1/3 + `...[output truncated]` + last 2/3. Plus one clamp the kernel
+/// copy lacks: a budget too small to carry the marker returns a head slice,
+/// because the contract is `result <= max_chars` — an over-budget result makes
+/// the engine reject the whole call (`Tool '…' output exceeds the …-char
+/// limit`) and the model loses the result entirely.
+pub(crate) fn truncate_output(s: &str, max_chars: Option<usize>) -> String {
     let Some(max_chars) = max_chars else {
         return s.to_string();
     };
     let total = s.chars().count();
     if total <= max_chars {
         return s.to_string();
+    }
+    if max_chars <= TRUNCATION_MARKER.chars().count() + 2 {
+        return s.chars().take(max_chars).collect();
     }
     let available = max_chars.saturating_sub(TRUNCATION_MARKER.chars().count() + 2);
     let head_chars = available / 3;
@@ -1311,6 +1320,22 @@ mod tests {
             // Both head and tail are present (seq runs from 1 to 1000)
             assert!(text.starts_with('1'), "{text}");
             assert!(text.contains("1000"), "{text}");
+        }
+
+        #[test]
+        fn truncation_never_exceeds_the_budget() {
+            // Regression: a budget below the marker floor used to return the
+            // marker itself — still over budget — and the engine then rejected
+            // the whole call (`Tool '…' output exceeds the …-char limit`),
+            // losing the result entirely.
+            for max in 0..40usize {
+                let out = truncate_output(&"x".repeat(500), Some(max));
+                assert!(
+                    out.chars().count() <= max,
+                    "max={max} produced {} chars",
+                    out.chars().count()
+                );
+            }
         }
 
         #[tokio::test]

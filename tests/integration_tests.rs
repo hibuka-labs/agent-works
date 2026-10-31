@@ -478,7 +478,7 @@ mod skill_tests {
 
         let (events, _outcome) = result.unwrap();
         let tool_done = events.iter().any(
-            |e| matches!(e, RuntimeEvent::ToolCallFinished { tool_name, .. } if tool_name == "add"),
+            |e| matches!(e, RuntimeEvent::ActionFinished { tool_name, .. } if tool_name == "add"),
         );
         assert!(tool_done, "add tool should be called");
     }
@@ -549,7 +549,7 @@ mod skill_tests {
 
         let (events, _outcome) = result.unwrap();
         let skill_loaded = events.iter().any(|e| {
-            matches!(e, RuntimeEvent::ToolCallFinished { tool_name, summary, .. }
+            matches!(e, RuntimeEvent::ActionFinished { tool_name, summary, .. }
                 if tool_name == "skill_info" && summary.contains("Math Skill"))
         });
         assert!(

@@ -90,6 +90,18 @@ impl Tool for SkillTool {
             .unwrap_or("")
             .to_string();
 
+        // Single-injection guard (survey P4): the body is already baked into
+        // the system prompt, so re-injecting it here would make the model pay
+        // for the same skill twice (~52K tokens in 20260914_50cf809d).
+        if self.resolver.active().is_active(&name) {
+            tracing::info!(name = %name, "skill tool: refused — already active");
+            return Ok(vec![Content::text(format!(
+                "Error: skill \"{name}\" is already active in this session and its full \
+                 body is baked into the system prompt. Follow it from there; do not \
+                 load it again."
+            ))]);
+        }
+
         let resolver = Arc::clone(&self.resolver);
         let telemetry = Arc::clone(&self.telemetry);
         let max_chars = ctx.max_output_chars.unwrap_or(MAX_SKILL_BODY_CHARS);
@@ -344,5 +356,38 @@ mod tests {
             !out.contains("secret ship steps"),
             "denied body must not leak: {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn active_skill_is_refused_not_reinjected() {
+        // Survey P4 (20260914_50cf809d — the same skill's body reached the
+        // model twice, ~52K tokens wasted): once the body is baked into the
+        // system prompt, the tool must refuse to inject it again.
+        let (resolver, _guard) = make_resolver(&[("deploy", "secret ship steps", true)]);
+        resolver.active().mark_active("deploy");
+        let tool = SkillTool::new(resolver, Arc::new(SkillTelemetry::new()));
+        let out = text(
+            tool.call(&json!({"name": "deploy", "args": "prod"}), &ctx())
+                .await
+                .unwrap(),
+        );
+        assert!(out.contains("already active"), "{out}");
+        assert!(
+            !out.contains("secret ship steps"),
+            "the baked body must not be re-injected: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_check_precedes_lookup_even_for_deleted_skills() {
+        // Resume edge (spec): a session-active skill survives SKILL.md being
+        // deleted — the body is already baked. The refusal must not depend on
+        // the file still resolving.
+        let (resolver, guard) = make_resolver(&[("gone", "body", true)]);
+        resolver.active().mark_active("gone");
+        let _ = fs::remove_dir_all(guard.path().join("skills"));
+        let tool = SkillTool::new(resolver, Arc::new(SkillTelemetry::new()));
+        let out = text(tool.call(&json!({"name": "gone"}), &ctx()).await.unwrap());
+        assert!(out.contains("already active"), "{out}");
     }
 }

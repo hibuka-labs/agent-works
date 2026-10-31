@@ -10,11 +10,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::Skill;
+use super::active::ActiveSkillSet;
 use super::prompt_skill::{PromptSkill, SkillScope};
 
 /// Scanned skill set backing slash lookup and the `skill` tool.
 pub struct SkillResolver {
     skills: Vec<PromptSkill>,
+    /// Session-state handle: names already baked into the system prompt.
+    /// Consulted by the `skill` tool (no re-injection) and `render_catalog`
+    /// (`[active]` markers). The resolver itself stays immutable — hosts
+    /// mutate the set through their own clone ([`SkillResolver::with_active_set`]).
+    active: ActiveSkillSet,
 }
 
 /// A matched `/name args` slash invocation, with the skill's lifetime scope.
@@ -66,7 +72,24 @@ impl SkillResolver {
 
         let mut skills: Vec<PromptSkill> = by_name.into_values().collect();
         skills.sort_by(|a, b| a.name().cmp(b.name()));
-        Self { skills }
+        Self {
+            skills,
+            active: ActiveSkillSet::default(),
+        }
+    }
+
+    /// Attach the host's shared active-skill set (Arc-backed handle, cloned).
+    ///
+    /// The host keeps its own clone to mark names at activation time; the
+    /// tool and catalog read the same set through this resolver.
+    pub fn with_active_set(mut self, active: ActiveSkillSet) -> Self {
+        self.active = active;
+        self
+    }
+
+    /// The active-skill set this resolver carries.
+    pub fn active(&self) -> &ActiveSkillSet {
+        &self.active
     }
 
     /// Parse user input; if it is `/skill-name args`, return the resolved skill body.

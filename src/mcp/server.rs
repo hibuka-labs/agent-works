@@ -413,14 +413,14 @@ impl McpServer {
                             "text": text,
                         }))
                     }
-                    RuntimeEvent::ToolCallStarted { tool_name, .. } => {
+                    RuntimeEvent::ActionStarted { tool_name, .. } => {
                         tool_calls.lock().unwrap().push(tool_name.clone());
                         Some(serde_json::json!({
                             "type": "tool_call",
                             "name": tool_name,
                         }))
                     }
-                    RuntimeEvent::ToolCallFinished {
+                    RuntimeEvent::ActionFinished {
                         tool_name, summary, ..
                     } => Some(serde_json::json!({
                         "type": "tool_result",

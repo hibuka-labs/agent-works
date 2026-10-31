@@ -15,7 +15,7 @@ use std::sync::Arc;
 fn make_ctx(
     reasoning_only_strikes: usize,
     empty_response_strikes: usize,
-    run_has_tool_calls: bool,
+    run_has_actions: bool,
     is_reasoning_only: bool,
     is_empty_response: bool,
     is_text_only: bool,
@@ -32,7 +32,7 @@ fn make_ctx(
         available_tools: vec![],
         reasoning_only_strikes,
         empty_response_strikes,
-        run_has_tool_calls,
+        run_has_actions,
         last_tool_calls_invalid: false,
         all_user_inputs: vec!["test".to_string()],
         is_reasoning_only,
@@ -49,7 +49,7 @@ fn make_ctx(
 fn make_ctx_with_text(
     user_input: &str,
     model_response: &str,
-    run_has_tool_calls: bool,
+    run_has_actions: bool,
     is_text_only: bool,
 ) -> GuardCtx {
     GuardCtx {
@@ -64,7 +64,7 @@ fn make_ctx_with_text(
         available_tools: vec!["echo".to_string()],
         reasoning_only_strikes: 0,
         empty_response_strikes: 0,
-        run_has_tool_calls,
+        run_has_actions,
         last_tool_calls_invalid: false,
         all_user_inputs: vec![user_input.to_string()],
         is_reasoning_only: false,
@@ -317,7 +317,7 @@ async fn test_reasoning_only_with_tools_below_threshold() {
     let guard = DefaultGuard::new(DefaultGuardConfig::default());
     let mut ctx = make_ctx(1, 0, false, true, false, false);
     ctx.available_tools = vec!["echo".to_string()];
-    ctx.run_has_tool_calls = true;
+    ctx.run_has_actions = true;
 
     let decision = guard.on_turn(&ctx).await;
     assert!(
@@ -332,7 +332,7 @@ async fn test_reasoning_only_with_tools_at_threshold() {
     let guard = DefaultGuard::new(DefaultGuardConfig::default());
     let mut ctx = make_ctx(3, 0, false, true, false, false);
     ctx.available_tools = vec!["echo".to_string()];
-    ctx.run_has_tool_calls = true;
+    ctx.run_has_actions = true;
 
     let decision = guard.on_turn(&ctx).await;
     assert!(
@@ -2324,7 +2324,7 @@ mod notice_tests {
     }
 
     /// Exercises the **non-short-response** judge call site (default.rs's
-    /// `run_has_tool_calls && use_llm_judge` branch): the input is 58 chars,
+    /// `run_has_actions && use_llm_judge` branch): the input is 58 chars,
     /// under `short_response_min_input` (128), so short-response detection
     /// does not fire. See `judge_fail_open_short_response_path_emits_notice`
     /// for the other call site.
@@ -2376,7 +2376,7 @@ mod notice_tests {
     }
 
     /// The short-response judge call site (default.rs's `is_short_response`
-    /// + `run_has_tool_calls && use_llm_judge` branch) must emit the same
+    /// + `run_has_actions && use_llm_judge` branch) must emit the same
     /// degradation notice — both `call_completion_judge` sites plumb the handle.
     #[tokio::test]
     async fn judge_fail_open_short_response_path_emits_notice() {

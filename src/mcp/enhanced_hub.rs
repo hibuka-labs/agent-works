@@ -8,7 +8,7 @@ use agent_base::{AgentError, AgentResult, ToolRegistry};
 use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::client::{McpClient, McpToolAdapter};
 use super::types::{McpServerConfig, McpToolInfo};
@@ -406,8 +406,12 @@ impl EnhancedMcpHub {
         entry.add_client().await?;
 
         let state = entry.state.read().await.clone();
+        // Zero subscribers is today's normal shape: host apps surface connect
+        // receipts through their own notice channel (phimint `external::state`),
+        // not this one. A warn here reads like a real failure — it once sent an
+        // investigation down the wrong path (P3 acceptance finding ①).
         if let Err(e) = self.status_tx.send((name.to_string(), state)) {
-            warn!("Failed to broadcast connect status for '{}': {}", name, e);
+            debug!("connect status for '{name}' not broadcast (no subscriber): {e}");
         }
 
         Ok(())
@@ -429,10 +433,7 @@ impl EnhancedMcpHub {
                 .status_tx
                 .send((name.to_string(), ConnectionState::Disconnected))
             {
-                warn!(
-                    "Failed to broadcast disconnect status for '{}': {}",
-                    name, e
-                );
+                debug!("disconnect status for '{name}' not broadcast (no subscriber): {e}");
             }
         }
     }

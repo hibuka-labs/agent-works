@@ -39,17 +39,17 @@ pub(super) fn summarize_outcome(outcome: &RunOutcome) -> String {
 /// Extract the child agent's final assistant message from its collected events.
 ///
 /// Walks backwards from the end of the event list, collecting `TextDelta` text
-/// until hitting a `ToolCallStarted` boundary. This isolates the child's last
+/// until hitting a `ActionStarted` boundary. This isolates the child's last
 /// reply (the "report") from intermediate tool-use conversation, keeping the
 /// result small and focused.
 ///
 /// Excludes sub-sub-agent text (events tagged with an `agent_id`), so the parent
 /// only sees this child's direct answer.
 pub(super) fn extract_last_assistant_message(events: &[RuntimeEvent]) -> String {
-    // Find the last ToolCallStarted — everything after it is the final reply.
+    // Find the last ActionStarted — everything after it is the final reply.
     let start = events
         .iter()
-        .rposition(|e| matches!(e, RuntimeEvent::ToolCallStarted { .. }))
+        .rposition(|e| matches!(e, RuntimeEvent::ActionStarted { .. }))
         .map(|i| i + 1)
         .unwrap_or(0);
 
@@ -78,7 +78,7 @@ pub(super) fn collect_denied_tools(events: &[RuntimeEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            RuntimeEvent::ToolCallFinished {
+            RuntimeEvent::ActionFinished {
                 tool_name,
                 denied: true,
                 agent_id: None,

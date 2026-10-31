@@ -302,6 +302,38 @@ impl AgentBuilder {
         }
     }
 
+    /// Mount this runtime's action backend (M3 T10c): text turns route to it,
+    /// tool-envelope turns keep the tool-call backend. One backend per
+    /// runtime — build one runtime per session when the backend holds a
+    /// resident engine (the product's assembly-time choice).
+    pub fn action_backend(self, backend: Box<dyn agent_base::ActionBackend>) -> Self {
+        Self {
+            inner: self.inner.action_backend(backend),
+            ..self
+        }
+    }
+
+    /// The product's interaction surface for the action backend's `ExecCtx`
+    /// (OV-6): consent and ask_user suspend through it. Without one, every
+    /// interaction fails closed — a cell reaching for the human refuses, it
+    /// never hangs or silently allows.
+    pub fn interaction(self, channel: Arc<dyn agent_base::InteractionChannel>) -> Self {
+        Self {
+            inner: self.inner.interaction(channel),
+            ..self
+        }
+    }
+
+    /// Per-interaction deadline for the action backend's suspensions (`None`
+    /// = unbounded human time, the run's cancel token is the only guard).
+    /// Unset = the kernel's default watchdog.
+    pub fn interaction_timeout(self, interact_timeout: Option<std::time::Duration>) -> Self {
+        Self {
+            inner: self.inner.interaction_timeout(interact_timeout),
+            ..self
+        }
+    }
+
     pub fn context_window(self, max_tokens: usize) -> Self {
         Self {
             inner: self.inner.context_window(max_tokens),

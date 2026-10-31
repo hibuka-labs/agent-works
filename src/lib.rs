@@ -23,6 +23,12 @@ pub mod multi_agent;
 #[cfg(feature = "compression")]
 pub mod compression;
 
+#[cfg(feature = "code-exec")]
+pub mod code_act;
+
+#[cfg(feature = "code-exec")]
+pub mod code_cell;
+
 pub mod approval_ledger;
 pub mod env_ref;
 pub mod guard;

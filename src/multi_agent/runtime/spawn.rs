@@ -723,7 +723,7 @@ async fn run_child_loop(
                     event = child_events.recv() => {
                         match event {
                             Ok(event) => {
-                                if matches!(event, RuntimeEvent::ToolCallStarted { .. }) {
+                                if matches!(event, RuntimeEvent::ActionStarted { .. }) {
                                     bridge_registry
                                         .lock()
                                         .unwrap()
