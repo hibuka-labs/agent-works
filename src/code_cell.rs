@@ -303,19 +303,17 @@ impl<W: Worker + Send + 'static> Tool for CodeCellTool<W> {
 /// tool errors (the caller learns it asked wrong); everything the engine says
 /// is an observation and rides back as content.
 ///
-/// One shape of "wrong" gets a deliberate second look: under nested-quoting
-/// pressure (code holding shell double quotes and regex escapes) the model
-/// occasionally emits `cells` as a JSON-encoded *string* of the array — all
-/// four parse failures in live session 20261029_fff23e77 were this fumble,
-/// doubly encoded with the inner escaping half-done. A string whose contents
-/// parse as the step array is that fumble recovered; anything else is refused
-/// with the shape spelled out and the blob head, because replaying the whole
-/// doubly-encoded blob back at the model teaches it nothing.
+/// One principle for the shapes of "wrong": a fumble whose step survives
+/// losslessly is *recovered*, not refused — replaying a parse error back at the
+/// model teaches it nothing, and the round-trip costs more than the fumble.
+/// Two live fumbles qualify: `cells` as a JSON-encoded *string* of the array
+/// (all four parse failures in live session 20261029_fff23e77 were this, under
+/// nested-quoting pressure), and the `cells` wrapper dropped entirely — one
+/// flat cell at top level, or a single cell object where the array belongs
+/// (live session 20261101_43d6c579, deepseek-flash, again at the most
+/// quote-heavy payloads). Anything that loses fields is refused with the shape
+/// spelled out and the blob head.
 fn parse_cells(args: &Value, name: &str) -> AgentResult<Vec<Action>> {
-    let bad = |raw: &Value| AgentError::ToolArgsInvalid {
-        name: name.to_string(),
-        raw: raw.to_string(),
-    };
     let guidance = |reason: &str, got: &str| AgentError::ToolArgsInvalid {
         name: name.to_string(),
         raw: format!(
@@ -326,10 +324,23 @@ fn parse_cells(args: &Value, name: &str) -> AgentResult<Vec<Action>> {
             blob_head(got)
         ),
     };
-    let Some(cells_arg) = args.get("cells") else {
-        return Err(bad(args));
+    let flat_step;
+    let cells_arg: &Value = match args.get("cells") {
+        Some(cells_arg) => cells_arg,
+        // The wrapper dropped, the cell itself intact: wrap it back.
+        None if args.get("code").is_some() => {
+            flat_step = Value::Array(vec![args.clone()]);
+            &flat_step
+        }
+        None => {
+            return Err(guidance(
+                "there is no top-level \"cells\" key",
+                &args.to_string(),
+            ));
+        }
     };
     let decoded;
+    let decoded_cell;
     let cells: &[Value] = match cells_arg {
         Value::Array(cells) => cells.as_slice(),
         Value::String(encoded) => match serde_json::from_str::<Vec<Value>>(encoded) {
@@ -339,6 +350,11 @@ fn parse_cells(args: &Value, name: &str) -> AgentResult<Vec<Action>> {
             }
             _ => return Err(guidance("it arrived as a JSON-encoded string", encoded)),
         },
+        // One cell object where the step array belongs: same lossless wrap.
+        Value::Object(_) if cells_arg.get("code").is_some() => {
+            decoded_cell = vec![cells_arg.clone()];
+            decoded_cell.as_slice()
+        }
         other => {
             return Err(guidance(
                 "it arrived as a non-array value",
@@ -347,22 +363,33 @@ fn parse_cells(args: &Value, name: &str) -> AgentResult<Vec<Action>> {
         }
     };
     let mut actions = Vec::with_capacity(cells.len());
-    for cell in cells {
-        let intent = cell
-            .get("intent")
-            .and_then(Value::as_str)
-            .ok_or_else(|| bad(cell))?;
-        let code = cell
-            .get("code")
-            .and_then(Value::as_str)
-            .ok_or_else(|| bad(cell))?;
+    for (idx, cell) in cells.iter().enumerate() {
+        // A missing field names the cell's position and the field, so the model
+        // fixes the call instead of re-reading a bare cell echo (live session
+        // 20261101_9c6b6bc7: DeepSeek dropped `intent` on one of two cells and
+        // the bare echo looked like the whole call was `{"code": …}`).
+        let intent = cell.get("intent").and_then(Value::as_str).ok_or_else(|| {
+            guidance(
+                &format!("cell {} is missing a string \"intent\" label", idx + 1),
+                &cell.to_string(),
+            )
+        })?;
+        let code = cell.get("code").and_then(Value::as_str).ok_or_else(|| {
+            guidance(
+                &format!("cell {} is missing a string \"code\" body", idx + 1),
+                &cell.to_string(),
+            )
+        })?;
         actions.push(Action::CodeCell {
             intent: intent.to_string(),
             code: code.to_string(),
         });
     }
     if actions.is_empty() {
-        return Err(bad(args));
+        return Err(guidance(
+            "the \"cells\" array is empty",
+            &cells_arg.to_string(),
+        ));
     }
     Ok(actions)
 }
@@ -635,6 +662,73 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].intent(), "bind");
         assert_eq!(actions[0].code(), "x = 1");
+    }
+
+    #[test]
+    fn parse_cells_names_a_missing_cell_field_and_its_position() {
+        // Live session 20261101_9c6b6bc7 (DeepSeek): a two-cell step where one
+        // cell dropped `intent`. The bare cell echo read like the whole call was
+        // `{"code": …}`; the error must name the field, the cell's position and
+        // the expected shape so the model can repair the call in one shot.
+        let err = parse_cells(
+            &json!({"cells": [
+                {"code": "out = sh.run('ls -la')"},
+                {"code": "print(2)", "intent": "probe"}
+            ]}),
+            "code_cell",
+        )
+        .expect_err("a cell missing its intent is still a tool error");
+        let msg = err.to_string();
+        assert!(msg.contains("cell 1"), "which cell: {msg}");
+        assert!(msg.contains("\"intent\""), "which field: {msg}");
+        assert!(
+            msg.contains(r#"{"intent": "…", "code": "…"}"#),
+            "expected shape: {msg}"
+        );
+        assert!(
+            msg.contains(r#"{"code":"out = sh.run('ls -la')"}"#),
+            "echo the cell, not the whole step: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_cells_wraps_a_flat_single_cell_step() {
+        // Live session 20261101_43d6c579 (deepseek-flash): at the most
+        // quote-heavy payload of the run the step arrived as one flat cell at
+        // top level — `code` and `intent`, no `cells` wrapper. Lossless: run
+        // it as the one-cell step it obviously is.
+        let actions = parse_cells(
+            &json!({"intent": "probe", "code": "probe = r'''\nprint(1)\n'''"}),
+            "code_cell",
+        )
+        .expect("a flat single cell is the fumble, recover it");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].intent(), "probe");
+        assert_eq!(actions[0].code(), "probe = r'''\nprint(1)\n'''");
+    }
+
+    #[test]
+    fn parse_cells_wraps_a_single_cell_object() {
+        let actions = parse_cells(
+            &json!({"cells": {"intent": "probe", "code": "print(1)"}}),
+            "code_cell",
+        )
+        .expect("a single cell object is the fumble, recover it");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].intent(), "probe");
+    }
+
+    #[test]
+    fn parse_cells_still_refuses_a_flat_cell_that_loses_fields() {
+        // A flat cell without `intent` is not lossless — refuse with the shape
+        // spelled out rather than inventing an audit label.
+        let err = parse_cells(&json!({"code": "print(1)"}), "code_cell")
+            .expect_err("a flat cell missing intent still loses the audit label");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(r#"{"intent": "…", "code": "…"}"#),
+            "expected shape: {msg}"
+        );
     }
 
     #[test]
