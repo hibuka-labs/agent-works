@@ -122,6 +122,10 @@ pub struct MultiAgentRuntime {
     /// [`MultiAgentConfig::child_fork_history`]).
     child_fork_history: Option<String>,
 
+    /// Tool-output cap applied to every child engine (see
+    /// [`MultiAgentConfig::child_max_tool_output_chars`]).
+    child_max_tool_output_chars: Option<usize>,
+
     /// Deployment autonomy mode (design §7.5). Drives the `Manual`
     /// three-layer expansion in `spawn_permission`, the per-child
     /// `capability::read_only_nudge` gate (both in `build`), and
@@ -208,6 +212,7 @@ impl MultiAgentRuntime {
         let spawned_tools: Arc<Mutex<HashMap<String, Vec<String>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let child_fork_history = config.child_fork_history.clone();
+        let child_max_tool_output_chars = config.child_max_tool_output_chars;
         // Control plane: the config knobs land in `AgentControl` (budget +
         // limiter). `None` knobs → unlimited gates that still count (§7.2).
         let control = Arc::new(AgentControl::new(&config.control));
@@ -231,6 +236,7 @@ impl MultiAgentRuntime {
             write_gate_enabled,
             spawned_tools,
             child_fork_history,
+            child_max_tool_output_chars,
             autonomy,
             write_tools,
             task_timeout,

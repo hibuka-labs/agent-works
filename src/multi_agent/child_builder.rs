@@ -23,6 +23,7 @@ struct ChildFieldSet {
     max_turns: bool,
     context_window: bool,
     full_permission: bool,
+    max_tool_output_chars: bool,
 }
 
 /// Builder for one spawned child agent. Entry point:
@@ -96,6 +97,14 @@ impl ChildBuilder {
         self
     }
 
+    /// Per-spawn tool-output cap (→ `AgentBuilder::max_tool_output_chars`,
+    /// §6.5 valve).
+    pub fn max_tool_output_chars(mut self, max_chars: usize) -> Self {
+        self.draft.max_tool_output_chars = Some(max_chars);
+        self.explicit.max_tool_output_chars = true;
+        self
+    }
+
     /// Apply a preset: fill only the fields the user has not set. Order
     /// relative to the setters does not matter for precedence — a later
     /// setter still wins (it marks the field explicit).
@@ -115,6 +124,9 @@ impl ChildBuilder {
         }
         if !self.explicit.full_permission && p.full_permission.is_some() {
             self.draft.full_permission = p.full_permission;
+        }
+        if !self.explicit.max_tool_output_chars && p.max_tool_output_chars.is_some() {
+            self.draft.max_tool_output_chars = p.max_tool_output_chars;
         }
         self
     }
@@ -243,6 +255,7 @@ mod tests {
                 max_turns: Some(32),
                 context_window: Some(4096),
                 full_permission: Some(true),
+                max_tool_output_chars: Some(4096),
                 ..Default::default()
             },
         )
@@ -339,6 +352,19 @@ mod tests {
             true,
             |b, v| b.full_permission(v),
             |b| b.draft.full_permission,
+        );
+    }
+
+    #[test]
+    fn merge_matrix_max_tool_output_chars() {
+        // §6.5 valve per-spawn override: the setter must survive a preset,
+        // and a preset value must fill in only when the setter is absent.
+        merge_cells(
+            "max_tool_output_chars",
+            16_000usize,
+            4096usize,
+            |b, v| b.max_tool_output_chars(v),
+            |b| b.draft.max_tool_output_chars,
         );
     }
 

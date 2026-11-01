@@ -55,6 +55,11 @@ pub struct ChildConfig {
     /// uses this to route to the appropriate model (e.g., "lite" for
     /// sub-agents).
     pub model: Option<String>,
+
+    /// Per-spawn tool-output cap (`AgentBuilder::max_tool_output_chars`,
+    /// §6.5 valve). `None` = inherit the runtime's
+    /// [`child_max_tool_output_chars`](super::config::MultiAgentConfig::child_max_tool_output_chars).
+    pub max_tool_output_chars: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +81,7 @@ mod tests {
         assert!(c.context_window.is_none());
         assert!(c.full_permission.is_none());
         assert!(c.model.is_none());
+        assert!(c.max_tool_output_chars.is_none());
     }
 
     #[test]

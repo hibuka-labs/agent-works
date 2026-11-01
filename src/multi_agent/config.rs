@@ -220,6 +220,14 @@ pub struct MultiAgentConfig {
     /// `resolve_fork_history`, which validates it.
     pub child_fork_history: Option<String>,
 
+    /// Tool-output cap applied to every child engine (§6.5 valve: output
+    /// above the cap is rejected whole, tools self-truncate to it).
+    /// `None` (default) = engine default (uncapped). A deployment that caps
+    /// the root's tool output should thread the same value here — otherwise
+    /// children run valve-less (2026-11-01: a child's 29k-char tool result
+    /// sailed past a root capped at 16k).
+    pub child_max_tool_output_chars: Option<usize>,
+
     /// Control-plane limits (token budget, cumulative spawns, live
     /// concurrency, per-task timeout). All `None` by default — behaviour
     /// unchanged unless a knob is explicitly set (see [`ControlConfig`]).
@@ -238,6 +246,7 @@ impl Default for MultiAgentConfig {
             child_read_only: true,
             allow_child_write: false,
             child_fork_history: None,
+            child_max_tool_output_chars: None,
             control: ControlConfig::default(),
         }
     }
@@ -264,6 +273,7 @@ impl MultiAgentConfig {
             child_read_only: true,
             allow_child_write: false,
             child_fork_history: None,
+            child_max_tool_output_chars: None,
             control: ControlConfig::default(),
         }
     }

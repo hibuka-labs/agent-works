@@ -173,6 +173,16 @@ impl MultiAgentRuntime {
             builder = builder.context_window(context_window);
         }
 
+        // Tool-output cap (§6.5 valve): the per-spawn override, else the
+        // runtime's child default, else the engine default (uncapped). Root
+        // deployments thread their cap here so children are not valve-less.
+        if let Some(max_chars) = config
+            .max_tool_output_chars
+            .or(self.child_max_tool_output_chars)
+        {
+            builder = builder.max_tool_output_chars(max_chars);
+        }
+
         // Register business tools (NOT multi-agent tools): global exclusion
         // first, then the per-child whitelist (§5.4 "exclude-first, then whitelist").
         // `registered` records the names actually handed to the child — the
