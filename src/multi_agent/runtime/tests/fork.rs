@@ -82,6 +82,7 @@ async fn resolve_fork_history_none_returns_empty() {
         content: "hello".into(),
         images: vec![],
         ephemeral: false,
+        synthetic: false,
     }];
     let (ma, parent_sid) = setup_fork_history_test(messages).await;
 
@@ -103,6 +104,7 @@ async fn resolve_fork_history_all_returns_all_non_system() {
             content: "question 1".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("answer 1".into()),
@@ -114,6 +116,7 @@ async fn resolve_fork_history_all_returns_all_non_system() {
             content: "question 2".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("answer 2".into()),
@@ -150,6 +153,7 @@ async fn resolve_fork_history_n_turns() {
             content: "q1".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("a1".into()),
@@ -161,6 +165,7 @@ async fn resolve_fork_history_n_turns() {
             content: "q2".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("a2".into()),
@@ -172,6 +177,7 @@ async fn resolve_fork_history_n_turns() {
             content: "q3".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("a3".into()),
@@ -203,6 +209,7 @@ async fn resolve_fork_history_invalid_number_treats_as_none() {
         content: "hello".into(),
         images: vec![],
         ephemeral: false,
+        synthetic: false,
     }];
     let (ma, parent_sid) = setup_fork_history_test(messages).await;
 
@@ -267,6 +274,7 @@ async fn prefill_child_session_user_and_assistant() {
             content: "user question".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: Some("assistant reply".into()),
@@ -328,6 +336,7 @@ async fn prefill_child_session_tool_call_only_skipped() {
             content: "do something".into(),
             images: vec![],
             ephemeral: false,
+            synthetic: false,
         },
         agent_base::ChatMessage::Assistant {
             content: None, // no text — tool call only

@@ -299,11 +299,7 @@ mod tests {
         let mw = SkillCatalogRefreshMiddleware::new(resolver);
 
         let mut ctx = make_pre_llm_ctx("unused");
-        ctx.messages = vec![ChatMessage::User {
-            content: "hi".to_string(),
-            images: vec![],
-            ephemeral: false,
-        }];
+        ctx.messages = vec![ChatMessage::user("hi")];
         mw.on_pre_llm(&mut ctx).await.unwrap();
 
         match &ctx.messages[0] {
