@@ -81,7 +81,7 @@ impl ProgressSummarizer {
                 .chars()
                 .skip(report_text.chars().count() - MAX_REPORT_CHARS)
                 .collect();
-            format!("…(前文截断){tail}")
+            format!("…(earlier truncated){tail}")
         } else if report_text.is_empty() {
             "(no report text)".to_string()
         } else {
@@ -271,7 +271,7 @@ mod tests {
 
         let prompts = client.captured_prompts();
         assert!(prompts[0].contains("结论在这里"), "tail must be kept");
-        assert!(prompts[0].contains("…(前文截断)"));
+        assert!(prompts[0].contains("…(earlier truncated)"));
         assert!(
             prompts[0].chars().count() < long_report.chars().count() + 200,
             "head must be truncated"

@@ -125,7 +125,7 @@ mod tests {
             agent_path: path.to_string(),
             status: "ok".to_string(),
             result: Some(message.to_string()),
-            message: format!("[子 agent {path} 已完成]\n{message}"),
+            message: format!("[sub-agent {path} done]\n{message}"),
         }
     }
 
@@ -198,8 +198,8 @@ mod tests {
         // The turn ends → held reports flush as one batch, in arrival order.
         let flushed = router.flush_when_idle().expect("held reports must flush");
         assert_eq!(flushed.len(), 2);
-        assert_eq!(flushed[0].message, "[子 agent root/a 已完成]\none");
-        assert_eq!(flushed[1].message, "[子 agent root/b 已完成]\ntwo");
+        assert_eq!(flushed[0].message, "[sub-agent root/a done]\none");
+        assert_eq!(flushed[1].message, "[sub-agent root/b done]\ntwo");
 
         // Drained — a second flush is a no-op.
         assert!(router.flush_when_idle().is_none());
