@@ -48,6 +48,74 @@ use std::collections::BTreeMap;
 /// epoch tick granularity (timeout quantization unit).
 const EPOCH_TICK_MS: u64 = 10;
 
+/// How many epoch ticker threads have been started in this process.
+///
+/// Starts at exactly one when the shared engine is built; the counter exists
+/// so a regression (a ticker per runtime) is observable rather than merely
+/// suspected.
+fn epoch_ticker_spawns_counter() -> &'static std::sync::atomic::AtomicUsize {
+    static SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    &SPAWNS
+}
+
+#[cfg(test)]
+fn epoch_ticker_spawns() -> usize {
+    epoch_ticker_spawns_counter().load(std::sync::atomic::Ordering::SeqCst)
+}
+/// The process-wide wasmtime engine and its single epoch ticker.
+///
+/// Two independent reasons this is shared instead of built per runtime:
+///
+/// 1. **macOS trap-handler safety.** wasmtime's mach-port trap handler stores
+///    its port in a process-global `static mut`. Creating a second Engine
+///    overwrites that port while the first handler thread is still waiting on
+///    it; the stale thread then calls `abort()` and takes the whole process
+///    down with SIGABRT. One engine means one handler thread, so the port is
+///    written once.
+/// 2. **One epoch ticker.** The ticker thread runs forever, so a per-runtime
+///    engine would leak one thread per runtime.
+///
+/// The engine is created lazily and never dropped (it is held in a
+/// `OnceLock` for the life of the process).
+fn shared_engine() -> Result<Engine, WasmError> {
+    static ENGINE: std::sync::OnceLock<Result<Engine, String>> = std::sync::OnceLock::new();
+
+    let result = ENGINE.get_or_init(|| {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        config.epoch_interruption(true);
+        // On macOS, use the signals-based trap handler instead of mach ports:
+        // mach ports do not survive `fork()`, and this process forks children.
+        // Disabling them also removes the static-mut port race described above.
+        if cfg!(target_os = "macos") {
+            config.macos_use_mach_ports(false);
+        }
+        let engine = Engine::new(&config).map_err(|e| e.to_string())?;
+
+        // The heartbeat behind the timeout criterion: bump the epoch every
+        // tick; callers convert the timeout into a deadline. Started once,
+        // next to the engine it serves.
+        let ticker = engine.clone();
+        std::thread::Builder::new()
+            .name("plugin-wasm-epoch".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                    ticker.increment_epoch();
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        epoch_ticker_spawns_counter().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        Ok(engine)
+    });
+
+    match result {
+        Ok(engine) => Ok(engine.clone()),
+        Err(err) => Err(WasmError::Host(err.clone())),
+    }
+}
+
 wasmtime::component::bindgen!({
     path: "wit",
     world: "tool-guest",
@@ -113,25 +181,17 @@ pub struct WasmRuntime {
 
 impl WasmRuntime {
     /// Build a runtime (component model + async + epoch interruption).
+    ///
+    /// The engine is a process-wide singleton: wasmtime's macOS mach-port
+    /// trap handler keeps its port in a `static mut`, so building a second
+    /// Engine overwrites the port the first handler thread is still using —
+    /// that thread then aborts the process (SIGABRT). Sharing one engine
+    /// also keeps exactly one epoch ticker thread alive, which is what the
+    /// struct doc already promised.
     pub fn new() -> Result<Self, WasmError> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        config.epoch_interruption(true);
-        let engine = Engine::new(&config).map_err(|e| WasmError::Host(e.to_string()))?;
-
-        // The heartbeat behind the timeout criterion: bump the epoch every tick;
-        // callers convert the timeout into a deadline.
-        let ticker = engine.clone();
-        std::thread::Builder::new()
-            .name("plugin-wasm-epoch".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
-                    ticker.increment_epoch();
-                }
-            })
-            .map_err(WasmError::Io)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine: shared_engine()?,
+        })
     }
 
     /// Compile one component at load time (failure = the error surface that disables
@@ -463,6 +523,44 @@ mod tests {
         )
         .await
         .expect("echo")
+    }
+
+    // ── Engine sharing (regression: macOS SIGABRT) ───────────────────────
+
+    /// Repeated runtime construction must share one engine and one epoch
+    /// ticker thread.
+    ///
+    /// wasmtime's macOS trap handler keeps its mach port in a process-global
+    /// `static mut`: building a second Engine overwrites the port while the
+    /// first handler thread still waits on it, and that thread aborts the
+    /// process (SIGABRT). One shared engine means one handler thread, one
+    /// port write, and one epoch ticker.
+    #[test]
+    fn repeated_runtimes_share_one_engine_and_one_ticker() {
+        let first = WasmRuntime::new().expect("runtime");
+        let second = WasmRuntime::new().expect("runtime");
+        let third = WasmRuntime::new().expect("runtime");
+
+        // Same engine instance across every runtime.
+        assert!(
+            Engine::same(&first.engine, &second.engine),
+            "runtimes must share one wasmtime engine"
+        );
+        assert!(
+            Engine::same(&second.engine, &third.engine),
+            "runtimes must share one wasmtime engine"
+        );
+
+        // Building many runtimes must not start extra epoch tickers.
+        let before = epoch_ticker_spawns();
+        let _many: Vec<WasmRuntime> = (0..16)
+            .map(|_| WasmRuntime::new().expect("runtime"))
+            .collect();
+        assert_eq!(
+            before,
+            epoch_ticker_spawns(),
+            "constructing runtimes must not spawn extra epoch ticker threads"
+        );
     }
 
     // ── Whitelist criterion (pure function, fast) ───────────────────────

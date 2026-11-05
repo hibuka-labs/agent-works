@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **macOS: the wasm plugin runtime no longer aborts the process (SIGABRT).**
+  wasmtime's macOS trap handler keeps its mach port in a process-global
+  `static mut`. Building a second `Engine` overwrote that port while the
+  first handler thread was still waiting on it, and the stale thread called
+  `abort()` — taking the whole process down. `WasmRuntime::new()` now shares
+  one process-wide engine (and one epoch ticker thread) instead of building a
+  fresh engine per runtime, and macOS uses wasmtime's signals-based trap
+  handler (`macos_use_mach_ports(false)`), which also survives `fork()`.
+  This is why `cargo test` could abort sporadically on macOS only — 17 crash
+  reports, all with the same stack (`wasmtime::machports::handler_thread`).
+
 ## [0.11.1] - 2026-10-24
 
 ### Fixed
