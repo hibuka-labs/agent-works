@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The multi-agent registry records how a child ended.**
+  `AgentStatus` gains `Failed`, `Cancelled` and `Unknown` (parsed by name, so
+  an unknown status from a newer build degrades instead of failing), and every
+  entry carries the `ResultKind` of its last run plus the error text. A child
+  that failed still delivers its mailbox message — the registry is where the
+  outcome lives, so the parent can tell "done" from "failed" without
+  re-reading the child's transcript.
+
+
 ### Fixed
 - **macOS: the wasm plugin runtime no longer aborts the process (SIGABRT).**
   wasmtime's macOS trap handler keeps its mach port in a process-global

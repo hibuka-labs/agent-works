@@ -15,6 +15,8 @@
 //! in_flight      : a dequeued task is executing and its result is unposted
 //! results_posted : monotonic count of results this agent has delivered
 //! results_handed_over : results included in a fired fan-in batch
+//! last_result    : how the most recent delivered task ended
+//!                  (Success / Failed(error) / Cancelled) + its error text
 //! ```
 //!
 //! `results_posted` vs `results_handed_over` is the **delivery gap**: how
@@ -32,6 +34,7 @@
 //! | `in_flight=true` | `note_dequeued`     | same dequeue                    |
 //! | `in_flight=false`| `note_posted`       | **before** `post_result` bumps the seq — the watcher wakes on that bump and must see the settled facts |
 //! | `results_posted+=1`| `note_posted`     | same delivery                   |
+//! | `last_result`    | `note_posted`       | same delivery (the run's outcome) |
 //!
 //! # Derived status
 //!
@@ -39,7 +42,9 @@
 //! [`derive_status`]. There is deliberately no `Idle`: a spawned-but-never-
 //! tasked agent has the same facts (`queue_len==0 && !in_flight`) as a
 //! finished one, and forcing the model to distinguish the two only breeds
-//! polling.
+//! polling. A failed/cancelled result derives `Failed`/`Cancelled` — the
+//! outcome is a fact like any other, so a UI never has to guess (before
+//! this, a failed child derived `Done` and panels showed it green).
 //!
 //! # Quiescence (fan-in)
 //!
@@ -82,14 +87,25 @@ pub enum AgentStatus {
     Queued,
     /// Executing a dequeued task (from dequeue to `note_posted`).
     Running,
-    /// Queue empty, nothing in flight — results delivered, waiting for new
-    /// tasks or close. A freshly spawned agent also lands here (its facts are
+    /// Queue empty, nothing in flight — the last result was a success (or no
+    /// result yet: a freshly spawned agent lands here, its facts
     /// indistinguishable until the first `send_task`).
     Done,
+    /// Queue empty, nothing in flight — the last result failed (error or
+    /// timeout). The most recent result speaks: a new task flips the agent
+    /// back to `Running`, and a later success derives `Done` again.
+    Failed,
+    /// Queue empty, nothing in flight — the last run was cancelled (or the
+    /// agent was closed before reporting).
+    Cancelled,
     /// Unregistered (closed or cleaned up).
     Closed,
     /// Reserved for Phase 6+ (user/guard pause). Not produced yet.
     Paused,
+    /// A wire name this build does not know (forward compatibility). Only
+    /// produced by [`AgentStatus::from_name`]; never derived. Consumers must
+    /// treat it conservatively (see `from_name`).
+    Unknown,
 }
 
 impl AgentStatus {
@@ -99,10 +115,49 @@ impl AgentStatus {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
             Self::Closed => "closed",
             Self::Paused => "paused",
+            Self::Unknown => "unknown",
         }
     }
+
+    /// Parse a wire name back into a status — the single vocabulary source
+    /// for consumers (never match the raw string yourself; a new word from a
+    /// newer registry then degrades to [`AgentStatus::Unknown`] instead of
+    /// silently mis-classifying). Unknown names are the conservative kind:
+    /// not terminal, not alarming — treat as still-working so nothing is
+    /// reaped or red-flagged on a word this build does not understand.
+    pub fn from_name(name: &str) -> AgentStatus {
+        match name {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "closed" => Self::Closed,
+            "paused" => Self::Paused,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// How an agent's most recent delivered task ended — the outcome fact
+/// recorded at [`AgentRegistry::note_posted`].
+///
+/// Derived status is a pure function of this (plus the work facts): a
+/// failure or cancellation is never laundered into `Done`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResultKind {
+    /// The task completed (successfully or with a soft "continuing" nudge).
+    Success,
+    /// The task failed: unrecoverable error, turn cap, or timeout. Carries
+    /// the error text for ledger lines (`FAILED (...)`) — consumers must not
+    /// invent detail (like exit codes) that the text does not contain.
+    Failed(String),
+    /// The run was cancelled before it reported.
+    Cancelled,
 }
 
 /// Derive a sub-agent's status from the observable facts (pure function).
@@ -110,14 +165,25 @@ impl AgentStatus {
 /// ```text
 /// (unregistered)            → Closed
 /// in_flight                 → Running   (queued siblings don't change this)
-/// queue_len == 0            → Done      (delivered and nothing pending)
-/// else                      → Queued    (work waiting, nothing executing)
+/// queue_len > 0             → Queued    (work waiting, nothing executing)
+/// last result failed        → Failed    (most recent result speaks)
+/// last result cancelled     → Cancelled
+/// else                      → Done      (delivered and nothing pending)
 /// ```
-pub fn derive_status(registered: bool, in_flight: bool, queue_len: usize) -> AgentStatus {
+pub fn derive_status(
+    registered: bool,
+    in_flight: bool,
+    queue_len: usize,
+    last_result: Option<&ResultKind>,
+) -> AgentStatus {
     match (registered, in_flight, queue_len) {
         (false, _, _) => AgentStatus::Closed,
         (_, true, _) => AgentStatus::Running,
-        (_, false, 0) => AgentStatus::Done,
+        (_, false, 0) => match last_result {
+            Some(ResultKind::Failed(_)) => AgentStatus::Failed,
+            Some(ResultKind::Cancelled) => AgentStatus::Cancelled,
+            _ => AgentStatus::Done,
+        },
         (_, false, _) => AgentStatus::Queued,
     }
 }
@@ -178,6 +244,12 @@ pub struct AgentEntry {
     /// Recorded so `list_agents` can show *what* each agent is doing, not
     /// just its lifecycle status.
     pub task: Option<String>,
+    /// How the most recent delivered task ended (`None` until the first
+    /// `note_posted`). The outcome fact behind `Failed`/`Cancelled`.
+    pub last_result: Option<ResultKind>,
+    /// Error text of the most recent failed result (kept for ledger lines;
+    /// `None` on success/cancel). Cleared when a later result succeeds.
+    pub last_error: Option<String>,
 }
 
 impl AgentEntry {
@@ -190,7 +262,12 @@ impl AgentEntry {
         if self.closing {
             return AgentStatus::Closed;
         }
-        derive_status(true, self.in_flight, self.queue_len)
+        derive_status(
+            true,
+            self.in_flight,
+            self.queue_len,
+            self.last_result.as_ref(),
+        )
     }
 }
 
@@ -224,10 +301,12 @@ pub struct RegistrySnapshot {
 pub struct AgentSnapshot {
     /// Agent path as a string (e.g. `"root/worker"`).
     pub path: String,
-    /// Derived status name (`queued` / `running` / `done`; `paused` is
-    /// reserved and never produced yet). `closed` cannot appear here —
-    /// snapshot rows exist only for registered agents; unregistration shows
-    /// up as the agent leaving the snapshot.
+    /// Derived status name (`queued` / `running` / `done` / `failed` /
+    /// `cancelled`; `paused` is reserved and never produced yet). `closed`
+    /// appears only between `note_closing` and unregistration. Snapshot rows
+    /// exist only for registered agents; unregistration shows up as the
+    /// agent leaving the snapshot. Consumers should parse with
+    /// [`AgentStatus::from_name`], not by matching strings.
     pub status: String,
     /// Seconds spent in the current `Running` period; `None` unless running.
     pub running_secs: Option<u64>,
@@ -241,6 +320,11 @@ pub struct AgentSnapshot {
     /// Reports that exist but have not been included in a fired batch yet
     /// (`results_posted - results_handed_over`). Zero is the common case.
     pub pending_results: usize,
+    /// Error text of the most recent failed result (`Some` while `status` is
+    /// `"failed"` and the failure carried an error). Ledger lines render it
+    /// as-is — consumers must not fabricate detail (e.g. exit codes) that is
+    /// not in this string.
+    pub last_error: Option<String>,
 }
 
 /// Errors that can occur during spawn attempts.
@@ -286,7 +370,10 @@ impl std::fmt::Display for SpawnError {
 /// register()                    → facts (0,false)   → Done
 /// note_enqueued  (send_task)    → queue_len += 1    → Queued
 /// note_dequeued  (child loop)   → -1, in_flight     → Running
-/// note_posted    (child loop)   → in_flight=false   → Done (or Queued if more queued)
+/// note_posted    (child loop)   → in_flight=false   → Done / Failed /
+///                                                    Cancelled per the
+///                                                    result (or Queued if
+///                                                    more queued)
 /// close()                       → entry removed     → Closed (event ring only —
 ///                                                    never a snapshot row)
 /// ```
@@ -367,6 +454,8 @@ impl AgentRegistry {
                 tool_calls: 0,
                 last_activity: None,
                 task: None,
+                last_result: None,
+                last_error: None,
             },
         );
 
@@ -439,7 +528,8 @@ impl AgentRegistry {
     }
 
     /// Record that the child loop delivered a task's result (facts:
-    /// `in_flight = false`, `results_posted += 1`, `running_since = None`).
+    /// `in_flight = false`, `results_posted += 1`, `running_since = None`,
+    /// `last_result`/`last_error` = this run's outcome).
     ///
     /// Must be called **before** `post_result` bumps the mailbox sequence:
     /// the watcher wakes on that bump and must observe the settled facts —
@@ -447,11 +537,16 @@ impl AgentRegistry {
     /// hold structurally instead of by caller discipline.
     ///
     /// Returns `true` if the agent was found.
-    pub fn note_posted(&mut self, path: &AgentPath) -> bool {
+    pub fn note_posted(&mut self, path: &AgentPath, result: ResultKind) -> bool {
         self.transition(path, "result_posted", |e| {
             e.in_flight = false;
             e.results_posted += 1;
             e.running_since = None;
+            e.last_error = match &result {
+                ResultKind::Failed(error) => Some(error.clone()),
+                _ => None,
+            };
+            e.last_result = Some(result);
         })
     }
 
@@ -655,6 +750,7 @@ impl AgentRegistry {
                     tool_calls: e.tool_calls,
                     task: e.task.clone(),
                     pending_results: e.results_posted.saturating_sub(e.results_handed_over),
+                    last_error: e.last_error.clone(),
                 })
                 .collect(),
         }
@@ -731,17 +827,26 @@ mod tests {
     #[test]
     fn derive_status_is_a_pure_function() {
         use AgentStatus::*;
+        use ResultKind as R;
+        let failed = R::Failed("boom".to_string());
         // Unregistered always wins.
-        assert_eq!(derive_status(false, true, 3), Closed);
-        assert_eq!(derive_status(false, false, 0), Closed);
-        // In flight dominates queued work.
-        assert_eq!(derive_status(true, true, 0), Running);
-        assert_eq!(derive_status(true, true, 5), Running);
-        // Settled with nothing queued → Done.
-        assert_eq!(derive_status(true, false, 0), Done);
-        // Work waiting, nothing executing → Queued.
-        assert_eq!(derive_status(true, false, 1), Queued);
-        assert_eq!(derive_status(true, false, 9), Queued);
+        assert_eq!(derive_status(false, true, 3, None), Closed);
+        assert_eq!(derive_status(false, false, 0, Some(&failed)), Closed);
+        // In flight dominates queued work and the previous result.
+        assert_eq!(derive_status(true, true, 0, Some(&failed)), Running);
+        assert_eq!(derive_status(true, true, 5, None), Running);
+        // Settled with nothing queued → the last result speaks.
+        assert_eq!(derive_status(true, false, 0, None), Done);
+        assert_eq!(derive_status(true, false, 0, Some(&R::Success)), Done);
+        assert_eq!(derive_status(true, false, 0, Some(&failed)), Failed);
+        assert_eq!(
+            derive_status(true, false, 0, Some(&R::Cancelled)),
+            Cancelled
+        );
+        // Work waiting, nothing executing → Queued (fresh work outranks a
+        // stale failure — the failure is not sticky).
+        assert_eq!(derive_status(true, false, 1, None), Queued);
+        assert_eq!(derive_status(true, false, 9, Some(&failed)), Queued);
     }
 
     #[test]
@@ -749,8 +854,34 @@ mod tests {
         assert_eq!(AgentStatus::Queued.name(), "queued");
         assert_eq!(AgentStatus::Running.name(), "running");
         assert_eq!(AgentStatus::Done.name(), "done");
+        assert_eq!(AgentStatus::Failed.name(), "failed");
+        assert_eq!(AgentStatus::Cancelled.name(), "cancelled");
         assert_eq!(AgentStatus::Closed.name(), "closed");
         assert_eq!(AgentStatus::Paused.name(), "paused");
+        assert_eq!(AgentStatus::Unknown.name(), "unknown");
+    }
+
+    #[test]
+    fn name_from_name_round_trips() {
+        // The wire vocabulary is hand-synced in exactly one place: a TUI (or
+        // any consumer) parses with `from_name`, so a new word degrades to
+        // Unknown instead of mis-classifying, and known words never drift.
+        for status in [
+            AgentStatus::Queued,
+            AgentStatus::Running,
+            AgentStatus::Done,
+            AgentStatus::Failed,
+            AgentStatus::Cancelled,
+            AgentStatus::Closed,
+            AgentStatus::Paused,
+            AgentStatus::Unknown,
+        ] {
+            assert_eq!(AgentStatus::from_name(status.name()), status);
+        }
+        // Unknown wire names are the conservative fallback: not terminal,
+        // not alarming.
+        assert_eq!(AgentStatus::from_name("bogus"), AgentStatus::Unknown);
+        assert_eq!(AgentStatus::from_name(""), AgentStatus::Unknown);
     }
 
     #[test]
@@ -845,7 +976,7 @@ mod tests {
         assert_eq!(reg.get(&path).unwrap().queue_len, 1);
 
         // First result posted (second task queued) → Queued.
-        assert!(reg.note_posted(&path));
+        assert!(reg.note_posted(&path, ResultKind::Success));
         assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Queued);
         assert!(reg.get(&path).unwrap().running_since.is_none());
         assert_eq!(reg.get(&path).unwrap().results_posted, 1);
@@ -856,12 +987,61 @@ mod tests {
 
         // Final post, queue empty → Done. This is the Done-before-post
         // invariant, now structural: the fact lands before post_result.
-        assert!(reg.note_posted(&path));
+        assert!(reg.note_posted(&path, ResultKind::Success));
         assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Done);
         assert_eq!(reg.get(&path).unwrap().results_posted, 2);
 
         // Done agents still count toward quota.
         assert_eq!(reg.count(), 1);
+    }
+
+    /// The failure half of the lifecycle: a failed result derives `Failed`
+    /// (never `Done` — that laundering is what panels showed green), its
+    /// error text rides the snapshot for ledger lines, and the outcome is
+    /// not sticky: the next task flips the agent back to `Running`.
+    #[test]
+    fn failed_result_derives_failed_until_the_next_result() {
+        let (mut reg, path) = registered(test_config(), "worker");
+
+        reg.note_enqueued(&path);
+        reg.note_dequeued(&path);
+        assert!(reg.note_posted(&path, ResultKind::Failed("exit 1".into())));
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Failed);
+
+        // The error text travels to snapshot consumers (ledger lines).
+        let row = &reg.snapshot().agents[0];
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.last_error.as_deref(), Some("exit 1"));
+
+        // Re-task: the failure is not sticky, the new run speaks.
+        reg.note_enqueued(&path);
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Queued);
+        reg.note_dequeued(&path);
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Running);
+        assert!(reg.note_posted(&path, ResultKind::Success));
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Done);
+        let row = &reg.snapshot().agents[0];
+        assert_eq!(row.status, "done");
+        assert!(row.last_error.is_none(), "a later success clears the error");
+    }
+
+    /// Cancelled is its own derived terminal — "not successful" is not the
+    /// same fact as "failed" (alarms must not mix causes).
+    #[test]
+    fn cancelled_result_derives_cancelled() {
+        let (mut reg, path) = registered(test_config(), "worker");
+
+        reg.note_enqueued(&path);
+        reg.note_dequeued(&path);
+        assert!(reg.note_posted(&path, ResultKind::Cancelled));
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Cancelled);
+        assert_eq!(reg.snapshot().agents[0].status, "cancelled");
+
+        // A later success restores Done.
+        reg.note_enqueued(&path);
+        reg.note_dequeued(&path);
+        assert!(reg.note_posted(&path, ResultKind::Success));
+        assert_eq!(reg.get(&path).unwrap().status(), AgentStatus::Done);
     }
 
     #[test]
@@ -939,12 +1119,12 @@ mod tests {
         assert_eq!(reg.busy_count(), 2);
 
         // a posts with nothing left queued → only b busy.
-        assert!(reg.note_posted(&a));
+        assert!(reg.note_posted(&a, ResultKind::Success));
         assert_eq!(reg.busy_count(), 1);
 
         // b dequeued and posts → nobody busy.
         assert!(reg.note_dequeued(&b));
-        assert!(reg.note_posted(&b));
+        assert!(reg.note_posted(&b, ResultKind::Success));
         assert_eq!(reg.busy_count(), 0);
     }
 
@@ -961,14 +1141,14 @@ mod tests {
         // a finished and delivered; b exists but was never tasked.
         assert!(reg.note_enqueued(&a));
         assert!(reg.note_dequeued(&a));
-        assert!(reg.note_posted(&a));
+        assert!(reg.note_posted(&a, ResultKind::Success));
         assert!(!reg.quiescent(), "b never delivered — spawn→send window");
 
         // b gets its task, executes, delivers → now the field settles.
         assert!(reg.note_enqueued(&b));
         assert!(reg.note_dequeued(&b));
         assert!(!reg.quiescent(), "b is in flight");
-        assert!(reg.note_posted(&b));
+        assert!(reg.note_posted(&b, ResultKind::Success));
         assert!(reg.quiescent(), "everyone idle and delivered");
 
         // A queued follow-up re-blocks quiescence even though b delivered.
@@ -990,7 +1170,7 @@ mod tests {
         // a delivered; b is mid-run when root kills it.
         assert!(reg.note_enqueued(&a));
         assert!(reg.note_dequeued(&a));
-        assert!(reg.note_posted(&a));
+        assert!(reg.note_posted(&a, ResultKind::Success));
         assert!(reg.note_enqueued(&b));
         assert!(reg.note_dequeued(&b));
         assert!(!reg.quiescent(), "b is in flight");
@@ -1013,7 +1193,7 @@ mod tests {
 
         reg.note_enqueued(&path);
         reg.note_dequeued(&path);
-        reg.note_posted(&path);
+        reg.note_posted(&path, ResultKind::Success);
         let snap = |reg: &AgentRegistry| reg.snapshot().agents[0].pending_results;
         assert_eq!(snap(&reg), 1, "posted but no batch has fired yet");
 
@@ -1024,7 +1204,7 @@ mod tests {
         // A follow-up post (nudge answer) reopens the gap.
         reg.note_enqueued(&path);
         reg.note_dequeued(&path);
-        reg.note_posted(&path);
+        reg.note_posted(&path, ResultKind::Success);
         assert_eq!(snap(&reg), 1, "new post is pending until the next batch");
 
         // Ghost paths stay a no-op, and handover never goes backwards.
@@ -1037,7 +1217,7 @@ mod tests {
         let mut reg = AgentRegistry::new(test_config());
         assert!(!reg.note_enqueued(&test_path("ghost")));
         assert!(!reg.note_dequeued(&test_path("ghost")));
-        assert!(!reg.note_posted(&test_path("ghost")));
+        assert!(!reg.note_posted(&test_path("ghost"), ResultKind::Success));
         assert!(!reg.note_send_failed(&test_path("ghost")));
         // Ghost notes stay fully silent: no transitions, no snapshot churn.
         assert!(reg.recent_events(10).is_empty());
@@ -1071,7 +1251,7 @@ mod tests {
         let (mut reg2, p2) = registered(test_config(), "solo");
         reg2.note_enqueued(&p2);
         reg2.note_dequeued(&p2);
-        reg2.note_posted(&p2);
+        reg2.note_posted(&p2, ResultKind::Success);
         reg2.note_enqueued(&p2);
         assert!(!reg2.quiescent());
         reg2.note_send_failed(&p2);
@@ -1110,7 +1290,7 @@ mod tests {
             .expect("watch receiver must be woken by the transition");
         assert_eq!(rx.borrow().agents[0].running_secs, Some(0));
 
-        reg.note_posted(&path);
+        reg.note_posted(&path, ResultKind::Success);
         assert!(
             reg.snapshot().agents[0].running_secs.is_none(),
             "stale seconds must clear on post"
@@ -1124,7 +1304,7 @@ mod tests {
         // No receivers: publishing must not fail loudly.
         assert!(reg.note_enqueued(&path));
         assert!(reg.note_dequeued(&path));
-        assert!(reg.note_posted(&path));
+        assert!(reg.note_posted(&path, ResultKind::Success));
 
         // register→Done, enqueue→Queued, dequeue→Running, post→Done: three
         // transitions (Done→Done at register emits nothing).
@@ -1155,7 +1335,7 @@ mod tests {
             // Enqueue+dequeue+post cycles generate 3 transitions each.
             reg.note_enqueued(&path);
             reg.note_dequeued(&path);
-            reg.note_posted(&path);
+            reg.note_posted(&path, ResultKind::Success);
         }
         assert_eq!(reg.events.len(), EVENT_RING_CAP);
         assert_eq!(reg.recent_events(3).len(), 3);

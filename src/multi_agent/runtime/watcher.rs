@@ -569,6 +569,7 @@ mod tests {
     use crate::multi_agent::config::MultiAgentConfig;
     use crate::multi_agent::mailbox::MailboxResult;
     use crate::multi_agent::path::AgentPath;
+    use crate::multi_agent::registry::ResultKind;
 
     struct Fixture {
         mailbox: Arc<MailboxHub>,
@@ -635,10 +636,17 @@ mod tests {
     }
 
     /// The child loop's terminal order: record the delivery fact *before*
-    /// posting the result (see `note_posted` in `spawn.rs`).
+    /// posting the result (see `note_posted` in `spawn.rs`). The registry
+    /// result kind mirrors production's mapping (a delivered error is
+    /// `Failed`, a closed delivery is `Cancelled`).
     fn finish_and_post(fx: &Fixture, name: &str, status: MailboxStatus, text: Option<&str>) {
         let path = AgentPath::root().join(name);
-        fx.registry.lock().unwrap().note_posted(&path);
+        let kind = match &status {
+            MailboxStatus::Ok => ResultKind::Success,
+            MailboxStatus::Error => ResultKind::Failed(text.unwrap_or("error").to_string()),
+            MailboxStatus::Closed => ResultKind::Cancelled,
+        };
+        fx.registry.lock().unwrap().note_posted(&path, kind);
         fx.mailbox.register(&path);
         fx.mailbox.post_result(MailboxResult {
             agent_path: path,

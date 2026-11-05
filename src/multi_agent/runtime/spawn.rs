@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::multi_agent::capability::{CapabilityResolution, ChildToolCapability};
-use crate::multi_agent::registry::AgentStatus;
+use crate::multi_agent::registry::{AgentStatus, ResultKind};
 
 impl MultiAgentRuntime {
     /// Spawn a child agent at the given path with a specific system prompt.
@@ -203,13 +203,13 @@ impl MultiAgentRuntime {
     }
 
     /// Hand a finished same-path predecessor's registration over to a new
-    /// spawn (session 20260920_5ba1bed4): `done`/`closed` agents are stale
-    /// state — task finished, claims released at task end, only the guard's
-    /// asynchronous unwind pending. Cancel the old token, remove the
-    /// registry entry and mailbox, bump the generation (the superseded
-    /// guard's `Drop` then skips all path-scoped teardown), and clear the
-    /// echo entry. Running/queued predecessors keep the `AlreadyExists`
-    /// rejection (recycling only recognizes terminal states).
+    /// spawn (session 20260920_5ba1bed4): `done`/`failed`/`cancelled`/`closed`
+    /// agents are stale state — task finished, claims released at task end,
+    /// only the guard's asynchronous unwind pending. Cancel the old token,
+    /// remove the registry entry and mailbox, bump the generation (the
+    /// superseded guard's `Drop` then skips all path-scoped teardown), and
+    /// clear the echo entry. Running/queued predecessors keep the
+    /// `AlreadyExists` rejection (recycling only recognizes terminal states).
     ///
     /// Synchronous and race-safe: every step is either idempotent
     /// (`registry::close`, `mailbox::unregister`, `release_all`) or guarded
@@ -220,7 +220,12 @@ impl MultiAgentRuntime {
             let registry = self.registry.lock().unwrap();
             matches!(
                 registry.get(path).map(|e| e.status()),
-                Some(AgentStatus::Done) | Some(AgentStatus::Closed)
+                Some(
+                    AgentStatus::Done
+                        | AgentStatus::Failed
+                        | AgentStatus::Cancelled
+                        | AgentStatus::Closed
+                )
             )
         };
         if !finished {
@@ -638,6 +643,16 @@ impl Drop for ChildCleanup {
 // Child agent event loop
 // ---------------------------------------------------------------------------
 
+/// What one child task run produced: the mailbox delivery verdict, the
+/// registry [`ResultKind`] (how the run *ended* — a delivered failure is
+/// still `MailboxStatus::Ok` + `ResultKind::Failed`), and the report payload.
+struct TaskReport {
+    status: MailboxStatus,
+    kind: ResultKind,
+    result_text: Option<String>,
+    denied_tools: Vec<String>,
+}
+
 /// Run one dequeued child task to completion and build its mailbox result.
 ///
 /// §9.2: `Some(dur)` puts a hard wall on one task. On elapse the turn future
@@ -650,7 +665,7 @@ async fn execute_child_task(
     session_id: &SessionId,
     task: &crate::multi_agent::mailbox::MailboxTask,
     task_timeout: Option<Duration>,
-) -> (MailboxStatus, Option<String>, Vec<String>) {
+) -> TaskReport {
     let input = outcome::build_child_input(task);
     let run = child_runtime.run_turn_collect(session_id.clone(), &input);
     let result = if let Some(dur) = task_timeout {
@@ -658,23 +673,30 @@ async fn execute_child_task(
             Ok(r) => r,
             Err(_elapsed) => {
                 child_runtime.cancel();
-                return (
-                    MailboxStatus::Error,
-                    Some(format!("task timed out after {dur:?}")),
-                    vec![],
-                );
+                return TaskReport {
+                    status: MailboxStatus::Error,
+                    kind: ResultKind::Failed(format!("task timed out after {dur:?}")),
+                    result_text: Some(format!("task timed out after {dur:?}")),
+                    denied_tools: vec![],
+                };
             }
         }
     } else {
         run.await
     };
     match result {
-        Ok((events, outcome)) => (
-            MailboxStatus::Ok,
-            Some(outcome::build_child_result(&outcome, &events)),
-            outcome::collect_denied_tools(&events),
-        ),
-        Err(e) => (MailboxStatus::Error, Some(e.to_string()), vec![]),
+        Ok((events, outcome)) => TaskReport {
+            status: MailboxStatus::Ok,
+            kind: outcome::result_kind(&outcome),
+            result_text: Some(outcome::build_child_result(&outcome, &events)),
+            denied_tools: outcome::collect_denied_tools(&events),
+        },
+        Err(e) => TaskReport {
+            status: MailboxStatus::Error,
+            kind: ResultKind::Failed(e.to_string()),
+            result_text: Some(e.to_string()),
+            denied_tools: vec![],
+        },
     }
 }
 
@@ -760,7 +782,8 @@ async fn run_child_loop(
     // `post_result` bumps the mailbox seq so the watcher wakes onto settled
     // facts). The status itself is derived by the registry: posting while a
     // sibling task is still queued derives `Queued` (quiescence blocked),
-    // the final post derives `Done` (batch may fire). The old explicit
+    // the final post derives `Done`/`Failed`/`Cancelled` from the recorded
+    // result (batch may fire). The old explicit
     // peek-ahead (`try_recv` + `set_status(Running/Done)` before posting)
     // existed only because the marker model had no `Queued`; with facts it
     // is dead weight. Cancel stays honored between tasks.
@@ -773,14 +796,18 @@ async fn run_child_loop(
                 match task {
                     Some(task) => {
                         registry.lock().unwrap().note_dequeued(&agent_path);
-                        let (status, result_text, denied_tools) =
-                            execute_child_task(
-                                &child_runtime,
-                                &session_id,
-                                &task,
-                                task_timeout,
-                            )
-                            .await;
+                        let TaskReport {
+                            status,
+                            kind,
+                            result_text,
+                            denied_tools,
+                        } = execute_child_task(
+                            &child_runtime,
+                            &session_id,
+                            &task,
+                            task_timeout,
+                        )
+                        .await;
 
                         // Fact before post: the watcher wakes on this
                         // post's seq bump and must see `in_flight` already
@@ -796,7 +823,7 @@ async fn run_child_loop(
                         // through here; ChildCleanup::drop stays as the
                         // terminal backstop (release_all is idempotent).
                         write_gate.release_all(agent_path.to_string().as_str());
-                        registry.lock().unwrap().note_posted(&agent_path);
+                        registry.lock().unwrap().note_posted(&agent_path, kind);
                         mailbox.post_result(MailboxResult {
                             agent_path: agent_path.clone(),
                             status,

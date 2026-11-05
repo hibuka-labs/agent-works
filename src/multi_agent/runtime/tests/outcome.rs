@@ -231,7 +231,7 @@ fn test_format_child_result_ok_with_text() {
     assert_eq!(event.status, "ok");
     assert_eq!(event.result.as_deref(), Some("found 3 files"));
     assert!(event.message.contains("root/worker"));
-    assert!(event.message.contains("已完成"));
+    assert!(event.message.contains("[sub-agent root/worker done]"));
     assert!(event.message.contains("found 3 files"));
 }
 
@@ -245,7 +245,7 @@ fn test_format_child_result_ok_empty() {
     };
     let event = format_child_result(&result);
     assert_eq!(event.status, "ok");
-    assert!(event.message.contains("已完成"));
+    assert!(event.message.contains("[sub-agent root/helper done]"));
     assert!(!event.message.contains("\n")); // no trailing newline for empty result
 }
 
@@ -259,7 +259,7 @@ fn test_format_child_result_error() {
     };
     let event = format_child_result(&result);
     assert_eq!(event.status, "error");
-    assert!(event.message.contains("出错"));
+    assert!(event.message.contains("[sub-agent root/worker failed]"));
     assert!(event.message.contains("timeout"));
 }
 
@@ -273,5 +273,5 @@ fn test_format_child_result_closed() {
     };
     let event = format_child_result(&result);
     assert_eq!(event.status, "closed");
-    assert!(event.message.contains("已关闭"));
+    assert!(event.message.contains("[sub-agent root/worker closed]"));
 }

@@ -8,6 +8,7 @@ use agent_base::{RunOutcome, RuntimeEvent};
 
 use super::watcher::ChildReport;
 use crate::multi_agent::mailbox::{MailboxResult, MailboxStatus, MailboxTask};
+use crate::multi_agent::registry::ResultKind;
 
 /// Build the input text for a child agent from a mailbox task.
 pub(super) fn build_child_input(task: &MailboxTask) -> String {
@@ -33,6 +34,22 @@ pub(super) fn summarize_outcome(outcome: &RunOutcome) -> String {
             format!("max turns exceeded ({} turns)", turns)
         }
         RunOutcome::Cancelled => "cancelled".to_string(),
+    }
+}
+
+/// Map a run outcome to the registry's [`ResultKind`] — how the run *ended*,
+/// kept beside [`summarize_outcome`] so the failure wording stays
+/// single-source. Consumers render the carried error text as-is (no invented
+/// exit codes). `Continuing` is still `Success` for the *task* (delivery went
+/// fine); an unfinished run is the parent's decision, not a delivery failure.
+pub(super) fn result_kind(outcome: &RunOutcome) -> ResultKind {
+    match outcome {
+        RunOutcome::Completed | RunOutcome::Continuing => ResultKind::Success,
+        RunOutcome::Failed { error } => ResultKind::Failed(error.clone()),
+        RunOutcome::MaxTurnsExceeded { turns } => {
+            ResultKind::Failed(format!("max turns exceeded ({turns} turns)"))
+        }
+        RunOutcome::Cancelled => ResultKind::Cancelled,
     }
 }
 
@@ -125,20 +142,20 @@ pub fn format_child_result(result: &MailboxResult) -> ChildReport {
     let message = match &result.status {
         MailboxStatus::Ok => {
             if result_text.is_empty() {
-                format!("[子 agent {} 已完成]", path)
+                format!("[sub-agent {} done]", path)
             } else {
-                format!("[子 agent {} 已完成]\n{}", path, result_text)
+                format!("[sub-agent {} done]\n{}", path, result_text)
             }
         }
         MailboxStatus::Error => {
             if result_text.is_empty() {
-                format!("[子 agent {} 执行出错]", path)
+                format!("[sub-agent {} failed]", path)
             } else {
-                format!("[子 agent {} 执行出错]\n{}", path, result_text)
+                format!("[sub-agent {} failed]\n{}", path, result_text)
             }
         }
         MailboxStatus::Closed => {
-            format!("[子 agent {} 已关闭]", path)
+            format!("[sub-agent {} closed]", path)
         }
     };
 
