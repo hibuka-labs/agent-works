@@ -46,7 +46,8 @@ mod config;
 mod core;
 
 pub use config::{
-    DEFAULT_SEED_MESSAGE, TokenBudgetConfig, TokenBudgetState, build_context_window_info,
-    build_fallback_message, build_reminder_message, token_budget_base_overhead,
+    DEFAULT_SEED_MESSAGE, DEFAULT_SEED_MESSAGE_NO_HANDOFF, HintSlot, LEGACY_DEFAULT_SEED_MESSAGE,
+    TokenBudgetConfig, TokenBudgetState, build_context_window_info, build_fallback_message,
+    build_reminder_message, token_budget_base_overhead,
 };
 pub use core::{TokenBudgetAction, TokenBudgetCore};

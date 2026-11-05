@@ -9,8 +9,9 @@
 //! [`TokenBudgetCore::commit_reset`].
 
 use super::config::{
-    TokenBudgetConfig, TokenBudgetState, build_context_window_info, build_fallback_message,
-    build_reminder_message, token_budget_base_overhead,
+    HintSlot, LEGACY_DEFAULT_SEED_MESSAGE, TokenBudgetConfig, TokenBudgetState,
+    build_context_window_info, build_fallback_message, build_reminder_message,
+    token_budget_base_overhead,
 };
 use agent_base::engine::{estimate_messages_tokens, first_system_prompt};
 use agent_base::types::ChatMessage;
@@ -237,20 +238,20 @@ impl TokenBudgetCore {
     }
 
     /// Assemble the fresh window's message list: preserved system prompt +
-    /// window info + optional app-provided thread hint + guidance + seed.
+    /// window info + hint slot + user trail + guidance + seed.
     ///
-    /// A thread hint large enough to push the fresh window past the hard
+    /// A hint slot large enough to push the fresh window past the hard
     /// limit is dropped (with a warning) — the base must always fit.
     /// Does NOT advance window state; call [`TokenBudgetCore::commit_reset`]
     /// after the shell has archived and installed the list.
     pub fn build_reset_messages(
         &self,
         old_messages: &[ChatMessage],
-        thread_hint: Option<String>,
+        hint: HintSlot,
         previous_window: usize,
     ) -> Vec<ChatMessage> {
-        let has_hint = thread_hint.is_some();
-        let mut new_messages = self.assemble_window(old_messages, thread_hint, previous_window);
+        let has_hint = !hint.is_empty();
+        let mut new_messages = self.assemble_window(old_messages, &hint, previous_window);
 
         // Defense in depth: the fresh window must fit under the hard limit.
         // With work-room semantics the base always does — unless an
@@ -261,10 +262,11 @@ impl TokenBudgetCore {
             tracing::warn!(
                 total,
                 hard_limit = self.hard_limit(),
-                "thread hint pushes the fresh window past the hard limit; \
+                "hint slot pushes the fresh window past the hard limit; \
                  dropping the hint"
             );
-            new_messages = self.assemble_window(old_messages, None, previous_window);
+            new_messages =
+                self.assemble_window(old_messages, &HintSlot::default(), previous_window);
         }
 
         new_messages
@@ -281,7 +283,7 @@ impl TokenBudgetCore {
     fn assemble_window(
         &self,
         old_messages: &[ChatMessage],
-        thread_hint: Option<String>,
+        hint: &HintSlot,
         previous_window: usize,
     ) -> Vec<ChatMessage> {
         let current = self.state.current_window_id();
@@ -290,12 +292,21 @@ impl TokenBudgetCore {
             messages.push(system_prompt);
         }
         messages.push(build_context_window_info(previous_window, current));
-        if let Some(hint) = thread_hint {
-            messages.push(ChatMessage::system(hint));
+        if let Some(text) = hint.joined() {
+            messages.push(ChatMessage::system(text));
         }
         messages.extend(self.collect_user_trail(old_messages));
         messages.push(ChatMessage::system(self.config.guidance_message.clone()));
-        messages.push(ChatMessage::user(self.config.seed_message.clone()));
+        // Seed variant matches the hint reality: with a handoff the content
+        // is already in the slot above (no file probe); without one the model
+        // is told to write one — no guaranteed `thread_hint.md` ENOENT. The
+        // seed is synthetic: machine-composed, never the user's task trail.
+        let seed = if hint.handoff.is_some() {
+            &self.config.seed_message
+        } else {
+            &self.config.seed_message_no_handoff
+        };
+        messages.push(ChatMessage::user_synthetic(seed.clone()));
         messages
     }
 
@@ -306,10 +317,25 @@ impl TokenBudgetCore {
     /// redundant file reads (session 20260908_cb460b2c: the model re-read
     /// the entire UI module every window because all three old user messages
     /// were present, with "看下 ui 模块" always last).
+    ///
+    /// Synthetic user messages (tool-failure notices, wakes, the window
+    /// seed) are machine-composed and skipped: the trail is the user's own
+    /// words, never the house's (session 20261103_4206f951: a
+    /// "Tool calls failed" notice was the window's last user message and
+    /// rode the trail as "the current task").
     fn collect_user_trail(&self, old_messages: &[ChatMessage]) -> Vec<ChatMessage> {
         for msg in old_messages.iter().rev() {
-            if let ChatMessage::User { content, .. } = msg {
-                if content == &self.config.seed_message {
+            if let ChatMessage::User {
+                content, synthetic, ..
+            } = msg
+            {
+                if *synthetic
+                    || content == &self.config.seed_message
+                    || content == &self.config.seed_message_no_handoff
+                    // Untagged pre-`synthetic`-flag seed rows: machine input
+                    // on the user role, recognized by its verbatim text.
+                    || content == LEGACY_DEFAULT_SEED_MESSAGE
+                {
                     continue;
                 }
                 let tokens = estimate_messages_tokens(std::slice::from_ref(msg));
@@ -489,7 +515,7 @@ mod tests {
             ChatMessage::user("hi"),
             ChatMessage::assistant("hello"),
         ];
-        let msgs = core.build_reset_messages(&old, None, 1);
+        let msgs = core.build_reset_messages(&old, HintSlot::default(), 1);
         // sys + window info + user trail [user("hi")] + guidance + seed
         assert_eq!(msgs.len(), 5);
         assert!(
@@ -501,19 +527,122 @@ mod tests {
         // User trail preserves the real user message.
         assert!(matches!(&msgs[2], ChatMessage::User { content, .. }
             if content == "hi"));
-        assert!(matches!(&msgs.last().unwrap(), ChatMessage::User { .. }));
+        // The seed is synthetic: it must never come back as the trail.
+        assert!(matches!(
+            &msgs.last().unwrap(),
+            ChatMessage::User {
+                synthetic: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn reset_messages_include_thread_hint() {
         let core = core_with_sys_prompt();
         let old = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
-        let msgs =
-            core.build_reset_messages(&old, Some("<thread_hint>note</thread_hint>".into()), 1);
+        let msgs = core.build_reset_messages(
+            &old,
+            HintSlot {
+                handoff: Some("<thread_hint>note</thread_hint>".into()),
+                ..HintSlot::default()
+            },
+            1,
+        );
         // sys + window info + thread_hint + user trail [user("hi")] + guidance + seed
         assert_eq!(msgs.len(), 6);
         assert!(matches!(&msgs[2], ChatMessage::System { content, .. }
             if content.contains("thread_hint")));
+        // A handoff exists → the seed points at the slot above, no file probe.
+        assert!(matches!(&msgs[5], ChatMessage::User { content, .. }
+            if content == &core.config.seed_message));
+    }
+
+    /// Seed variants match the hint reality (no guaranteed `thread_hint.md`
+    /// probe either way).
+    #[test]
+    fn seed_variant_follows_handoff_presence() {
+        // Default seed copy (small_config overrides it with test text); the
+        // viability floors are opted out like small_config does.
+        let core = TokenBudgetCore::new(
+            TokenBudgetConfig {
+                work_budget: 100,
+                reminder_threshold: 20,
+                fallback_buffer: 10,
+                guidance_message: "Use notes/history.".to_string(),
+                min_work_multiple: 0.0,
+                min_absolute_work_room: 0,
+                ..Default::default()
+            },
+            Some("sys"),
+        );
+        let old = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
+
+        // Handoff present: seed = the handoff-aware variant.
+        let with_handoff = core.build_reset_messages(
+            &old,
+            HintSlot {
+                handoff: Some("<thread_hint>note</thread_hint>".into()),
+                ..HintSlot::default()
+            },
+            1,
+        );
+        assert!(
+            matches!(with_handoff.last().unwrap(), ChatMessage::User { content, .. }
+            if content == &core.config.seed_message)
+        );
+        let seed_text = match with_handoff.last().unwrap() {
+            ChatMessage::User { content, .. } => content.clone(),
+            _ => unreachable!(),
+        };
+        assert!(
+            seed_text.contains("hint above"),
+            "no file probe: {seed_text}"
+        );
+        assert!(!seed_text.contains("Check notes/thread_hint.md"));
+
+        // Handoff absent: seed = the write-one variant — even when other
+        // slot parts (plan, notes index, ledger) exist. Their presence must
+        // not claim a handoff.
+        let without_handoff = core.build_reset_messages(
+            &old,
+            HintSlot {
+                plan: Some("<plan>standing</plan>".into()),
+                notes_index: Some("notes/: activity_ledger.md".into()),
+                ledger: Some("- ran tests".into()),
+                ..HintSlot::default()
+            },
+            1,
+        );
+        assert!(
+            matches!(without_handoff.last().unwrap(), ChatMessage::User { content, .. }
+            if content == &core.config.seed_message_no_handoff)
+        );
+        let seed_text = match without_handoff.last().unwrap() {
+            ChatMessage::User { content, .. } => content.clone(),
+            _ => unreachable!(),
+        };
+        assert!(seed_text.contains("No handoff note exists"), "{seed_text}");
+        assert!(!seed_text.contains("Check notes/thread_hint.md"));
+    }
+
+    /// Slot order: handoff, plan, notes index, artifact index — ledger
+    /// LAST, freshest, closest to the seed where attention is.
+    #[test]
+    fn hint_slot_joins_in_order() {
+        let slot = HintSlot {
+            handoff: Some("HANDOFF".into()),
+            plan: Some("PLAN".into()),
+            notes_index: Some("NOTES".into()),
+            artifact_index: Some("ARTIFACT".into()),
+            ledger: Some("LEDGER".into()),
+        };
+        assert_eq!(
+            slot.joined().as_deref(),
+            Some("HANDOFF\n\nPLAN\n\nNOTES\n\nARTIFACT\n\nLEDGER")
+        );
+        assert!(HintSlot::default().is_empty());
+        assert!(!slot.is_empty());
     }
 
     #[test]
@@ -522,10 +651,46 @@ mod tests {
         // pushes the fresh window past it and must be dropped.
         let core = core_with_sys_prompt();
         let old = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
-        let hint = format!("<thread_hint>{}</thread_hint>", "x".repeat(4000));
-        let msgs = core.build_reset_messages(&old, Some(hint), 1);
+        let hint = HintSlot {
+            handoff: Some(format!("<thread_hint>{}</thread_hint>", "x".repeat(4000))),
+            ..HintSlot::default()
+        };
+        let msgs = core.build_reset_messages(&old, hint, 1);
         assert_eq!(msgs.len(), 5); // hint dropped, trail kept
         assert!(estimate_messages_tokens(&msgs) < core.hard_limit());
+    }
+
+    /// Session 20261103_4206f951 W4: the window's last user message was a
+    /// synthetic "Tool calls failed" notice and rode the trail as the
+    /// "current task". Machine notices must never stand in for the user.
+    #[test]
+    fn user_trail_skips_synthetic_notices() {
+        let core = core_with_sys_prompt();
+        let old = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("sow the nursing detail page"),
+            ChatMessage::assistant("working on it"),
+            ChatMessage::user_synthetic(
+                "Tool calls failed: exec_command\nError: Tool 'exec_command' not found. \
+                 Please analyze the error and adjust your approach.",
+            ),
+        ];
+        let trail = core.collect_user_trail(&old);
+        assert_eq!(trail.len(), 1);
+        assert!(matches!(&trail[0], ChatMessage::User { content, .. }
+            if content == "sow the nursing detail page"));
+    }
+
+    /// A trail with only synthetic user messages carries nothing: better no
+    /// trail than a fabricated one.
+    #[test]
+    fn user_trail_empty_when_only_synthetic() {
+        let core = core_with_sys_prompt();
+        let old = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user_synthetic("[System notice] Background tasks finished"),
+        ];
+        assert!(core.collect_user_trail(&old).is_empty());
     }
 
     #[test]
@@ -535,6 +700,40 @@ mod tests {
             ChatMessage::system("sys"),
             ChatMessage::user("Reconstruct state."), // this IS the seed
             ChatMessage::user("real task"),
+        ];
+        let trail = core.collect_user_trail(&old);
+        assert_eq!(trail.len(), 1);
+        assert!(matches!(&trail[0], ChatMessage::User { content, .. }
+            if content == "real task"));
+    }
+
+    /// Seed exclusion is by tag, not just by string: a product with custom
+    /// seed copy is still covered (the tag travels with the message).
+    #[test]
+    fn user_trail_excludes_a_tagged_seed_with_custom_copy() {
+        let core = core_with_sys_prompt();
+        let old = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user_synthetic("custom seed copy nobody matches"),
+            ChatMessage::user("real task"),
+        ];
+        let trail = core.collect_user_trail(&old);
+        assert_eq!(trail.len(), 1);
+        assert!(matches!(&trail[0], ChatMessage::User { content, .. }
+            if content == "real task"));
+    }
+
+    /// A window written before the `synthetic` flag existed carries its seed
+    /// as an untagged User row. After such a session is resumed and rotated
+    /// again, the old default seed text must not pass as the user's trail.
+    #[test]
+    fn user_trail_skips_an_untagged_legacy_seed() {
+        let core = core_with_sys_prompt();
+        let old = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("real task"),
+            ChatMessage::assistant("working"),
+            ChatMessage::user(LEGACY_DEFAULT_SEED_MESSAGE),
         ];
         let trail = core.collect_user_trail(&old);
         assert_eq!(trail.len(), 1);

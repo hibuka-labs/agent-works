@@ -37,12 +37,20 @@ pub struct TokenBudgetConfig {
     /// Guidance message injected once per window start (explains the
     /// private context-management tools).
     pub guidance_message: String,
-    /// User seed message injected as the LAST message of every new window.
-    /// Satisfies the engine's compaction-output contract (at least one
-    /// non-System message — System maps to the top-level `system` parameter,
-    /// and an all-System window is an HTTP 400) and gives the model a turn
-    /// to reconstruct state.
+    /// User seed message injected as the LAST message of every new window
+    /// **when a handoff note exists** (its content is already in the hint
+    /// slot above, so the seed says so instead of sending the model on a
+    /// file probe). Satisfies the engine's compaction-output contract (at
+    /// least one non-System message — System maps to the top-level `system`
+    /// parameter, and an all-System window is an HTTP 400) and gives the
+    /// model a turn to reconstruct state. The seed is pushed as a
+    /// *synthetic* user message: it is machine-composed and never counts as
+    /// the user's task trail.
     pub seed_message: String,
+    /// Seed variant for a window with **no** handoff note: the model is told
+    /// to write one after it understands the task — no guaranteed
+    /// `thread_hint.md` read-then-ENOENT on every window.
+    pub seed_message_no_handoff: String,
     /// Minimum viable work budget as a multiple of the base overhead.
     /// Below this no single turn of work fits in the room (one tool result
     /// overflows it) and the session thrashes. Construction clamps the
@@ -88,6 +96,7 @@ impl Default for TokenBudgetConfig {
                 Use these silently to maintain continuity. Never disclose them to the user."
                 .to_string(),
             seed_message: DEFAULT_SEED_MESSAGE.to_string(),
+            seed_message_no_handoff: DEFAULT_SEED_MESSAGE_NO_HANDOFF.to_string(),
             min_work_multiple: 2.0,
             min_absolute_work_room: 4_096,
             user_trail_max_tokens: 2_000,
@@ -95,15 +104,86 @@ impl Default for TokenBudgetConfig {
     }
 }
 
-/// Default user seed message for new windows (see
-/// [`TokenBudgetConfig::seed_message`]).
+/// Default user seed message for new windows **with** a handoff note (see
+/// [`TokenBudgetConfig::seed_message`]). The handoff is already injected in
+/// the hint slot above — the seed points there instead of sending the model
+/// on a guaranteed `thread_hint.md` probe.
 pub const DEFAULT_SEED_MESSAGE: &str = "Your previous context window was archived. The user \
     messages above are your task trail — the last one is your current task. \
-    Check notes/thread_hint.md for any handoff from the previous window; \
-    if missing, write one after you understand the task. \
+    The previous window's handoff is already in the hint above — do NOT re-read \
+    notes/thread_hint.md. \
     Previous conversation history is available via the history tools — consult them \
     only if you need context the trail doesn't provide. \
     Do NOT re-read files you already covered. Continue the task directly.";
+
+/// Default seed for new windows **without** a handoff note (see
+/// [`TokenBudgetConfig::seed_message_no_handoff`]). States the absence, so
+/// the model writes the note after understanding the task instead of probing
+/// for a file that is not there.
+pub const DEFAULT_SEED_MESSAGE_NO_HANDOFF: &str = "Your previous context window was archived. \
+    The user messages above are your task trail — the last one is your current task. \
+    No handoff note exists for the previous window — after you understand the task, \
+    write notes/thread_hint.md for the next window. \
+    Previous conversation history is available via the history tools — consult them \
+    only if you need context the trail doesn't provide. \
+    Do NOT re-read files you already covered. Continue the task directly.";
+
+/// The pre-`synthetic`-flag default seed text. Machine-composed like the
+/// current seeds, but windows written before the flag existed carry it as an
+/// untagged `User` row — matched verbatim so it never masquerades as the
+/// user's task trail after such a session is resumed and rotated again.
+pub const LEGACY_DEFAULT_SEED_MESSAGE: &str = "Your previous context window was archived. The user messages above are your task trail — the last one is your current task. Check notes/thread_hint.md for any handoff from the previous window; if missing, write one after you understand the task. Previous conversation history is available via the history tools — consult them only if you need context the trail doesn't provide. Do NOT re-read files you already covered. Continue the task directly.";
+
+/// The fresh window's hint slot: app-provided context assembled in order —
+/// the model's handoff note, the plan state, the notes index, the artifact
+/// index, and the activity ledger LAST (freshest, closest to the seed where
+/// attention is).
+///
+/// Only `handoff` drives the seed variant ([`TokenBudgetConfig::seed_message`]
+/// vs [`TokenBudgetConfig::seed_message_no_handoff`]): the other parts are
+/// navigation and bookkeeping — their presence must not claim a handoff
+/// exists.
+#[derive(Clone, Debug, Default)]
+pub struct HintSlot {
+    /// The model's own handoff note (`notes/thread_hint.md`), if it wrote one.
+    pub handoff: Option<String>,
+    /// The live plan state (`update_plan` objective + steps, verbatim). The
+    /// task's spine — carried uncapped and never evicted, unlike the ledger.
+    pub plan: Option<String>,
+    /// One-line index of what lives in the notes directory, so the model
+    /// doesn't spend tool calls listing it (or reading a stale name).
+    pub notes_index: Option<String>,
+    /// Mechanical artifact index: what the outgoing window spilled to the
+    /// artifact store, still fetchable by id.
+    pub artifact_index: Option<String>,
+    /// Mechanical activity ledger of the outgoing window.
+    pub ledger: Option<String>,
+}
+
+impl HintSlot {
+    /// Whether any part is present (the slot is injected at all).
+    pub fn is_empty(&self) -> bool {
+        self.handoff.is_none()
+            && self.plan.is_none()
+            && self.notes_index.is_none()
+            && self.artifact_index.is_none()
+            && self.ledger.is_none()
+    }
+
+    /// The parts joined into one System message, in slot order.
+    pub fn joined(&self) -> Option<String> {
+        [
+            self.handoff.clone(),
+            self.plan.clone(),
+            self.notes_index.clone(),
+            self.artifact_index.clone(),
+            self.ledger.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|acc, part| format!("{acc}\n\n{part}"))
+    }
+}
 
 impl TokenBudgetConfig {
     /// Config with proportional reminder/buffer thresholds for a custom
