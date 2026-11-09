@@ -21,6 +21,25 @@ pub struct SkillResolver {
     /// (`[active]` markers). The resolver itself stays immutable — hosts
     /// mutate the set through their own clone ([`SkillResolver::with_active_set`]).
     active: ActiveSkillSet,
+    /// Same-name pairs whose content differed during the scan (G1b).
+    shadowed: Vec<ShadowedSkill>,
+}
+
+/// One same-name pair whose content differs: the later-scanned copy won the
+/// last-wins override and the earlier copy is silently invisible from then on
+/// (e.g. a curated top-level copy shadowed by a drifted suite copy).
+///
+/// Recorded so a host can log the drift; **the override semantics themselves
+/// are unchanged** (later dir wins). Identical-bytes duplicates (the same skill
+/// linked from two directories) are not shadowing and are never recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowedSkill {
+    /// The colliding skill name.
+    pub name: String,
+    /// Directory of the copy that lost the override (when known).
+    pub shadowed_path: Option<PathBuf>,
+    /// Directory of the copy that won the override (when known).
+    pub winning_path: Option<PathBuf>,
 }
 
 /// A matched `/name args` slash invocation, with the skill's lifetime scope.
@@ -53,14 +72,30 @@ pub enum SkillLookupError {
 impl SkillResolver {
     /// Scan skills from multiple directories (later-scanned dirs win on name
     /// collision).
+    ///
+    /// A collision with *different* content is recorded in
+    /// [`shadowed_names`](Self::shadowed_names) — the override itself is not
+    /// changed, it just stops being invisible.
     pub fn from_dirs(dirs: &[PathBuf]) -> Self {
         let mut by_name: HashMap<String, PromptSkill> = HashMap::new();
+        let mut shadowed: Vec<ShadowedSkill> = Vec::new();
 
         for dir in dirs {
             match PromptSkill::scan_dir(dir) {
                 Ok(skills) => {
                     for skill in skills {
                         let name = skill.name().to_string();
+                        if let Some(prev) = by_name.get(&name) {
+                            let same_content = prev.body() == skill.body()
+                                && prev.brief_description() == skill.brief_description();
+                            if !same_content {
+                                shadowed.push(ShadowedSkill {
+                                    name: name.clone(),
+                                    shadowed_path: prev.skill_dir_path().map(|p| p.to_path_buf()),
+                                    winning_path: skill.skill_dir_path().map(|p| p.to_path_buf()),
+                                });
+                            }
+                        }
                         by_name.insert(name, skill); // later entry overrides earlier one
                     }
                 }
@@ -75,7 +110,16 @@ impl SkillResolver {
         Self {
             skills,
             active: ActiveSkillSet::default(),
+            shadowed,
         }
+    }
+
+    /// Same-name skills whose content differed and were silently overridden
+    /// during the last scan (later copy won, semantics unchanged). Empty =
+    /// no drift; identical-bytes duplicates are not recorded. Hosts decide
+    /// what to do with the record (log, warn) — the resolver only surfaces it.
+    pub fn shadowed_names(&self) -> &[ShadowedSkill] {
+        &self.shadowed
     }
 
     /// Attach the host's shared active-skill set (Arc-backed handle, cloned).
@@ -402,6 +446,62 @@ mod tests {
             body.contains("project body"),
             "project-level should override user-level"
         );
+    }
+
+    /// protects: G1b — a same-name collision with different content is
+    /// recorded in `shadowed_names` (both directories) while the last-wins
+    /// override semantics stay unchanged.
+    /// fails_when: the collision is unrecorded, either path points at the
+    /// wrong copy, or the winning copy changes.
+    /// no_claim: identical duplicates (own card) or what a host logs.
+    #[test]
+    fn shadow_records_same_name_different_bytes() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        make_skill_dir(a.path(), "spec", "curated version", true);
+        make_skill_dir(b.path(), "spec", "drifted version", true);
+
+        let resolver =
+            SkillResolver::from_dirs(&[a.path().join("skills"), b.path().join("skills")]);
+
+        // Last-wins semantics unchanged: the later dir's copy serves lookups.
+        let body = resolver.resolve("/spec").unwrap();
+        assert!(
+            body.contains("drifted version"),
+            "last-wins must hold: {body}"
+        );
+
+        let shadowed = resolver.shadowed_names();
+        assert_eq!(shadowed.len(), 1, "{shadowed:?}");
+        assert_eq!(shadowed[0].name, "spec");
+        let lost = a.path().join("skills").join("spec");
+        let won = b.path().join("skills").join("spec");
+        assert_eq!(shadowed[0].shadowed_path.as_deref(), Some(lost.as_path()));
+        assert_eq!(shadowed[0].winning_path.as_deref(), Some(won.as_path()));
+    }
+
+    /// protects: G1b — identical-bytes duplicates (the same skill reachable
+    /// from two directories) are not shadowing and are never recorded.
+    /// fails_when: a record appears for a same-content duplicate, or the
+    /// duplicate stops resolving.
+    /// no_claim: drift detection beyond body + description bytes.
+    #[test]
+    fn shadow_identical_duplicates_not_recorded() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        make_skill_dir(a.path(), "spec", "same body", true);
+        make_skill_dir(b.path(), "spec", "same body", true);
+
+        let resolver =
+            SkillResolver::from_dirs(&[a.path().join("skills"), b.path().join("skills")]);
+
+        assert!(
+            resolver.shadowed_names().is_empty(),
+            "{:?}",
+            resolver.shadowed_names()
+        );
+        assert_eq!(resolver.len(), 1);
+        assert!(resolver.resolve("/spec").is_some());
     }
 
     #[test]

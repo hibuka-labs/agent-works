@@ -1,3 +1,4 @@
+use agent_base::ProviderHandle;
 use agent_base::engine::react_loop_guard::{GuardCtx, GuardDecision, ReactLoopGuard};
 use agent_base::llm_trait::LlmProvider;
 use async_trait::async_trait;
@@ -12,6 +13,12 @@ use super::judge::call_completion_judge;
 pub struct DefaultGuard {
     config: DefaultGuardConfig,
     llm_client: Option<Arc<dyn LlmProvider>>,
+    /// The engine's live provider handle, injected at registration
+    /// (`ReactLoopGuard::set_provider_source`). When set, the completion
+    /// judge resolves its client through it at call time — the provider that
+    /// served the turn, never a build-time snapshot. `llm_client` is the
+    /// fallback for guards not mounted on an engine.
+    provider_source: Mutex<Option<ProviderHandle>>,
     /// Notice handle injected by the engine (Batch E). `None` until
     /// `set_notice` is called — without it, guard behavior is unchanged.
     notice: Mutex<Option<agent_base::NoticeHandle>>,
@@ -22,6 +29,7 @@ impl DefaultGuard {
         Self {
             config,
             llm_client: None,
+            provider_source: Mutex::new(None),
             notice: Mutex::new(None),
         }
     }
@@ -31,13 +39,70 @@ impl DefaultGuard {
         Self {
             config,
             llm_client: Some(llm_client),
+            provider_source: Mutex::new(None),
             notice: Mutex::new(None),
         }
+    }
+
+    /// The client the completion judge runs on: the engine's live provider
+    /// when the engine injected a source (post-`/model`-swap this is the
+    /// provider that served the turn being judged), else the client wired at
+    /// build time. See [`ProviderHandle`].
+    fn judge_client(&self) -> Option<Arc<dyn LlmProvider>> {
+        if let Some(source) = self.provider_source.lock().unwrap().as_ref() {
+            return Some(source.current());
+        }
+        self.llm_client.clone()
     }
 
     /// Snapshot the notice handle, if the engine injected one.
     fn notice_handle(&self) -> Option<agent_base::NoticeHandle> {
         self.notice.lock().unwrap().clone()
+    }
+
+    /// Run the completion judge for a text-only turn and map its verdict to a
+    /// guard decision: nudge back into the loop on `done:false`, the
+    /// configured fail-open/fail-closed behavior when the judge call fails.
+    async fn judge_completion(&self, ctx: &GuardCtx) -> GuardDecision {
+        let client = self.judge_client();
+        match call_completion_judge(
+            client.as_ref(),
+            &ctx.user_input,
+            &ctx.model_response,
+            &ctx.all_user_inputs,
+            self.config.judge_fail_open,
+            self.config.judge_timeout_secs,
+            self.config.recent_user_count,
+            self.notice_handle().as_ref(),
+        )
+        .await
+        {
+            Ok(judge) => {
+                if judge.done {
+                    GuardDecision::Complete
+                } else {
+                    GuardDecision::Continue {
+                        nudge: Some(format!(
+                            "Your answer is incomplete: {}. Continue working on the task.",
+                            judge.reason
+                        )),
+                    }
+                }
+            }
+            Err(e) => {
+                // Judge failed — behavior depends on judge_fail_open config
+                tracing::warn!("completion judge failed: {}", e);
+                if self.config.judge_fail_open {
+                    GuardDecision::Complete
+                } else {
+                    GuardDecision::Continue {
+                        nudge: Some(
+                            "Cannot verify task completion, please continue working.".to_string(),
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     // ── Scene handlers ──────────────────────────────────────────────────
@@ -157,45 +222,7 @@ impl DefaultGuard {
                     return GuardDecision::Complete;
                 }
                 // Short response after tools — call judge to verify completion
-                match call_completion_judge(
-                    self.llm_client.as_ref(),
-                    &ctx.user_input,
-                    &ctx.model_response,
-                    &ctx.all_user_inputs,
-                    self.config.judge_fail_open,
-                    self.config.judge_timeout_secs,
-                    self.config.recent_user_count,
-                    self.notice_handle().as_ref(),
-                )
-                .await
-                {
-                    Ok(judge) => {
-                        if judge.done {
-                            GuardDecision::Complete
-                        } else {
-                            GuardDecision::Continue {
-                                nudge: Some(format!(
-                                    "Your answer is incomplete: {}. Continue working on the task.",
-                                    judge.reason
-                                )),
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Judge failed — behavior depends on judge_fail_open config
-                        tracing::warn!("completion judge failed: {}", e);
-                        if self.config.judge_fail_open {
-                            GuardDecision::Complete
-                        } else {
-                            GuardDecision::Continue {
-                                nudge: Some(
-                                    "Cannot verify task completion, please continue working."
-                                        .to_string(),
-                                ),
-                            }
-                        }
-                    }
-                }
+                self.judge_completion(ctx).await
             } else {
                 // Short response without tools or judge disabled — nudge
                 GuardDecision::Continue {
@@ -229,45 +256,7 @@ impl DefaultGuard {
                 threshold = self.config.judge_skip_threshold,
                 "text-only response short, calling judge"
             );
-            match call_completion_judge(
-                self.llm_client.as_ref(),
-                &ctx.user_input,
-                &ctx.model_response,
-                &ctx.all_user_inputs,
-                self.config.judge_fail_open,
-                self.config.judge_timeout_secs,
-                self.config.recent_user_count,
-                self.notice_handle().as_ref(),
-            )
-            .await
-            {
-                Ok(judge) => {
-                    if judge.done {
-                        GuardDecision::Complete
-                    } else {
-                        GuardDecision::Continue {
-                            nudge: Some(format!(
-                                "Your answer is incomplete: {}. Continue working on the task.",
-                                judge.reason
-                            )),
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Judge failed — behavior depends on judge_fail_open config
-                    tracing::warn!("completion judge failed: {}", e);
-                    if self.config.judge_fail_open {
-                        GuardDecision::Complete
-                    } else {
-                        GuardDecision::Continue {
-                            nudge: Some(
-                                "Cannot verify task completion, please continue working."
-                                    .to_string(),
-                            ),
-                        }
-                    }
-                }
-            }
+            self.judge_completion(ctx).await
         } else {
             GuardDecision::Complete
         }
@@ -278,6 +267,10 @@ impl DefaultGuard {
 impl ReactLoopGuard for DefaultGuard {
     fn set_notice(&self, handle: agent_base::NoticeHandle) {
         *self.notice.lock().unwrap() = Some(handle);
+    }
+
+    fn set_provider_source(&self, handle: ProviderHandle) {
+        *self.provider_source.lock().unwrap() = Some(handle);
     }
 
     async fn on_turn(&self, ctx: &GuardCtx) -> GuardDecision {

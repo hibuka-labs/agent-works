@@ -35,10 +35,17 @@ const CATALOG_ANCHOR: &str = "\n\n## Skills\n\n";
 const NEXT_HEADING_MARK: &str = "\n\n## ";
 
 /// Catalog bounds (skill-injection design D1): the directory stays bounded no
-/// matter how many skills are installed — 40 entries ≈ 600 tokens.
-pub const MAX_CATALOG_SKILLS: usize = 40;
-/// Description length cap in the catalog (chars, not bytes).
-const MAX_DESCRIPTION_CHARS: usize = 120;
+/// matter how many skills are installed — 128 entries ≈ 2K tokens. The cap is a
+/// pathological-case guard, not a token budget: at 80 installed skills (gstack
+/// suites) the old 40-entry cap silently hid the entire second half of the
+/// alphabet from model routing (2026-11-07 gap G1), so the bound sits above
+/// any realistic install and the "... N more" tail keeps covering real
+/// overflow.
+pub const MAX_CATALOG_SKILLS: usize = 128;
+/// Description length cap in the catalog (chars, not bytes). Descriptions are
+/// routing signal (suites state their trigger conditions there), so the cap
+/// only cuts pathological ones.
+const MAX_DESCRIPTION_CHARS: usize = 240;
 
 /// Render the skills catalog for the system prompt (skill-injection design D1).
 ///
@@ -50,7 +57,8 @@ const MAX_DESCRIPTION_CHARS: usize = 120;
 /// the system prompt) keep their entry but gain an `[active]` marker — the
 /// body is already in the prompt and must not be loaded again. Bounded: at
 /// most `MAX_CATALOG_SKILLS`
-/// entries with a "... N more" tail, descriptions cut to 120 chars. Returns
+/// entries with a "... N more" tail, descriptions cut to `MAX_DESCRIPTION_CHARS`
+/// chars. Returns
 /// `None` when nothing is model-visible so the caller can keep the prompt
 /// byte-identical to the no-skills baseline.
 pub fn render_catalog(resolver: &SkillResolver) -> Option<String> {
@@ -387,16 +395,22 @@ mod tests {
         assert!(catalog.contains("- internal: test skill\n"), "{catalog}");
     }
 
+    /// protects: G1a — the catalog lists exactly `MAX_CATALOG_SKILLS` entries
+    /// and folds the rest into the "... N more" tail (tail format unchanged).
+    /// fails_when: over-cap entries leak, the shown count exceeds the cap, or
+    /// the tail line's shape changes.
+    /// no_claim: descriptions (own cards) or which skills sort first.
     #[test]
     fn catalog_caps_at_max_entries_with_omitted_tail() {
         let tmp = tempfile::tempdir().unwrap();
-        for i in 0..45 {
+        let total = MAX_CATALOG_SKILLS + 5;
+        for i in 0..total {
             let name = format!("skill-{i:03}");
             make_skill_dir_with_desc(tmp.path(), &name, "d", "body", true);
         }
 
         let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
-        assert_eq!(resolver.len(), 45);
+        assert_eq!(resolver.len(), total);
         let catalog = render_catalog(&resolver).unwrap();
 
         let entries = catalog
@@ -411,13 +425,46 @@ mod tests {
             catalog.contains("- ... 5 more skills omitted\n"),
             "{catalog}"
         );
-        // Over-cap entries (the last 5 by name order) must not appear.
-        assert!(!catalog.contains("- skill-044:"), "{catalog}");
+        // The cap boundary is exact: last in-cap name shown, first over-cap gone.
+        let last_shown = format!("- skill-{:03}:", MAX_CATALOG_SKILLS - 1);
+        let first_omitted = format!("- skill-{MAX_CATALOG_SKILLS:03}:");
+        assert!(
+            catalog.contains(&last_shown),
+            "cap boundary lost: {catalog}"
+        );
+        assert!(!catalog.contains(&first_omitted), "{catalog}");
     }
 
+    /// protects: G1a — an 80-skill install (gstack suite size) shows every
+    /// entry with no omitted tail: the cap never hides the second half of the
+    /// alphabet from model routing.
+    /// fails_when: any of the 80 entries is missing or an omitted tail appears.
+    /// no_claim: behavior above the cap (the cap card).
+    #[test]
+    fn catalog_80_skills_all_visible_no_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..80 {
+            let name = format!("s{i:03}");
+            make_skill_dir_with_desc(tmp.path(), &name, "d", "body", true);
+        }
+
+        let resolver = SkillResolver::from_dirs(&[tmp.path().join("skills")]);
+        let catalog = render_catalog(&resolver).unwrap();
+
+        let entries = catalog.lines().filter(|l| l.starts_with("- s")).count();
+        assert_eq!(entries, 80, "every installed skill must show: {catalog}");
+        assert!(!catalog.contains("more skills omitted"), "{catalog}");
+    }
+
+    /// protects: G1a — descriptions over the cap are cut to exactly
+    /// `MAX_DESCRIPTION_CHARS` chars with a terminal ellipsis, and the full
+    /// description never appears in the catalog.
+    /// fails_when: the cut length drifts, the ellipsis is missing, or the full
+    /// text leaks.
+    /// no_claim: at-cap pass-through (the verbatim card) or line flattening.
     #[test]
     fn catalog_truncates_long_description() {
-        let long = "x".repeat(200);
+        let long = "x".repeat(MAX_DESCRIPTION_CHARS + 80);
         let tmp = tempfile::tempdir().unwrap();
         make_skill_dir_with_desc(tmp.path(), "long", &long, "body", true);
 
@@ -445,9 +492,13 @@ mod tests {
         );
     }
 
+    /// protects: G1a — a description exactly at the cap renders verbatim: no
+    /// spurious ellipsis, no shrink (symbolic in `MAX_DESCRIPTION_CHARS`).
+    /// fails_when: an at-cap description gains an ellipsis or loses chars.
+    /// no_claim: over-cap truncation (the truncation card).
     #[test]
     fn catalog_description_at_limit_untouched() {
-        // Exactly 120 chars: no truncation, no ellipsis.
+        // Exactly at the cap: no truncation, no ellipsis.
         let desc = "y".repeat(MAX_DESCRIPTION_CHARS);
         let tmp = tempfile::tempdir().unwrap();
         make_skill_dir_with_desc(tmp.path(), "exact", &desc, "body", true);
@@ -462,8 +513,8 @@ mod tests {
     fn catalog_truncation_is_char_not_byte_based() {
         // CJK description (3 bytes per char): cutting by bytes would panic or
         // produce mojibake; the contract is chars — the rendered result is
-        // exactly 120 chars and ends with an ellipsis.
-        let long = "好".repeat(200);
+        // exactly `MAX_DESCRIPTION_CHARS` chars and ends with an ellipsis.
+        let long = "好".repeat(MAX_DESCRIPTION_CHARS + 80);
         let tmp = tempfile::tempdir().unwrap();
         make_skill_dir_with_desc(tmp.path(), "cjk", &long, "body", true);
 

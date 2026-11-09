@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
 ### Added
 - **The multi-agent registry records how a child ended.**
   `AgentStatus` gains `Failed`, `Cancelled` and `Unknown` (parsed by name, so
@@ -28,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler (`macos_use_mach_ports(false)`), which also survives `fork()`.
   This is why `cargo test` could abort sporadically on macOS only — 17 crash
   reports, all with the same stack (`wasmtime::machports::handler_thread`).
+
+- **A lost code cell is recovered instead of refused.** When a cell's
+  result cannot be reconstructed, the runtime replays what it can from the
+  journal and says what is missing, rather than failing the turn outright.
+
+### Added
+- **The tool-output cap travels into child engines** — a sub-agent's tool
+  results are capped the same way the parent's are.
+- **Context rotation keeps a plan slot and two seed variants** so a rotated
+  window can resume with the plan still visible, and the trail after a
+  rotation carries no synthetic markers.
+
+### Fixed
+- **The completion judge checks completeness, not facts.** The judge used to
+  answer "your answer is incomplete" with a *fact check* of its own — and
+  since it was handed a model name snapshotted at boot, it could contradict
+  the live session (session 20261107_27dc727a: it claimed the model was
+  "mimo-v2.5-pro" while the session was serving "mimo-v2.6-pro"). The judge
+  now judges completeness only, quotes names exactly as they appear, and its
+  single ground-truth line is the model *serving this session* — resolved at
+  call time through the provider handle, never a boot-time snapshot.
 
 ## [0.11.1] - 2026-10-24
 

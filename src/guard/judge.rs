@@ -77,6 +77,56 @@ pub(crate) fn truncate_for_log(s: &str, max_chars: usize) -> &str {
     &s[..cut]
 }
 
+/// The judge's system prompt: a COMPLETENESS judge, not a fact-checker.
+///
+/// Incident 20261107_27dc727a: the old prompt asked whether the agent
+/// "sufficiently answered" with zero ground truth, so the judge fabricated
+/// one — a judge running as the boot model contradicted the agent's correct
+/// "mimo-v2.6-pro" with its own identity ("the configured model is
+/// MiniMax-M3.1-Flash") and misquoted the answer as "mimo-v2.5-pro". The
+/// injected "Your answer is incomplete" correction then dragged a trivial
+/// turn through two extra tool calls and three extra LLM turns. Measured on
+/// the incident case (36 calls, live models): this prompt scored 36/36
+/// (correct answer passes, dodging answer fails, wrong model name fails via
+/// the ground-truth line) where the old prompt false-positived 4/6.
+///
+/// `session_model` is the model serving the session, taken from the same
+/// live provider the judge runs on (`LlmProvider::info().model`). It is the
+/// ONLY fact this prompt sanctions, scoped to model-name claims; an empty
+/// name drops the line.
+///
+/// Wire contract: the first line must keep the phrase "completion judge" —
+/// the phimint test/PTY harnesses classify judge side-calls by it and give
+/// them canned answers, so rewording it silently desyncs their LLM scripts
+/// (20261107_27dc727a). Pinned by `judge_prompt_is_completeness_only_with_scoped_ground_truth`.
+pub(crate) fn judge_system_prompt(session_model: &str) -> String {
+    let mut prompt = String::from(
+        "You are a task-completion judge. You are given the user's messages and the agent's \
+         final response in an ongoing conversation. Your ONLY question: does the response \
+         address what the user asked?\n\
+         Rules:\n\
+         - Judge COMPLETENESS only. Do NOT fact-check the response: you have no source of \
+         truth beyond the ground truth line and the messages in this prompt.\n\
+         - Never state, assume, or introduce facts that are not written below (including \
+         anything about which model is configured or how the session is set up).\n\
+         - Do not paraphrase or \"correct\" values: quote names only exactly as they appear \
+         below.\n\
+         - Do not penalize a response as unverifiable, unreliable, or fabricated.\n\
+         - Earlier user messages may already have been answered earlier in the conversation: \
+         judge the response against the question(s) it addresses, and do not demand details \
+         the user did not ask for. A concise answer to the question asked is complete.\n",
+    );
+    if !session_model.is_empty() {
+        prompt.push_str(&format!(
+            "- Ground truth: the model serving this session is `{session_model}`. Use this \
+             ONLY to check a claim about which model is serving the session; a response with \
+             no such claim is consistent.\n"
+        ));
+    }
+    prompt.push_str("Reply with JSON: {\"done\": true/false, \"reason\": \"brief explanation\"}");
+    prompt
+}
+
 /// Call LLM judge to determine if the task is complete.
 ///
 /// Used when the model returns text-only after having called tools —
@@ -117,10 +167,7 @@ pub(crate) async fn call_completion_judge(
         }
     };
 
-    let system_prompt = "You are a task completion judge. \
-        Given the user's conversation history and the agent's response, \
-        determine if the agent has sufficiently answered the task. \
-        Reply with JSON: {\"done\": true/false, \"reason\": \"brief explanation\"}";
+    let system_prompt = judge_system_prompt(&client.info().model);
 
     // Build context from recent user messages
     let user_context = if all_user_inputs.is_empty() {
