@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-14
+
+### Changed
+- **Breaking (dependency):** `agent-base` requirement bumped from 0.13.0 to
+  0.14.0 and `phi-tools` from 0.8.1 to 0.9.0, keeping the framework on a
+  single version of each family crate alongside phi-agent 0.22.0. No
+  functional changes in agent-works itself.
+
+
+
 ## [0.13.0] - 2026-11-09
 
 ### Added
