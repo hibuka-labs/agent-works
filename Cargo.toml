@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT"
@@ -40,7 +40,7 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.13.0" }
+agent-base = { version = "0.14.0" }
 # Shared capability vocabulary (phi-cap): one set of types for every shape
 # that declares capabilities — plugins and capability packs alike.
 phi-cap = { version = "0.1.0", features = ["serde"] }
@@ -114,7 +114,7 @@ phi-ns = { version = "0.1.0" }
 phi-ns-browser = { version = "0.1.0" }
 phi-ns-desktop = { version = "0.1.0" }
 phi-ns-mobile = { version = "0.1.0" }
-phi-tools = { version = "0.8.1", features = ["browser"] }
+phi-tools = { version = "0.9.0", features = ["browser"] }
 tiktoken-rs = "0.12"
 
 # M2 acceptance through the agent Tool seam (runs with --features code-exec)
@@ -149,4 +149,3 @@ required-features = ["mcp"]
 [[example]]
 name = "multi_agent"
 required-features = ["multi_agent"]
-
