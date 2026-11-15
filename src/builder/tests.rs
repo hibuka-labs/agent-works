@@ -361,6 +361,7 @@ fn test_system_prompt_contains_guidance() {
 /// each other (`list_agents`: "use it to answer what is agent X doing" here,
 /// "NEVER call it to check progress or wait" in the product).
 /// seam=none; no_claim=that the product's own prompt is correct.
+#[cfg(feature = "multi_agent")]
 #[test]
 fn test_system_prompt_carries_no_usage_policy() {
     let prompt = build_multi_agent_system_prompt();
@@ -521,14 +522,13 @@ mod memory_tests {
 
         // All four tools registered.
         let names = runtime_tool_names(&runtime);
-        for expected in [
-            "memory_write",
-            "memory_read",
-            "memory_list",
-            "memory_delete",
-        ] {
+        for expected in ["memory_write", "memory_list", "memory_delete"] {
             assert!(names.contains(&expected.to_string()), "{names:?}");
         }
+        assert!(
+            !names.contains(&"memory_read".to_string()),
+            "reading must not be a tool — the index row names the file: {names:?}"
+        );
 
         // Prompt = base + memory section with the seeded index row.
         let prompt =

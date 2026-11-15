@@ -43,10 +43,23 @@ impl Tool for MemoryWriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create or update one persistent memory (a markdown file with YAML frontmatter) and \
-         automatically sync the MEMORY.md index. Writing to an existing `name` overwrites it in \
-         place — update instead of duplicating. The `description` is the one-line recall key \
-         shown in the index; make it specific enough to judge relevance at a glance."
+        "Create or update one persistent memory — a markdown file with YAML frontmatter — and \
+         sync its MEMORY.md index row. The `description` is the one-line recall key shown in \
+         the index: specific enough to judge relevance at a glance, or nobody will open it.\n\n\
+         Use this for a fact that should outlive this session: who the user is, a rule they gave \
+         you, where a project stands, a pointer to something external. Recall is selective by \
+         design — one fact per memory, named by what it is.\n\n\
+         Do NOT use it for this session's working state: that is the notes scratchpad, and a \
+         plan or a hand-off in the memory store is noise the next session reads past. Do NOT \
+         record what the codebase already says — code structure, git history and config files \
+         are their own record, and a memory that duplicates them goes stale the moment they \
+         change.\n\n\
+         Writing an existing `name` overwrites it in place — update, never duplicate. Read what \
+         is there first if you have not: an overwrite takes the previous body with it, and no \
+         tool below this one will say so.\n\n\
+         The write also owns the index row, so the index cannot drift from the files. Deleting \
+         is `memory_delete` for the same reason: a file removed without its row leaves a name \
+         pointing at nothing."
     }
 
     fn schema(&self) -> Value {

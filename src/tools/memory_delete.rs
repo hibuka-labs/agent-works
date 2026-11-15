@@ -26,9 +26,19 @@ impl Tool for MemoryDeleteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delete one memory: removes its file and its row from the MEMORY.md index. Use to clean \
-         up memories that no longer serve the user (e.g. stale project status); deletion is \
-         permanent, so confirm intent when the user is vague."
+        "Delete one memory: remove its file and its MEMORY.md index row together.\n\n\
+         Use it for something that is no longer true and cannot be salvaged — a project status \
+         that has moved on, a rule the user has withdrawn, a memory of your own that turns out to \
+         be wrong. The pair is the point: a file deleted without its row leaves a name pointing \
+         at nothing, and a row deleted without its file leaves the memory unreadable and \
+         unlisted.\n\n\
+         Do NOT delete because the memory is out of date but still true — `memory_write` updates \
+         it, and a deleted history is not a corrected one. Do NOT delete on a guess: this is \
+         permanent and there is no undo. When the user is vague about which memory, list first \
+         and say which you mean to remove.\n\n\
+         Deleting the right thing at the wrong time is still a loss: a memory that looks stale \
+         in one session may be exactly what a later one needs. Remove what is false, not what is \
+         merely old."
     }
 
     fn schema(&self) -> Value {

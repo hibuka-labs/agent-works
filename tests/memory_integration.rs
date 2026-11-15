@@ -63,12 +63,15 @@ impl LlmProvider for StubProvider {
     }
 }
 
-/// Fixture: four memory tools bound to a fresh temp memory directory.
+/// Fixture: the three memory tools bound to a fresh temp memory directory.
+///
+/// Reading is deliberately absent — the contract is that the index row names
+/// the file and `read_file` opens it, so these tests read it from disk.
 struct Fixture {
     _dir: tempfile::TempDir,
+    memory_dir: std::path::PathBuf,
     store: Arc<MemoryStore>,
     write: Arc<dyn Tool>,
-    read: Arc<dyn Tool>,
     list: Arc<dyn Tool>,
     delete: Arc<dyn Tool>,
 }
@@ -76,28 +79,34 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(MemoryStore::new(dir.path().join("memory"), "MEMORY.md"));
+        let memory_dir = dir.path().join("memory");
+        let store = Arc::new(MemoryStore::new(memory_dir.clone(), "MEMORY.md"));
         let mut tools = agent_works::create_memory_tools(Arc::clone(&store));
         let delete = tools.pop().unwrap();
         let list = tools.pop().unwrap();
-        let read = tools.pop().unwrap();
         let write = tools.pop().unwrap();
         Self {
             _dir: dir,
+            memory_dir,
             store,
             write,
-            read,
             list,
             delete,
         }
     }
 
     fn root(&self) -> std::path::PathBuf {
-        self._dir.path().join("memory")
+        self.memory_dir.clone()
     }
 
     fn index(&self) -> String {
         std::fs::read_to_string(self.root().join("MEMORY.md")).unwrap_or_default()
+    }
+
+    /// Read a memory the way the contract says the model does: the index row
+    /// names the file, and the file is plain markdown on disk.
+    fn read_memory(&self, name: &str) -> String {
+        std::fs::read_to_string(self.root().join(format!("{name}.md"))).unwrap_or_default()
     }
 }
 
@@ -153,8 +162,8 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
     assert!(index.contains("(cargo-commit-discipline.md)"), "{index}");
     assert!(index.contains("(working-principles.md)"), "{index}");
 
-    // READ: raw file content round-trips.
-    let raw = call(fx.read.as_ref(), json!({"name": "cargo-commit-discipline"})).await;
+    // READ: the file the index row names round-trips as plain markdown.
+    let raw = fx.read_memory("cargo-commit-discipline");
     assert!(raw.starts_with("---\n"), "{raw}");
     assert!(raw.contains("name: cargo-commit-discipline"));
     assert!(raw.contains("type: feedback"));
@@ -200,16 +209,18 @@ async fn full_write_read_list_delete_flow_keeps_index_consistent() {
     assert!(!index.contains("cargo-commit-discipline"), "{index}");
     assert!(index.contains("working-principles"), "{index}");
 
-    // Reading the deleted memory now fails.
-    let err = fx
-        .read
-        .call(
-            &json!({"name": "cargo-commit-discipline"}),
-            &ToolContext::for_test(),
-        )
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("not found"), "{err}");
+    // The deleted memory is gone from disk too — with no read tool, "the file
+    // does not exist" is what the model sees when it follows an index row that
+    // is no longer there.
+    assert!(
+        !fx.root().join("cargo-commit-discipline.md").exists(),
+        "delete must remove the file as well as the index row"
+    );
+    assert_eq!(
+        fx.read_memory("cargo-commit-discipline"),
+        "",
+        "reading a deleted memory yields nothing"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,7 +248,7 @@ async fn first_use_auto_creates_dir_and_index() {
     assert!(fx.root().join("MEMORY.md").exists());
 
     // Subsequent read/list work normally.
-    let raw = call(fx.read.as_ref(), json!({"name": "first-memory"})).await;
+    let raw = fx.read_memory("first-memory");
     assert!(raw.contains("hello"), "{raw}");
     let listed = call(fx.list.as_ref(), json!({})).await;
     assert!(listed.contains("初体验"), "{listed}");
@@ -385,14 +396,13 @@ async fn builder_memory_config_end_to_end() {
         let guard = registry.blocking_read();
         guard.metadatas().into_iter().map(|m| m.name).collect()
     });
-    for expected in [
-        "memory_write",
-        "memory_read",
-        "memory_list",
-        "memory_delete",
-    ] {
+    for expected in ["memory_write", "memory_list", "memory_delete"] {
         assert!(names.contains(&expected.to_string()), "{names:?}");
     }
+    assert!(
+        !names.contains(&"memory_read".to_string()),
+        "reading must not be a tool: {names:?}"
+    );
 
     let prompt = tokio::task::block_in_place(|| runtime.config().system_prompt.clone().unwrap());
     assert!(prompt.starts_with("base"), "{prompt}");

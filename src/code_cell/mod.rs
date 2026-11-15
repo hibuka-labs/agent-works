@@ -102,7 +102,14 @@ One call is one step: its cells run in order against one shared session whose \
 state — variables, imports, functions, working directory — survives across \
 cells AND across calls, so build on what earlier steps established instead of \
 re-deriving it. Prefer one cell that does the whole mechanical job over many \
-separate tool calls. Namespace calls with side effects are policy-gated and \
+separate tool calls. \
+This is for work that is *chained*: several steps where each depends on the \
+last. A single file change is not that — it is one edit-file call, and going \
+through a session to change one line adds a process, a state, and a second \
+place for the change to be wrong. Reading a few named files is a batched read; \
+listing or mapping a repository is a listing or a map. Reach for a cell when \
+the steps compound, not when one tool would do. \
+Namespace calls with side effects are policy-gated and \
 journaled; a held call halts the step. Results return only when the whole call \
 ends: output, error, the effect tally and the progress trail are one snapshot \
 at the end — one call is one observation, so split long staged work across \

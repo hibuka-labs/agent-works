@@ -63,7 +63,7 @@ The snapshot below was taken at startup and may be stale — call `memory_list` 
 
 ### How to recall
 
-Scan the index above by `description` and call `memory_read(name)` only for the relevant entries. Recall is selective by design — do not read everything."#;
+Scan the index above by `description` and open only the relevant ones — the index row names the file, and it lives beside `MEMORY.md` in the memory directory. Recall is selective by design — do not read everything."#;
 
 impl MemoryConfig {
     /// Claude Code compatible configuration for `workspace`.

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-16
+
+### Added
+- **A product can defer a tool until the model asks for it.**
+  `AgentBuilder::with_tool_activation` hands the session's activation set
+  to the engine, and `defer_tool` re-wraps a registered tool so it is named
+  in the roster but costs the request nothing until it is opened.
+
+- **The completion judge sees the work, and its verdict is logged.** The
+  judge is handed what the run actually did, so its verdict is about this
+  run and not a guess — and the verdict is recorded rather than silently
+  consumed.
+
+### Changed
+- **Reading a memory is not a tool.** The `memory_read` tool is gone: the
+  index row already names the file, and `read_file` opens it. The memory
+  tools are now `memory_write`, `memory_list` and `memory_delete` — one
+  way to write, one to find, one to forget. `memory_list` is trimmed to
+  the output budget and filtered, so a large store does not push the
+  index out of the context window.
+
+- **The framework states the contract, not the product's policy.** Prompt
+  wording moved so that shared framework text describes the framework's
+  guarantees and leaves the product's own choices to the product.
+
+### Changed (dependency)
+- **Breaking (dependency):** `agent-base` requirement bumped from 0.14.0
+  to 0.15.0 and `phi-tools` from 0.9.0 to 0.10.0, keeping the framework on
+  a single version of each family crate alongside phi-agent 0.23.0.
+
 ## [0.14.0] - 2026-11-14
 
 ### Changed

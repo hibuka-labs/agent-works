@@ -35,7 +35,13 @@ impl Tool for MemoryListTool {
          remembered. Pass `query` to narrow to the rows mentioning it — a plain \
          case-insensitive substring match on the row. The listing is trimmed to the tool \
          output budget; when rows are dropped the tail says how many, and narrowing with \
-         `query` (or calling `memory_read` on a name) is how you see the rest."
+         `query` is how you see the rest.\n\n\
+         Each row names its file (`- [name](name.md) — description`), and the file sits in \
+         the memory directory: open it with `read_file`, not another tool.\n\n\
+         Do NOT read this as the memories. It is the index: a row tells you a memory exists \
+         and why it might matter, never what it says. Open only the ones the task needs — \
+         recall is selective by design, and pulling every memory is how a cheap question \
+         fills the context with things that were never asked."
     }
 
     fn schema(&self) -> Value {
@@ -108,7 +114,7 @@ impl Tool for MemoryListTool {
         }
         let tail = format!(
             "(… {} of {} rows omitted to fit the output budget — narrow with a `query`, or \
-             call memory_read on a name.)",
+             open a named file with `read_file`.)",
             omitted,
             rows.len()
         );

@@ -274,6 +274,27 @@ impl AgentBuilder {
         self
     }
 
+    /// Share the session's tool-activation set with the engine. A product that
+    /// registers `ActivateTool` must hand that tool this same set, or openings
+    /// land somewhere the engine never reads.
+    pub fn with_tool_activation(self, activation: agent_base::ToolActivation) -> Self {
+        Self {
+            inner: self.inner.with_tool_activation(activation),
+            ..self
+        }
+    }
+
+    /// Re-wrap a registered tool so it is named in the roster but costs the
+    /// request nothing until the model opens it. Returns the tool's rendered
+    /// definition — what `ActivateTool` serves on open — or `None` when the
+    /// name is not registered.
+    ///
+    /// Deliberately leaves `business_tools` alone: a child agent is not subject
+    /// to its parent's roster, so it keeps the tool as registered.
+    pub fn defer_tool(&mut self, name: &str) -> Option<serde_json::Value> {
+        self.inner.defer_tool(name)
+    }
+
     pub fn approval_handler(self, handler: Arc<dyn agent_base::ApprovalHandler>) -> Self {
         Self {
             inner: self.inner.approval_handler(handler),
