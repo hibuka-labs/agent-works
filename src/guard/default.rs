@@ -70,6 +70,7 @@ impl DefaultGuard {
             &ctx.user_input,
             &ctx.model_response,
             &ctx.all_user_inputs,
+            &ctx.run_actions,
             self.config.judge_fail_open,
             self.config.judge_timeout_secs,
             self.config.recent_user_count,
@@ -78,6 +79,21 @@ impl DefaultGuard {
         .await
         {
             Ok(judge) => {
+                // Observability only, and it was missing: the judge ran silent,
+                // so a run could not show whether it fired or on what. Log the
+                // verdict and what it had to judge with — the response length
+                // is the old signal (`judge_skip_threshold`), the tool trace is
+                // the new one, and watching the two together is how this gets
+                // tuned instead of guessed at.
+                tracing::info!(
+                    session_id = ctx.session_id.id,
+                    turn = ctx.turn_count,
+                    done = judge.done,
+                    response_chars = ctx.model_response.len(),
+                    run_tool_calls = ctx.run_actions.len(),
+                    reason = %judge.reason,
+                    "completion judge verdict"
+                );
                 if judge.done {
                     GuardDecision::Complete
                 } else {

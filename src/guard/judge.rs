@@ -136,11 +136,38 @@ pub(crate) fn judge_system_prompt(session_model: &str) -> String {
 /// only) before the configured fail-open/fail-closed behavior applies —
 /// a model formatting quirk must not silently end a run (issue #31).
 #[allow(clippy::too_many_arguments)]
+/// The judge's user message. Kept separate from the call so what the judge is
+/// handed can be asserted on — it used to get the response and nothing else,
+/// and a report written after real work looked exactly like a shrug.
+pub(crate) fn judge_user_prompt(
+    user_context: &str,
+    model_response: &str,
+    run_actions: &[String],
+) -> String {
+    let work = if run_actions.is_empty() {
+        "no tool calls yet in this run".to_string()
+    } else {
+        run_actions.join(", ")
+    };
+    format!(
+        "【User Messages】\n{}\n\n【Tool Calls So Far】\n{}\n\n【Agent Response】\n{}",
+        user_context, work, model_response
+    )
+}
+
+// Nine positional arguments is past the line and `clippy::too_many_arguments`
+// is right to complain: swapping two adjacent `&str`s compiles and is wrong at
+// runtime. The fix is a `JudgeSubject { user_input, model_response,
+// all_user_inputs, run_actions }` struct, which also makes the call sites
+// self-documenting. Held for the same release as the judge's other work so the
+// signature moves once, not twice — same allowance `build_guard_ctx` carries.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_completion_judge(
     client: Option<&Arc<dyn LlmProvider>>,
     user_input: &str,
     model_response: &str,
     all_user_inputs: &[String],
+    run_actions: &[String],
     judge_fail_open: bool,
     judge_timeout_secs: u64,
     recent_user_count: usize,
@@ -190,10 +217,7 @@ pub(crate) async fn call_completion_judge(
         }
     };
 
-    let user_prompt = format!(
-        "【User Messages】\n{}\n\n【Agent Response】\n{}",
-        user_context, model_response
-    );
+    let user_prompt = judge_user_prompt(&user_context, model_response, run_actions);
 
     let messages = vec![
         ChatMessage::system(system_prompt.to_string()),

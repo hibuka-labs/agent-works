@@ -1,3 +1,32 @@
+// ── judge prompt assembly ──────────────────────────────────────────────
+
+use super::super::judge::judge_user_prompt;
+
+/// Value: protects=the judge can see the work, not just the words, so a
+/// report after real work is not called incomplete; fails_when=the tool
+/// trace is dropped from the prompt and the judge sees only the response.
+/// why_new=no test covers what the judge is actually handed.
+/// seam=none; no_claim=judge verdicts from the trace alone.
+#[test]
+fn the_judge_prompt_carries_the_run_tool_trace() {
+    let p = judge_user_prompt(
+        "look at this project",
+        "Here is the review.",
+        &["read_file".into(), "execute_command".into()],
+    );
+    assert!(
+        p.contains("read_file") && p.contains("execute_command"),
+        "{p}"
+    );
+    assert!(p.contains("Agent Response"), "{p}");
+}
+
+#[test]
+fn a_run_with_no_tools_says_so_rather_than_leaving_a_blank() {
+    let p = judge_user_prompt("hi", "Hello.", &[]);
+    assert!(p.contains("no tool calls"), "{p}");
+}
+
 // ── call_completion_judge direct tests ──
 
 use super::super::judge::call_completion_judge;
@@ -15,6 +44,7 @@ async fn test_judge_no_client_fail_open() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         true, // fail_open
         10,
         5,
@@ -34,6 +64,7 @@ async fn test_judge_no_client_fail_closed() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         false, // fail_closed
         10,
         5,
@@ -56,6 +87,7 @@ async fn test_judge_with_valid_response() {
         "do something",
         "done",
         &["do something".to_string()],
+        &[],
         false,
         10,
         5,
@@ -81,6 +113,7 @@ async fn test_judge_empty_user_inputs() {
         "single input",
         "response",
         &[], // empty all_user_inputs
+        &[],
         false,
         10,
         5,
@@ -105,6 +138,7 @@ async fn test_judge_single_user_input() {
         "only message",
         "response",
         &["only message".to_string()],
+        &[],
         false,
         10,
         5,
@@ -125,6 +159,7 @@ async fn test_judge_timeout_fail_open() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         true, // fail_open
         1,    // 1 second timeout
         5,
@@ -145,6 +180,7 @@ async fn test_judge_timeout_fail_closed() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         false, // fail_closed
         1,
         5,
@@ -165,6 +201,7 @@ async fn test_judge_error_fail_open() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         true,
         10,
         5,
@@ -191,6 +228,7 @@ async fn test_judge_error_fail_closed() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         false,
         10,
         5,
@@ -220,6 +258,7 @@ async fn test_judge_recent_user_count_truncation() {
             "msg4".to_string(),
             "msg5".to_string(),
         ],
+        &[],
         false,
         10,
         2, // recent_user_count
@@ -243,6 +282,7 @@ async fn test_judge_fenced_json_parses() {
         "do something",
         "done",
         &["do something".to_string()],
+        &[],
         false,
         10,
         5,
@@ -265,6 +305,7 @@ async fn test_judge_prose_wrapped_json_parses() {
         "do something",
         "response",
         &["do something".to_string()],
+        &[],
         false,
         10,
         5,
@@ -289,6 +330,7 @@ async fn test_judge_json_with_braces_inside_string_parses() {
         "do something",
         "response",
         &["do something".to_string()],
+        &[],
         false,
         10,
         5,
@@ -315,6 +357,7 @@ async fn test_judge_garbage_retries_once_then_fails_open() {
         "do something",
         "response",
         &["do something".to_string()],
+        &[],
         true, // fail_open
         10,
         5,
@@ -348,6 +391,7 @@ async fn test_judge_garbage_then_valid_retry_succeeds() {
         "do something",
         "response",
         &["do something".to_string()],
+        &[],
         false,
         10,
         5,
@@ -374,6 +418,7 @@ async fn test_judge_timeout_does_not_retry() {
         "input",
         "response",
         &["input".to_string()],
+        &[],
         false, // fail_closed: timeout surfaces as Err
         1,     // 1s timeout
         5,
@@ -398,6 +443,7 @@ async fn test_judge_garbage_fail_closed_retries_then_errs() {
         "do something",
         "response",
         &["do something".to_string()],
+        &[],
         false, // fail_closed
         10,
         5,
@@ -547,6 +593,7 @@ async fn judge_request_ground_truth_is_the_clients_model() {
         "现在呢",
         "现在是 mimo-v2.6-pro。",
         &["现在呢".to_string()],
+        &[],
         true,
         10,
         5,
