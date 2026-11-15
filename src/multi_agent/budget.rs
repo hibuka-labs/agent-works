@@ -285,6 +285,7 @@ mod tests {
             completion_tokens: Some(5),
             total_tokens: Some(20),
             reasoning_tokens: None,
+            cache_read_tokens: None,
         };
         assert_eq!(usage_total(&u), 20);
         let u2 = agent_base::UsageInfo {
@@ -297,6 +298,7 @@ mod tests {
             completion_tokens: None,
             total_tokens: None,
             reasoning_tokens: None,
+            cache_read_tokens: None,
         };
         assert_eq!(usage_total(&none), 0);
     }

@@ -80,36 +80,33 @@ pub fn setup_multi_agent(
 }
 
 /// Build the multi-agent system prompt guidance for the main agent.
+///
+/// This is the **contract**, not the policy: what the mechanism does. Which
+/// tasks deserve a sub-agent, how to partition work between them, and what a
+/// tool like `list_agents` is for are product decisions — the shell that owns
+/// the workflow says those. Saying them here once handed the model two
+/// opposite instructions at a time (this text told it to use `list_agents` to
+/// ask "what is agent X doing", the product forbade the call outright).
 #[cfg(feature = "multi_agent")]
 pub fn build_multi_agent_system_prompt() -> String {
     r#"## Multi-Agent Capabilities
 
-You can spawn sub-agents to work on tasks concurrently. Each sub-agent is an independent assistant with its own tools (repo_map, read_file, list_files, execute_command, etc.) and can reason through problems autonomously.
+You can spawn sub-agents to work on tasks concurrently. Each sub-agent is an independent assistant with its own tools and can reason through problems autonomously.
 
 ### Tools
 
 - `spawn_agent`: Create a sub-agent. Use the `task` field to describe what you want done — the sub-agent will figure out the steps. Example: `spawn_agent({task_name: "analyze-codex", task: "analyze the codex project structure and output a structured report"})`.
 - `send_message`: Send follow-up context or tasks to a sub-agent (`trigger: true` starts execution).
-- `list_agents`: List active sub-agents with their assigned task and status — use it to answer "what is agent X doing?".
+- `list_agents`: List active sub-agents with their assigned task and status.
 - `close_agent`: Close a sub-agent when done.
 
 ### How Results Reach You
 
-Sub-agent results are **pushed into your context automatically** when they complete — there is no wait tool. To wait, simply end your turn: you will be woken with the result as a new message. Keep working on other things instead of polling.
+Sub-agent results are **pushed into your context automatically** when they complete — there is no wait tool. To wait, simply end your turn: you will be woken with the result as a new message.
 
 ### How Sub-Agents Work
 
-Sub-agents are capable — they can explore codebases, read files, run commands, and produce structured analysis. You don't need to plan their steps or specify which tools to use. Just describe the goal in `task`, and the sub-agent handles the rest.
-
-### When to Spawn
-
-- Parallel tasks: analyze multiple codebases, compare implementations, etc.
-- Tasks you want to delegate while you continue other work
-
-### When NOT to Spawn
-
-- Simple lookups (just use read_file or repo_map directly)
-- Tasks that need your current conversation context"#
+Sub-agents are capable — they can explore codebases, read files, run commands, and produce structured analysis. Just describe the goal in `task`."#
         .to_string()
 }
 

@@ -37,6 +37,7 @@ impl agent_base::llm_trait::LlmProvider for UsageStreamingStub {
             futures_util::stream::iter(vec![
                 Ok(agent_base::StreamChunk::Text("child ok".to_string())),
                 Ok(agent_base::StreamChunk::Usage(agent_base::UsageInfo {
+                    cache_read_tokens: None,
                     prompt_tokens: Some(60),
                     completion_tokens: Some(20),
                     total_tokens: Some(80),

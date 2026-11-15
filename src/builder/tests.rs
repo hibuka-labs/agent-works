@@ -347,9 +347,37 @@ fn test_system_prompt_contains_tool_names() {
 #[test]
 fn test_system_prompt_contains_guidance() {
     let prompt = build_multi_agent_system_prompt();
-    assert!(prompt.contains("When to Spawn"));
-    assert!(prompt.contains("When NOT to Spawn"));
     assert!(prompt.contains("How Results Reach You"));
+    // The contract, not the policy: what the mechanism does. How to use it is
+    // the product's to say.
+    assert!(prompt.contains("pushed into your context automatically"));
+    assert!(prompt.contains("there is no wait tool"));
+}
+
+/// Value: protects=the framework states the contract and leaves policy to the
+/// product; fails_when=it advises a use the product forbids and the model is
+/// handed two opposite instructions at once.
+/// why_new=no test drew this boundary — and the two prompts did contradict
+/// each other (`list_agents`: "use it to answer what is agent X doing" here,
+/// "NEVER call it to check progress or wait" in the product).
+/// seam=none; no_claim=that the product's own prompt is correct.
+#[test]
+fn test_system_prompt_carries_no_usage_policy() {
+    let prompt = build_multi_agent_system_prompt();
+    // The product forbids `list_agents` for progress and waiting.
+    assert!(
+        !prompt.contains("what is agent X doing"),
+        "the framework must not advise a use the product forbids: {prompt}"
+    );
+    // The product teaches `tools: "write"` and the presets; saying "you don't
+    // need to specify which tools to use" is the opposite instruction.
+    assert!(
+        !prompt.contains("which tools to use"),
+        "the framework must not pre-empt the product's tool selection: {prompt}"
+    );
+    // When to delegate is a business call.
+    assert!(!prompt.contains("When to Spawn"), "{prompt}");
+    assert!(!prompt.contains("When NOT to Spawn"), "{prompt}");
 }
 
 // ── without_multi_agent ──

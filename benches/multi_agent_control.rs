@@ -51,6 +51,7 @@ fn bench_control_plane(c: &mut Criterion) {
             completion_tokens: Some(340),
             total_tokens: None,
             reasoning_tokens: None,
+            cache_read_tokens: None,
         };
         b.iter(|| black_box(usage_total(&u)));
     });
