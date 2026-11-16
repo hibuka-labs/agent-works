@@ -45,7 +45,11 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Load a skill's full instruction body by name. Use this when the user's request matches an available skill (e.g., 'review code' → 'review', 'deploy' → 'ship', 'investigate bug' → 'investigate'). The skill body contains detailed instructions for the task. Returns the skill body, or an error with available skill names if not found."
+        "Invoke a skill.\n\n\
+         A skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills appear in a listing from the system with one-line descriptions. When the task at hand is one a listed skill covers, call this tool first — the skill's instructions load into the turn for you to follow in place of your default approach.\n\n\
+         - `skill`: exact name from the listing, no leading slash.\n\
+         - `args`: optional arguments to pass through.\n\n\
+         Only names from the listing (or that the user typed explicitly) are valid. Built-in CLI commands (`/help`, `/clear`, ...) are not skills. If a skill's instructions are already present this turn, follow them directly rather than calling again."
     }
 
     fn schema(&self) -> Value {

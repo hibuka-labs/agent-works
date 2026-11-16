@@ -25,6 +25,7 @@ pub use memory_write::MemoryWriteTool;
 /// Fixed, LLM-facing description of the memory tools. Substituted into
 /// the `{tools_description}` placeholder of the memory prompt template.
 pub const MEMORY_TOOLS_DESCRIPTION: &str = "\
+The `memory_*` tools are one store:
 - `memory_write(name, description, type, body)` — create or update one memory and sync the index.
 - `memory_list()` — return the current index (refreshes the stale startup snapshot).
 - `memory_delete(name)` — delete a memory and remove its index line.
