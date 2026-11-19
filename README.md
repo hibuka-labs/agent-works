@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/agent-works.svg)](https://crates.io/crates/agent-works)
 [![Documentation](https://docs.rs/agent-works/badge.svg)](https://docs.rs/agent-works)
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![codecov](https://codecov.io/gh/hibuka-labs/agent-works/branch/master/graph/badge.svg)](https://codecov.io/gh/hibuka-labs/agent-works)
 
 **Batteries-included Agent toolbox built on [agent-base](https://github.com/hibuka-labs/agent-base).**
@@ -344,4 +344,4 @@ src/
 
 ## License
 
-MIT
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
