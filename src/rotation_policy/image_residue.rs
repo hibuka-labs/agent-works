@@ -10,7 +10,7 @@
 //! The `path="..."` fields come from the `<image name=N path="...">` labels
 //! the paste pipeline writes next to the picture (phi-agent-tui
 //! `run::image_label_lines`); pre-label transcripts degrade to an honest
-//! "<path not recorded>" stub instead of guessing.
+//! `<path not recorded>` stub instead of guessing.
 
 use agent_base::ChatMessage;
 
