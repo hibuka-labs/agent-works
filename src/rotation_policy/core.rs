@@ -279,7 +279,7 @@ impl TokenBudgetCore {
     }
 
     /// The fixed window skeleton: system prompt + window info + hint +
-    /// user trail + guidance + seed.
+    /// user trail + image residue + guidance + seed.
     fn assemble_window(
         &self,
         old_messages: &[ChatMessage],
@@ -296,6 +296,14 @@ impl TokenBudgetCore {
             messages.push(ChatMessage::system(text));
         }
         messages.extend(self.collect_user_trail(old_messages));
+        // Pictures in the outgoing window leave words, not pixels: one
+        // residue line per image naming its capture path and the recovery
+        // verb (see `image_residue`). Mid-list system messages are the
+        // skeleton's established shape (the hint and guidance both land so).
+        let residue = super::image_residue::image_residue_lines(old_messages);
+        if !residue.is_empty() {
+            messages.push(ChatMessage::system(residue.join("\n")));
+        }
         messages.push(ChatMessage::system(self.config.guidance_message.clone()));
         // Seed variant matches the hint reality: with a handoff the content
         // is already in the slot above (no file probe); without one the model

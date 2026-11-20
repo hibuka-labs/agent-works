@@ -44,6 +44,7 @@
 
 mod config;
 mod core;
+pub mod image_residue;
 
 pub use config::{
     DEFAULT_SEED_MESSAGE, DEFAULT_SEED_MESSAGE_NO_HANDOFF, HintSlot, LEGACY_DEFAULT_SEED_MESSAGE,
@@ -51,3 +52,4 @@ pub use config::{
     build_reminder_message, token_budget_base_overhead,
 };
 pub use core::{TokenBudgetAction, TokenBudgetCore};
+pub use image_residue::image_residue_lines;
