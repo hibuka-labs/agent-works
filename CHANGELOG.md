@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-20
+
+### Added
+- **A structurally corrupt tool-call batch spends a silent retry.** The
+  policy half of the turn-as-transaction seam: the kernel detects a corrupt
+  batch and can discard it, the guard decides whether that is worth a retry.
+  A dirty, silent round gets one silent retry per round (the budget travels
+  with the retry itself); visible text blocks the discard — the user has
+  already seen it — and thinking is tolerated unless `thinking_is_visible`
+  says otherwise. `max_silent_retries: 0` turns the gate off.
+
+### Changed
+- **A rotated-out picture leaves a residue line, not pixels.** At a window
+  reset the outgoing window is archived verbatim (pictures included); the
+  fresh window gets one text line per picture naming its capture path and
+  the recovery verb (`read_image`). Pure text, no model call — the reset
+  point sits on the turn's critical path.
+
+- **Tool descriptions say when *not* to reach for them.** Each description
+  gains the missing half — when not to use this tool, and which neighbour
+  does the job — because four near-identical CRUD verbs with no such
+  signpost make the model pick by guesswork. `MEMORY_TOOLS_DESCRIPTION` now
+  names the store as `memory_*`, so a prompt can point at the group.
+
+- **Breaking (dependency):** `agent-base` requirement bumped from 0.15.0 to
+  0.16.0, alongside the turn-as-transaction seam.
+
+### License
+- **Dual-licensed as MIT OR Apache-2.0.**
+
 ## [0.15.0] - 2026-11-16
 
 ### Added
