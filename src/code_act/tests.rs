@@ -46,6 +46,7 @@ async fn stage() -> CodeActExecutor<PythonWorker> {
 fn turn(text: &str) -> LlmTurnResult {
     LlmTurnResult {
         full_text: text.into(),
+        integrity: Default::default(),
         reasoning_text: String::new(),
         is_tool_call: false,
         tool_calls: vec![],

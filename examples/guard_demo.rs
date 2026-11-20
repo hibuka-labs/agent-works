@@ -208,6 +208,10 @@ fn make_test_ctx(
     run_has_actions: bool,
 ) -> GuardCtx {
     GuardCtx {
+        integrity: Default::default(),
+        has_visible_text: false,
+        has_thinking: false,
+        silent_retries_in_round: 0,
         session_id: agent_base::SessionId::new(1),
         turn_count: 1,
         user_input: "test input".into(),

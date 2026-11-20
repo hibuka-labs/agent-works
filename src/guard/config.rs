@@ -52,6 +52,17 @@ pub struct DefaultGuardConfig {
     /// Number of recent user messages to include in the judge prompt.
     /// Helps the judge understand context like "继续" after a multi-turn discussion.
     pub recent_user_count: usize,
+
+    // ─── stream-integrity retry (turn-as-transaction) ─────────
+    /// Silent retries per round for structurally corrupt tool-call batches
+    /// (wire truncation / misplaced args). A retry discards the response
+    /// whole — nothing committed, nothing executed — and re-asks the LLM
+    /// from the same state. 0 disables the gate entirely.
+    pub max_silent_retries: u32,
+    /// Treat thinking content as visible output (blocking silent discard).
+    /// Default false: a thought glimpsed in the thoughts panel is tolerable;
+    /// visible TEXT is not.
+    pub thinking_is_visible: bool,
 }
 
 impl Default for DefaultGuardConfig {
@@ -89,6 +100,10 @@ impl Default for DefaultGuardConfig {
                 you may need to continue."
                 .to_string(),
             recent_user_count: 5,
+
+            // stream-integrity retry (turn-as-transaction)
+            max_silent_retries: 1,
+            thinking_is_visible: false,
         }
     }
 }

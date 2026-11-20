@@ -43,6 +43,10 @@ fn make_ctx(
         thinking_disabled: false,
         original_thinking_enabled: true,
         remaining_turns: 50,
+        integrity: Default::default(),
+        has_visible_text: false,
+        has_thinking: false,
+        silent_retries_in_round: 0,
     }
 }
 
@@ -76,6 +80,10 @@ fn make_ctx_with_text(
         thinking_disabled: false,
         original_thinking_enabled: true,
         remaining_turns: 50,
+        integrity: Default::default(),
+        has_visible_text: false,
+        has_thinking: false,
+        silent_retries_in_round: 0,
     }
 }
 
@@ -293,6 +301,7 @@ impl LlmProvider for MockErrorClient {
 
 mod boundaries;
 mod decisions;
+mod integrity_retry;
 mod judge;
 mod judge_function_tests;
 mod judge_parse;

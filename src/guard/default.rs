@@ -311,6 +311,22 @@ impl ReactLoopGuard for DefaultGuard {
     }
 
     async fn on_tool_call(&self, ctx: &GuardCtx) -> GuardDecision {
+        // Turn-as-transaction policy (judgment; the kernel executes): a
+        // structurally corrupt tool batch on a silent round is discarded
+        // whole and the LLM re-asked from the same state. Visible text
+        // blocks discard (the user has already seen it); thinking is
+        // tolerated unless `thinking_is_visible`. Budget is per round;
+        // `max_silent_retries: 0` disables the gate. Checked BEFORE
+        // RestoreThinking — discarding a corrupt batch beats executing it.
+        if !ctx.integrity.is_clean()
+            && !ctx.has_visible_text
+            && !(self.config.thinking_is_visible && ctx.has_thinking)
+            && self.config.max_silent_retries > 0
+            && ctx.silent_retries_in_round < self.config.max_silent_retries
+        {
+            return GuardDecision::RetryTurn;
+        }
+
         // Restore thinking when:
         // 1. Thinking is currently disabled (by guard)
         // 2. Original thinking was enabled (user wanted thinking)
