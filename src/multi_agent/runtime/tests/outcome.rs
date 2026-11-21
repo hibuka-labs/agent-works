@@ -114,6 +114,33 @@ fn test_build_child_result_failed_keeps_error() {
     assert_eq!(build_child_result(&outcome, &[]), "task failed: boom");
 }
 
+#[test]
+fn test_build_child_result_max_turns_includes_salvaged_text() {
+    // The cap's grace turn (agent-base turn_loop) lands the report as
+    // trailing text; the parent must receive it beside the honest
+    // "max turns exceeded" label — not a bare summary that discards it
+    // (2026-11-21 incident: two reviewers delivered zero findings).
+    let events = vec![
+        tool_started("read_file"),
+        text_delta("wire.rs races with the tick thread.", None),
+    ];
+    let out = build_child_result(&RunOutcome::MaxTurnsExceeded { turns: 33 }, &events);
+    assert!(out.contains("max turns exceeded"), "got: {out}");
+    assert!(out.contains("33 turns"), "got: {out}");
+    assert!(
+        out.contains("wire.rs races"),
+        "salvage must ride along, got: {out}"
+    );
+}
+
+#[test]
+fn test_build_child_result_max_turns_without_text_keeps_summary() {
+    // No salvage (the grace call failed or returned empty) → the coarse
+    // summary alone, unchanged.
+    let out = build_child_result(&RunOutcome::MaxTurnsExceeded { turns: 33 }, &[]);
+    assert_eq!(out, "max turns exceeded (33 turns)");
+}
+
 // ── collect_denied_tools ──
 
 fn tool_finished(tool_name: &str, denied: bool) -> agent_base::RuntimeEvent {

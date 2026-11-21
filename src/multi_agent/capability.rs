@@ -347,7 +347,7 @@ mod tests {
             res.degraded_reason.is_none(),
             "a read-only request never degrades"
         );
-        assert_eq!(res.max_turns, Some(32));
+        assert_eq!(res.max_turns, Some(64));
     }
 
     #[test]

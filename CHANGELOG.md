@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-22
+
+### Fixed
+- **A child that hits the turn cap hands its findings to the parent.** The
+  child's result was built from a coarse summary, so a run stopped at the
+  cap delivered "max turns exceeded (33 turns)" and nothing else — the
+  report the child had already written was thrown away with the run. The
+  capped result now carries the child's salvaged report alongside the
+  honest cap label, so the parent receives what was found.
+
+- **The memory root never degrades to a relative path.** When no home
+  directory can be resolved, the store used to fall back to `.` — silently
+  writing the user's memory tree into whatever directory the process
+  happened to start in. It now warns and falls back to the system temp
+  directory, which is absolute and visible.
+
+### Changed
+- **Read-only children get the same turn budget as the writing ones.** The
+  researcher and reviewer presets ran on a 32-turn budget while coder and
+  tester got more — backwards, because a review spends its turns
+  exploring rather than editing. All four presets now run on 64 turns.
+
+- **A child nearing its budget is told to wrap up.** Every child mounts a
+  wrap-up nudge as it approaches the cap (the threshold scales with the
+  budget), asking it to stop exploring and write its answer down. The
+  engine's synthesis turn at the cap remains the hard backstop.
+
+- **Tests run on every release platform.** CI builds and runs the test
+  suite on Linux, macOS and Windows instead of Linux alone. A new
+  `platform-gate` job rejects hand-rolled `HOME` / `USERPROFILE`
+  environment lookups; home resolution goes through `dirs::home_dir()`.
+
 ## [0.16.0] - 2026-11-20
 
 ### Added

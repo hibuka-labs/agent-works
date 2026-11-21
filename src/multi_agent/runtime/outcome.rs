@@ -121,6 +121,17 @@ pub(super) fn build_child_result(outcome: &RunOutcome, events: &[RuntimeEvent]) 
                 text
             }
         }
+        // A capped run ends with the engine's grace synthesis turn (agent-base
+        // turn_loop): its report rides along with the honest "max turns
+        // exceeded" label instead of being discarded with the run.
+        RunOutcome::MaxTurnsExceeded { .. } => {
+            let text = extract_last_assistant_message(events);
+            if text.trim().is_empty() {
+                summarize_outcome(outcome)
+            } else {
+                format!("{}\n\n{}", summarize_outcome(outcome), text)
+            }
+        }
         _ => summarize_outcome(outcome),
     }
 }

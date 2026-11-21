@@ -150,13 +150,7 @@ impl AgentPath {
 fn sanitize_segment(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| {
-            if c == '/' || c.is_control() {
-                '_'
-            } else {
-                c
-            }
-        })
+        .map(|c| if c == '/' || c.is_control() { '_' } else { c })
         .collect();
     if cleaned.is_empty() {
         "_".to_string()

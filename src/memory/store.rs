@@ -72,7 +72,10 @@ impl MemoryConfig {
     /// from the workspace path (same algorithm as Claude Code), so both tools
     /// share one memory directory.
     pub fn claude_compatible(workspace: &Path) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = dirs::home_dir().unwrap_or_else(|| {
+            tracing::warn!("home directory not found; memory root falls back to temp dir");
+            std::env::temp_dir()
+        });
         Self::custom(
             home.join(".claude")
                 .join("projects")

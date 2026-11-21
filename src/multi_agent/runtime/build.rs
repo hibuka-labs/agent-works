@@ -10,7 +10,16 @@
 
 use super::*;
 use crate::multi_agent::capability::{self, CapabilityResolution, ChildToolCapability};
+use agent_base::engine::max_turns_nudge::{MaxTurnsNudgeConfig, MaxTurnsNudgeMiddleware};
 use agent_base::{ApprovalDecision, ApprovalRequest};
+
+/// Wrap-up nudge for children approaching their turn cap: without it a child
+/// keeps exploring until the wall (2026-11-21: two reviewers died at 33 turns
+/// mid-exploration with zero findings delivered). Mounted for every child;
+/// the engine's grace synthesis turn at the cap is the hard-stop backstop.
+const CHILD_WRAP_UP_NUDGE: &str = "You have nearly exhausted your turn budget. \
+    Stop all tool calls immediately and provide your final answer now: \
+    report your findings so far and note anything you did not get to.";
 
 /// D4 (design 2026-09-19): the sub-agent's approval-request wrapper — fills in
 /// the requester identity before delegating to the parent handler (fills only
@@ -166,9 +175,18 @@ impl MultiAgentRuntime {
         // default — i.e. the pre-config behaviour.
         // The preset's max_turns takes priority; when the spawn carries no
         // preset, fall back to `ChildConfig`.
-        if let Some(max_turns) = resolution.max_turns.or(config.max_turns) {
+        let max_turns = resolution.max_turns.or(config.max_turns);
+        if let Some(max_turns) = max_turns {
             builder = builder.execution_max_turns(max_turns);
         }
+        // Turn-budget wrap-up nudge (threshold proportional to the budget so
+        // tiny budgets are not nudged from turn one; 3 is enough runway for a
+        // write-up on any real budget).
+        let nudge_threshold = max_turns.map(|m| (m / 8).clamp(1, 3)).unwrap_or(3);
+        builder = builder.middleware(MaxTurnsNudgeMiddleware::new(MaxTurnsNudgeConfig {
+            threshold: nudge_threshold,
+            message: CHILD_WRAP_UP_NUDGE.to_string(),
+        }));
         if let Some(context_window) = config.context_window {
             builder = builder.context_window(context_window);
         }

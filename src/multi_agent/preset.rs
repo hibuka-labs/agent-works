@@ -60,7 +60,7 @@ impl ChildPreset {
                         .into(),
                 ),
                 tool_names: Some(tools(&[tool::READ_FILE, tool::LIST_FILES])),
-                max_turns: Some(32),
+                max_turns: Some(64),
                 ..Default::default()
             },
         }
@@ -102,7 +102,7 @@ impl ChildPreset {
                         .into(),
                 ),
                 tool_names: Some(tools(&[tool::READ_FILE, tool::LIST_FILES])),
-                max_turns: Some(32),
+                max_turns: Some(64),
                 ..Default::default()
             },
         }
@@ -317,5 +317,16 @@ mod tests {
         // Unset fields stay inherit.
         assert!(p.config.context_window.is_none());
         assert!(p.config.full_permission.is_none());
+    }
+
+    #[test]
+    fn read_only_presets_budget_matches_writing_presets() {
+        // Read-only review/research burns turns on exploration, not edits —
+        // its budget must not sit below coder/tester (2026-11-21: two
+        // researcher children died at the 32-turn wall mid-review).
+        assert_eq!(ChildPreset::researcher().config.max_turns, Some(64));
+        assert_eq!(ChildPreset::reviewer().config.max_turns, Some(64));
+        assert_eq!(ChildPreset::coder().config.max_turns, Some(64));
+        assert_eq!(ChildPreset::tester().config.max_turns, Some(64));
     }
 }

@@ -320,5 +320,6 @@ mod fork;
 mod lifecycle;
 mod outcome;
 mod permission;
+mod turn_budget;
 mod whitelist;
 mod write_gate;
