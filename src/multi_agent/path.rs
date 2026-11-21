@@ -49,6 +49,11 @@ impl AgentPath {
 
     /// Create a child path by appending a segment.
     ///
+    /// The name is sanitized so that `to_string()` always round-trips through
+    /// `parse()`: `/` and control characters inside a name would otherwise
+    /// split it into extra segments on parse, silently breaking mailbox lookups
+    /// by string (e.g. a model-supplied name like `foo</parameter>`).
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -60,7 +65,7 @@ impl AgentPath {
     /// ```
     pub fn join(&self, name: &str) -> Self {
         let mut segments = self.segments.clone();
-        segments.push(name.to_string());
+        segments.push(sanitize_segment(name));
         Self { segments }
     }
 
@@ -134,6 +139,29 @@ impl AgentPath {
     /// Returns the segments of this path.
     pub fn segments(&self) -> &[String] {
         &self.segments
+    }
+}
+
+/// Normalize a single path segment so `Display`/`parse` round-trips.
+///
+/// Path separators and control characters are replaced (empty names become
+/// `_`) instead of being rejected: names arrive from model tool arguments, and
+/// failing a whole spawn over a stray tag is worse than keeping it addressable.
+fn sanitize_segment(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c == '/' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -221,6 +249,24 @@ mod tests {
         assert!("not-root/a".parse::<AgentPath>().is_err()); // doesn't start with root
         assert!("root/".parse::<AgentPath>().is_err()); // trailing empty
         assert!("root//a".parse::<AgentPath>().is_err()); // empty middle segment
+    }
+
+    #[test]
+    fn join_sanitizes_unparseable_names() {
+        // A model-supplied name polluted by leaked XML markup used to register
+        // as one segment but parse back as several, so mailbox lookups by
+        // string missed and task delivery failed.
+        let child = AgentPath::root().join("analyze-phi-tui</parameter></function>");
+        let reparsed = AgentPath::parse(&child.to_string()).unwrap();
+        assert_eq!(reparsed, child);
+        assert_eq!(reparsed.depth(), 1);
+        assert!(!reparsed.name().contains('/'));
+    }
+
+    #[test]
+    fn join_empty_name_roundtrips() {
+        let child = AgentPath::root().join("");
+        assert_eq!(AgentPath::parse(&child.to_string()).unwrap(), child);
     }
 
     #[test]
