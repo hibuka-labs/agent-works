@@ -66,8 +66,8 @@ fn driver_bin() -> String {
     if let Ok(d) = std::env::var("CUA_DRIVER_BIN") {
         return d;
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = Path::new(&home).join(".local/bin/cua-driver-local");
+    let home = dirs::home_dir().unwrap_or_default();
+    let local = home.join(".local/bin/cua-driver-local");
     if local.exists() {
         return local.display().to_string();
     }
