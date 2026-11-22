@@ -437,10 +437,34 @@ mod unix_exec {
 
 #[tokio::test]
 async fn provider_lists_scripts_and_rejects_foreign_keys() {
+    // The provider really executes the script, so it has to exist on every
+    // platform. `_dir` keeps the temp directory alive for the whole test.
+    let _dir = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     let entry = entry(&["/bin/echo", "hi"]);
+    // On Windows a bare `/bin/echo` is not an absolute path (the path law
+    // rejects it), so drive a real `.cmd` through the shell interpreter —
+    // an interpreter's script argument has to be absolute.
     #[cfg(windows)]
-    let entry = entry(&[r"C:\Windows\System32\cmd.exe", "/c", r"C:\proj\deploy.cmd"]);
+    let entry = {
+        let script = _dir.path().join("deploy.cmd");
+        std::fs::write(&script, "@echo deployed\n").unwrap();
+        // COMSPEC is the shell's own absolute path; fall back to
+        // %SystemRoot%\System32\cmd.exe so the program stays absolute.
+        let comspec = std::env::var("COMSPEC")
+            .ok()
+            .filter(|p| std::path::Path::new(p).is_absolute())
+            .unwrap_or_else(|| {
+                let root =
+                    std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+                std::path::PathBuf::from(root)
+                    .join("System32")
+                    .join("cmd.exe")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        entry(&[comspec.as_str(), "/c", script.to_str().unwrap()])
+    };
 
     let provider = ScriptProvider::new([entry.clone()]);
     let listed = provider.list().await.unwrap();
@@ -482,7 +506,10 @@ async fn provider_health_detects_gone_script() {
 
 #[tokio::test]
 async fn script_tool_plugs_into_tool_table() {
-    let entry = entry(&["/bin/echo", "hi"]);
+    // The path law wants an absolute program; this tool is never executed
+    // here (the table wiring is what is under test).
+    let program = abs("echo");
+    let entry = entry(&[program.as_str(), "hi"]);
     let tool = ScriptTool::new(entry.clone());
     assert_eq!(tool.name(), "script.deploy");
     assert_eq!(tool.timeout_ms(), Some(DEFAULT_TIMEOUT_MS));

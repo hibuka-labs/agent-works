@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.16.1] - 2026-11-22
 
 ### Fixed
+- **A WASM plugin can read its pinned directory on Windows.** A wasip2
+  guest matches a request against the preopen list by path components, and
+  only `/` separates components — a backslash is an ordinary character in
+  a component name. A Windows path (`C:\dir\file`) therefore arrived at
+  the guest as a single component and could never match the preopen
+  `C:\dir`, so the guest answered "No such file or directory" for a file
+  the host had opened successfully. The pinned path and the tool arguments
+  that point into it are now respelled with the WASI separator before they
+  reach the guest. The capability boundary does not move: the preopen set
+  is still the boundary, and a path outside it is still denied.
+
 - **A child that hits the turn cap hands its findings to the parent.** The
   child's result was built from a coarse summary, so a run stopped at the
   cap delivered "max turns exceeded (33 turns)" and nothing else — the

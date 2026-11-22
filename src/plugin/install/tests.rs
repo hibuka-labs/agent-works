@@ -79,9 +79,14 @@ async fn plan_then_commit_installs_and_pins() {
         .iter()
         .find(|t| t.identity == "plugin.my-tools.deploy")
         .unwrap();
+    // Component-wise join: the production path is re-pushed through
+    // `Path::components()`, so the separator is the platform's (`\` on
+    // Windows). Joining the whole relative path in one call would keep the
+    // literal `/` and never match.
     let run_abs = plugins_root
         .join("my-tools")
-        .join("scripts/deploy.sh")
+        .join("scripts")
+        .join("deploy.sh")
         .to_string_lossy()
         .into_owned();
     assert_eq!(deploy.summary, format!("{run_abs} --env ${{env}}"));
@@ -352,7 +357,10 @@ fn pin_server_argv_pins_paths_keeps_interpreters() {
     assert_eq!(pinned[0], "python", "bare-name interpreter kept as-is");
     assert_eq!(
         pinned[1],
-        root.join("server/main.py").to_string_lossy().into_owned(),
+        root.join("server")
+            .join("main.py")
+            .to_string_lossy()
+            .into_owned(),
         "in-package relative path pinned absolute"
     );
     assert!(

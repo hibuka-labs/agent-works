@@ -860,8 +860,11 @@ mod tests {
         // script: the execution summary = the pinned argv (absolute paths).
         let script = &digest.tools[1];
         assert_eq!(script.identity, "plugin.my-tools.deploy");
+        // Component-wise join (the platform separator wins — see the
+        // install-side twin of this assertion).
         let run_abs = root
-            .join("scripts/deploy.sh")
+            .join("scripts")
+            .join("deploy.sh")
             .to_string_lossy()
             .into_owned();
         assert_eq!(script.summary, format!("{run_abs} --env ${{env}}"));

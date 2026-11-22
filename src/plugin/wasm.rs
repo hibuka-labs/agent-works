@@ -231,9 +231,15 @@ impl WasmRuntime {
 
         // When the exported interface comes from package `phi:tool`, the accessor name
         // carries the package-name prefix (bindgen naming).
+        //
+        // The args reach the guest in the guest's spelling: on Windows a path inside an
+        // authorized directory is respelled with the WASI separator, because a wasip2 guest
+        // cannot resolve a backslash path at all (it would answer "No such file or
+        // directory" for a file the host preopened).
+        let args = translate_args_for_guest(call.args_json, call.capabilities, cfg!(windows));
         let result = bindings
             .phi_tool_executor()
-            .call_invoke(&mut store, call.tool, call.args_json)
+            .call_invoke(&mut store, call.tool, &args)
             .await;
 
         match result {
@@ -271,6 +277,123 @@ fn classify_host_error(e: wasmtime::Error) -> WasmError {
 
 // ── Host state and capability tightening ────────────────────────────────────
 
+/// The guest-visible spelling of a pinned path.
+///
+/// A WASI guest matches a request against the preopen list by **path components**, and only `/`
+/// separates components — a backslash is an ordinary character in a component name. So the
+/// Windows spelling `C:\dir\file` arrives at the guest as one component named `C:\dir\file` and
+/// never matches the preopen `C:\dir`; the guest answers `No such file or directory` even
+/// though the host opened the directory fine. Spelling both sides with `/` (`C:/dir`) lines the
+/// components up.
+///
+/// Unix paths are already `/`-separated, and a backslash is a legal character in a Unix file
+/// name — so only the Windows spelling is respelled.
+fn wasi_guest_path(path: &str) -> String {
+    guest_path_for(path, cfg!(windows))
+}
+
+/// [`wasi_guest_path`] with the platform's separator behavior chosen explicitly (so the
+/// Windows shape is testable from any platform).
+fn guest_path_for(path: &str, windows: bool) -> String {
+    if windows {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Translate the tool args into the guest's spelling: every path that points into an
+/// authorized directory is respelled with the WASI separator.
+///
+/// The host's filesystem namespace is the native one; the guest's is WASI's. On Windows the two
+/// differ (`C:\dir\file` vs `C:/dir/file`), and a guest cannot resolve a backslash path **at
+/// all** — so without this the tool fails with `No such file or directory` even though the host
+/// preopened the directory. The capability boundary does not move: the preopen set is still the
+/// boundary, and a path outside it is still denied.
+///
+/// `windows` selects the platform's separator behavior (the Windows shape is testable from any
+/// platform).
+fn translate_args_for_guest(
+    args_json: &str,
+    capabilities: &[ResolvedCapability],
+    windows: bool,
+) -> String {
+    let pinned: Vec<(String, String)> = capabilities
+        .iter()
+        .filter_map(|c| match c {
+            ResolvedCapability::FsRead { paths } => Some(paths),
+            _ => None,
+        })
+        .flatten()
+        .map(|p| (p.clone(), guest_path_for(p, windows)))
+        .collect();
+    if pinned.is_empty() {
+        return args_json.to_string();
+    }
+
+    // A path under an authorized directory, respelled for the guest.
+    let rewrite = |s: &str| -> Option<String> {
+        for (native, guest) in &pinned {
+            if native == guest {
+                continue; // unix spelling: nothing to translate
+            }
+            // Textual prefix match, but only on a component boundary: `C:\dir` must not
+            // claim `C:\dirty\file`.
+            let (head, rest) = match s.strip_prefix(native.as_str()) {
+                Some(rest) if rest.is_empty() => (guest.as_str(), rest),
+                Some(rest) if rest.starts_with('\\') || rest.starts_with('/') => {
+                    (guest.as_str(), rest)
+                }
+                Some(_) => continue,
+                None => match s.strip_prefix(guest.as_str()) {
+                    Some(rest) if rest.is_empty() => (guest.as_str(), rest),
+                    Some(rest) if rest.starts_with('/') => (guest.as_str(), rest),
+                    Some(_) => continue,
+                    None => continue,
+                },
+            };
+            let rest = if windows {
+                rest.replace('\\', "/")
+            } else {
+                rest.to_string()
+            };
+            return Some(format!("{head}{rest}"));
+        }
+        None
+    };
+
+    // The production shape: JSON args (the host validates them against the parameter schema).
+    if let Ok(value) = serde_json::from_str::<Value>(args_json) {
+        let rewritten = rewrite_value(value.clone(), &rewrite);
+        // Nothing to translate → hand back the original text (no reformatting).
+        if rewritten == value {
+            return args_json.to_string();
+        }
+        return serde_json::to_string(&rewritten).unwrap_or_else(|_| args_json.to_string());
+    }
+    // The bare-path shape (the test fixture reads its args as a path, not as JSON).
+    rewrite(args_json).unwrap_or_else(|| args_json.to_string())
+}
+
+/// Apply [`rewrite`] to every string in a JSON value.
+fn rewrite_value(value: Value, rewrite: &impl Fn(&str) -> Option<String>) -> Value {
+    match value {
+        Value::String(s) => rewrite(&s).map(Value::String).unwrap_or(Value::String(s)),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| rewrite_value(v, rewrite))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, rewrite_value(v, rewrite)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
@@ -291,9 +414,14 @@ impl HostState {
         for cap in capabilities {
             if let ResolvedCapability::FsRead { paths } = cap {
                 for path in paths {
-                    // guest name = pinned absolute path: this is the name authorized in the model/manifest.
+                    // The guest-visible name is the pinned absolute path, but spelled the way a
+                    // WASI guest parses it: only `/` separates components. A Windows path
+                    // (`C:\dir\file`) reaches a wasip2 guest as ONE component and can never match
+                    // a preopen — the guest sees the preopen list by component, so the name has to
+                    // be slash-separated (`C:/dir`). The host side keeps the native spelling.
+                    let guest_name = wasi_guest_path(path);
                     builder
-                        .preopened_dir(path, path.as_str(), FsPerms::ReadOnly)
+                        .preopened_dir(path, &guest_name, FsPerms::ReadOnly)
                         .map_err(|e| WasmError::Host(format!("preopen {path}: {e}")))?;
                 }
             }
@@ -739,6 +867,59 @@ mod tests {
         // Cannot read outside the directory (the preopen boundary is the capability boundary)
         let err = read(outside).await.expect_err("outside preopen");
         assert!(matches!(err, WasmError::Guest(_)), "{err}");
+    }
+
+    // ── Guest path spelling (the WASI separator) ──────────────────────────
+
+    #[test]
+    fn windows_paths_reach_the_guest_with_the_wasi_separator() {
+        // The guest matches a request against the preopen list by components, and only `/`
+        // separates components — a backslash path can never match.
+        assert_eq!(guest_path_for(r"C:\data", true), "C:/data");
+        assert_eq!(guest_path_for(r"C:\a\b\c.txt", true), "C:/a/b/c.txt");
+        // Unix paths keep their spelling: a backslash is a legal character in a Unix file name.
+        assert_eq!(guest_path_for("/data", false), "/data");
+        assert_eq!(guest_path_for(r"/data\weird", false), r"/data\weird");
+    }
+
+    #[test]
+    fn args_are_translated_into_the_guest_spelling() {
+        let caps = vec![ResolvedCapability::FsRead {
+            paths: vec![r"C:\data".to_string()],
+        }];
+
+        // A bare path (the fixture reads its args as a path).
+        let out = translate_args_for_guest(r"C:\data\ok.txt", &caps, true);
+        assert_eq!(out, "C:/data/ok.txt");
+
+        // A path inside the authorized directory, in JSON args.
+        // (JSON escapes the backslash: `C:\\data\\ok.txt` is the JSON text for `C:\data\ok.txt`.)
+        let out = translate_args_for_guest(r#"{"path":"C:\\data\\ok.txt"}"#, &caps, true);
+        assert_eq!(out, r#"{"path":"C:/data/ok.txt"}"#);
+
+        // A path outside the authorized directory is NOT respelled — the preopen boundary is
+        // the capability boundary, and the guest must see the path it was given.
+        let out = translate_args_for_guest(r"C:\other\ok.txt", &caps, true);
+        assert_eq!(out, r"C:\other\ok.txt");
+
+        // A sibling directory whose name merely starts with the pinned one is not claimed.
+        let out = translate_args_for_guest(r"C:\data2\ok.txt", &caps, true);
+        assert_eq!(out, r"C:\data2\ok.txt");
+    }
+
+    #[test]
+    fn unix_args_are_untouched() {
+        let caps = vec![ResolvedCapability::FsRead {
+            paths: vec!["/data".to_string()],
+        }];
+        let out = translate_args_for_guest(r#"{"path":"/data/ok.txt"}"#, &caps, false);
+        assert_eq!(out, r#"{"path":"/data/ok.txt"}"#);
+    }
+
+    #[test]
+    fn args_without_fs_capability_are_untouched() {
+        let out = translate_args_for_guest(r#"{"path":"C:\data\ok.txt"}"#, &[], true);
+        assert_eq!(out, r#"{"path":"C:\data\ok.txt"}"#);
     }
 
     #[tokio::test]
