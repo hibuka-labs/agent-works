@@ -13,6 +13,18 @@ fn abs(rel: &str) -> PathBuf {
     std::env::current_dir().unwrap().join(rel)
 }
 
+/// Whether a path ends with the given trailing components, whatever the
+/// platform's separator is (production pushes pinned paths through
+/// `Path::components()`, so the separator is the platform's).
+fn path_ends_with(path: &str, tail: &[&str]) -> bool {
+    let comps: Vec<_> = Path::new(path).components().collect();
+    comps.len() >= tail.len()
+        && comps[comps.len() - tail.len()..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .eq(tail.iter().map(|s| s.to_string()))
+}
+
 /// Write a script and set the executable bit (unix) — the install law
 /// requires directly-executed `run[0]` to be executable.
 fn write_script(path: &Path, contents: &str) {
@@ -120,7 +132,10 @@ async fn plan_then_commit_installs_and_pins() {
         ToolPin::Mcp { env, command: Some(cmd), .. }
             if env.get("WIKI_TOKEN").map(String::as_str) == Some("${ENV:WIKI_TOKEN}")
                 && cmd[0] == "python"
-                && cmd[1].ends_with("server/main.py")
+                // The pinned path is spelled with the platform's separator
+                // (production pushes it through `Path::components()`), so the
+                // tail is asserted component-wise, not as a literal string.
+                && path_ends_with(&cmd[1], &["server", "main.py"])
                 && Path::new(&cmd[1]).is_absolute()
     ));
     assert_eq!(
