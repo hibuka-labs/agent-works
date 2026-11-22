@@ -40,7 +40,7 @@ full = ["mcp", "skill", "cli", "prompt_skill", "yaml_skill", "hot-reload", "focu
 fuzzing = ["mcp", "skill", "prompt_skill", "multi_agent"]
 
 [dependencies]
-agent-base = { version = "0.16.0" }
+agent-base = { version = "0.16.1" }
 # Shared capability vocabulary (phi-cap): one set of types for every shape
 # that declares capabilities — plugins and capability packs alike.
 phi-cap = { version = "0.1.0", features = ["serde"] }
@@ -94,6 +94,7 @@ libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+dirs = "5"
 anyhow = "1"
 tempfile = "3"
 serial_test = "3"

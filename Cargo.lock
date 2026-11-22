@@ -19,9 +19,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-base"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5da1c5e657de9d2f43001904c74344e461004fa60d638af017b9eb07082e3df"
+checksum = "c69830f07f2b353d1593f6029fd2d2654aa8c629e8190c562079eb33075d901e"
 dependencies = [
  "agent-types",
  "anyhow",
