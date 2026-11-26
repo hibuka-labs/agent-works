@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::memory::MemoryStore;
+use crate::memory::{MemoryStore, WriteOutcome};
 use crate::tools::session_ref;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,27 +97,28 @@ impl Tool for MemoryWriteTool {
                 raw: format!("{args}: {e}"),
             })?;
 
-        // Probe the index before writing so the confirmation can say whether
-        // this call created a new memory or updated an existing one.
-        let existed_before = self
-            .store
-            .read_index()
-            .contains(&format!("({}.md)", parsed.name));
-        self.store.write_memory(
+        match self.store.write_memory(
             &parsed.name,
             &parsed.description,
             &parsed.memory_type,
             &parsed.body,
             Some(&session_ref(ctx)),
-        )?;
-
-        let created_or_updated = if existed_before { "updated" } else { "created" };
-        let path = self.store.memory_root().join(format!("{}.md", parsed.name));
-        Ok(vec![Content::text(format!(
-            "Memory `{}` {created_or_updated} at {} and the index was synced.",
-            parsed.name,
-            path.display()
-        ))])
+        )? {
+            // A limit refused the write: surface the five-field failure contract
+            // as the tool result (design §6 wire shape), so the model reads the
+            // rule, the actual value, and a `candidate` it can retry with in one
+            // shot. This is an expected, self-explanatory rejection — not a fault.
+            WriteOutcome::Rejected(rej) => Ok(vec![Content::text(rej.to_wire())]),
+            WriteOutcome::Written { created } => {
+                let created_or_updated = if created { "created" } else { "updated" };
+                let path = self.store.memory_root().join(format!("{}.md", parsed.name));
+                Ok(vec![Content::text(format!(
+                    "Memory `{}` {created_or_updated} at {} and the index was synced.",
+                    parsed.name,
+                    path.display()
+                ))])
+            }
+        }
     }
 }
 
@@ -290,5 +291,57 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(variants, vec!["user", "feedback", "project", "reference"]);
+    }
+
+    /// Value: protects=the wire failure contract the model reads — a limit
+    /// rejection comes back as the `{"ok": false, rule, limit, actual, fix,
+    /// candidate}` tool result (not a bare fault), so the model sees all five
+    /// fields and can retry with `candidate` in one shot; fails_when=the
+    /// rejection is flattened into an opaque error string, or the candidate is
+    /// missing/unusable so the retry bounces.
+    /// no_claim=that the model will use the candidate — only that it is offered
+    /// and that it passes when used.
+    #[tokio::test]
+    async fn a_limit_rejection_returns_the_five_field_contract_and_the_candidate_retries_ok() {
+        let (_dir, store) = temp_store();
+        let t = tool(&store);
+        let ctx = ToolContext::for_test();
+        let long_hook = "h".repeat(141);
+
+        // Reject: the tool result is the `ok: false` contract.
+        let out = t
+            .call(
+                &json!({"name": "big", "description": long_hook, "type": "project", "body": "b"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text = crate::tools::test_support::first_text(&out);
+        let wire: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+            panic!("rejection must be the JSON wire shape, got {text}: {e}");
+        });
+        assert_eq!(wire["ok"], false, "{text}");
+        for key in ["rule", "limit", "actual", "fix", "candidate"] {
+            assert!(wire.get(key).is_some(), "contract missing `{key}`: {text}");
+        }
+        assert_eq!(wire["rule"], "hook_max_chars", "{text}");
+        assert_eq!(wire["limit"], 80, "{text}");
+        assert_eq!(wire["actual"], 141, "{text}");
+        let candidate = wire["candidate"].as_str().unwrap().to_string();
+        assert!(!candidate.is_empty(), "{text}");
+
+        // Retry with the candidate → created.
+        let out2 = t
+            .call(
+                &json!({"name": "big", "description": candidate, "type": "project", "body": "b"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text2 = crate::tools::test_support::first_text(&out2);
+        assert!(
+            text2.contains("created"),
+            "candidate retry must pass: {text2}"
+        );
     }
 }

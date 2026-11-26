@@ -1,7 +1,10 @@
-//! `memory_list`: return the current MEMORY.md index.
+//! `memory_list`: return the memory index, rebuilt from disk.
 //!
-//! The startup prompt carries an index *snapshot*; this tool is the refresh
-//! path for memories written after startup (by this session or Claude Code).
+//! The listing is a fresh truth projection (design §4) — rows are derived from
+//! the `<name>.md` files' frontmatter, so it never shows a dangling row or a
+//! hand-edited tail. The startup prompt may carry a stale snapshot; this tool
+//! is the refresh path for memories written after startup (by this session or
+//! Claude Code).
 
 use std::sync::Arc;
 
@@ -58,7 +61,7 @@ impl Tool for MemoryListTool {
     }
 
     async fn call(&self, args: &Value, ctx: &ToolContext) -> AgentResult<Vec<Content>> {
-        let index = self.store.read_index();
+        let index = self.store.render_index()?;
         let trimmed = index.trim();
         if trimmed.is_empty() {
             return Ok(vec![Content::text(

@@ -34,9 +34,10 @@ impl AgentBuilder {
             return self;
         };
 
-        let store = Arc::new(MemoryStore::new(
+        let store = Arc::new(MemoryStore::with_limits(
             config.memory_root.clone(),
             config.index_filename.clone(),
+            config.limits.clone(),
         ));
 
         // Register the memory tools unless the consumer already took the name.
@@ -51,12 +52,19 @@ impl AgentBuilder {
         }
 
         // Inject the index snapshot + tool guidance into the system prompt.
-        let index = store.read_index();
-        if index.len() > 10_240 {
+        // The snapshot is rebuilt from disk (the source of truth, design §4),
+        // not read from a possibly-stale MEMORY.md; on a rebuild IO error fall
+        // back to the raw snapshot rather than losing the index silently.
+        let index = store.render_index().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "memory index rebuild failed; using the raw MEMORY.md snapshot");
+            store.read_index()
+        });
+        if index.len() > config.limits.index_max_bytes {
             tracing::warn!(
                 index_bytes = index.len(),
+                limit = config.limits.index_max_bytes,
                 root = %config.memory_root.display(),
-                "memory index is unusually large (>10KB); consider cleaning up stale memories"
+                "memory index is unusually large (over the configured max); consider cleaning up stale memories"
             );
         }
         let mem_prompt = build_memory_system_prompt_with_config(&config, &index);

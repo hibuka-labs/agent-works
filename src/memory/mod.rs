@@ -50,15 +50,17 @@ mod naming;
 mod store;
 
 pub use frontmatter::{
-    MemoryDoc, MemoryFrontmatter, MemoryFrontmatterMetadata, parse_memory_file, parse_memory_str,
-    render_memory_file,
+    EntryFields, MemoryDoc, MemoryFrontmatter, MemoryFrontmatterMetadata, parse_memory_file,
+    parse_memory_str, render_memory_file, render_memory_file_with_entry,
 };
-pub use index::rebuild_index;
-pub(crate) use index::{index_add, index_remove};
+pub use index::{index_add, index_remove, rebuild_index, render_index_from_disk};
 pub(crate) use io::atomic_write;
 pub use io::now_iso8601;
 pub use naming::{is_valid_memory_name, project_slug, validate_memory_name, validate_memory_type};
-pub use store::{CLAUDE_COMPATIBLE_TEMPLATE, MemoryConfig, MemoryListEntry, MemoryStore};
+pub use store::{
+    CLAUDE_COMPATIBLE_TEMPLATE, LimitRejection, MemoryConfig, MemoryLimits, MemoryListEntry,
+    MemoryStore, WriteOutcome,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests (modules 1 & 2)

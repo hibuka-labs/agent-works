@@ -232,6 +232,11 @@ fn frontmatter_serde_keys_match_merge_upsert_names() {
             memory_type: "project".to_string(),
             origin_session_id: Some("s".to_string()),
             modified: Some("m".to_string()),
+            decay: Some("slow".to_string()),
+            pinned: Some(true),
+            expires_at: Some("2027-01-01T00:00:00.000Z".to_string()),
+            last_recalled_at: Some("r".to_string()),
+            archived_at: Some("a".to_string()),
         }),
     };
     let yaml = serde_yaml::to_string(&fm).unwrap();
@@ -243,6 +248,11 @@ fn frontmatter_serde_keys_match_merge_upsert_names() {
         "type:",
         "originSessionId:",
         "modified:",
+        "decay:",
+        "pinned:",
+        "expires_at:",
+        "last_recalled_at:",
+        "archived_at:",
     ] {
         assert!(yaml.contains(key), "serde must emit `{key}`:\n{yaml}");
     }

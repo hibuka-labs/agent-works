@@ -215,6 +215,95 @@ fn list_memories_includes_claude_code_format_files() {
     drop(dir);
 }
 
+// ── frontmatter lifecycle fields (design §4) ──
+
+/// Value: protects=the lifecycle-field extension round-tripping through write
+/// and parse — decay / pinned / expires_at set at write time land in the file
+/// and come back; fails_when=the fields are dropped on write or read.
+/// no_claim=that aging acts on them (that is P2); this is the format contract.
+#[test]
+fn lifecycle_fields_round_trip_through_write_and_parse() {
+    let (dir, root) = tmp_root();
+    let store = MemoryStore::new(root.clone(), "MEMORY.md");
+    let entry = EntryFields {
+        decay: Some("fast".to_string()),
+        pinned: Some(true),
+        expires_at: Some("2027-01-01T00:00:00.000Z".to_string()),
+    };
+    store
+        .write_memory_entry("life", "d", "project", "b", None, &entry)
+        .unwrap();
+    let raw = std::fs::read_to_string(root.join("life.md")).unwrap();
+    let doc = parse_memory_str(&raw).unwrap();
+    let md = doc.metadata.unwrap();
+    assert_eq!(md.decay.as_deref(), Some("fast"));
+    assert_eq!(md.pinned, Some(true));
+    assert_eq!(md.expires_at.as_deref(), Some("2027-01-01T00:00:00.000Z"));
+    drop(dir);
+}
+
+/// Value: protects=zero migration + Claude Code interop — a file without the
+/// new fields (Claude Code's bare format) still parses with them all `None`, and
+/// a plain write (no lifecycle fields) omits them rather than stamping defaults;
+/// fails_when=a missing field is treated as an error, or a write injects decay /
+/// pinned where none was given. no_claim=that the fields are required anywhere.
+#[test]
+fn lifecycle_fields_are_optional_and_zero_migration() {
+    // A bare Claude Code file (no lifecycle fields) parses with them all None.
+    let doc = parse_memory_str(CC_FORMAT_FILE).unwrap();
+    let md = doc.metadata.unwrap();
+    assert_eq!(md.decay, None);
+    assert_eq!(md.pinned, None);
+    assert_eq!(md.expires_at, None);
+    assert_eq!(md.last_recalled_at, None);
+    assert_eq!(md.archived_at, None);
+
+    // A plain write (default EntryFields) omits the keys entirely.
+    let (dir, root) = tmp_root();
+    let store = MemoryStore::new(root.clone(), "MEMORY.md");
+    store.write_memory("plain", "d", "user", "b", None).unwrap();
+    let raw = std::fs::read_to_string(root.join("plain.md")).unwrap();
+    for key in [
+        "decay:",
+        "pinned:",
+        "expires_at:",
+        "last_recalled_at:",
+        "archived_at:",
+    ] {
+        assert!(
+            !raw.contains(key),
+            "plain write must not stamp `{key}`:\n{raw}"
+        );
+    }
+    drop(dir);
+}
+
+/// Value: protects=the aging-owned fields on update — a write that doesn't
+/// manage lifecycle never clears `last_recalled_at` / `archived_at` the other
+/// writer (or aging) set; fails_when=a plain update wipes recall/aging stamps.
+/// no_claim=the aging semantics of those stamps (P2).
+#[test]
+fn a_plain_update_preserves_the_aging_owned_stamps() {
+    let (dir, root) = tmp_root();
+    let store = MemoryStore::new(root.clone(), "MEMORY.md");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("aged.md"),
+        "---\nname: aged\ndescription: d\nmetadata:\n  node_type: memory\n  type: project\n  last_recalled_at: 2026-06-01T00:00:00.000Z\n  archived_at: 2026-07-01T00:00:00.000Z\n---\n\nbody\n",
+    )
+    .unwrap();
+    store
+        .write_memory("aged", "new d", "project", "new body", None)
+        .unwrap();
+    let raw = std::fs::read_to_string(root.join("aged.md")).unwrap();
+    assert!(
+        raw.contains("last_recalled_at"),
+        "recall stamp dropped:\n{raw}"
+    );
+    assert!(raw.contains("archived_at"), "aging stamp dropped:\n{raw}");
+    drop(dir);
+}
+
 // ── timestamps ──
 
 #[test]
@@ -499,5 +588,8 @@ fn rebuild_index_keeps_rows_for_files_it_cannot_index() {
     drop(dir);
 }
 
+mod grandfather;
+mod limits;
 mod merge;
 mod store;
+mod truth;

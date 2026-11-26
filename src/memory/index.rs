@@ -44,6 +44,18 @@ fn row_link_name(line: &str) -> Option<&str> {
     target.strip_suffix(".md")
 }
 
+/// The `(title, name)` of an index row line, if the line is a row at all. The
+/// title is the `[...]` link text — a human title a foreign writer may have
+/// curated (it lives only in the index, never in a file).
+fn row_parts(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("- [")?;
+    let close = rest.find("](")?;
+    let title = &rest[..close];
+    let target = rest[close + 2..].split(')').next()?;
+    let name = target.strip_suffix(".md")?;
+    Some((title, name))
+}
+
 /// `Some(head)` — everything up to and including `](name.md)` — when `line` is
 /// `name`'s row. The head is preserved byte-identical on refresh so human
 /// titles in the link text survive.
@@ -66,7 +78,7 @@ fn render_index_row(name: &str, desc: &str) -> String {
 ///
 /// Existing rows for other names — including their human titles — are
 /// preserved verbatim.
-pub(crate) fn index_add(
+pub fn index_add(
     memory_root: &Path,
     index_filename: &str,
     name: &str,
@@ -127,11 +139,7 @@ pub(crate) fn index_add(
 }
 
 /// Remove the row for `name` from the index. Other rows are untouched.
-pub(crate) fn index_remove(
-    memory_root: &Path,
-    index_filename: &str,
-    name: &str,
-) -> AgentResult<()> {
+pub fn index_remove(memory_root: &Path, index_filename: &str, name: &str) -> AgentResult<()> {
     fs::create_dir_all(memory_root).map_err(|e| {
         AgentError::internal(format!(
             "failed to create memory dir {}: {e}",
@@ -250,4 +258,104 @@ pub fn rebuild_index(memory_root: &Path, index_filename: &str) -> AgentResult<()
             + "\n"
     };
     atomic_write(&memory_root.join(index_filename), &content)
+}
+
+/// Rebuild the index content from disk — the source of truth (design §4).
+///
+/// This is the truth projection used on every read (`memory_list`, prompt
+/// injection) and regenerated after every write. It is deliberately different
+/// from [`rebuild_index`] (the loss-minimizing repair for a *lost* index):
+///
+/// - **Existence and description come from the file.** A row exists iff its
+///   `.md` file parses, and its `— description` is taken from the file's
+///   frontmatter — so a hand-edited index tail is corrected, never trusted.
+/// - **Title and order come from the prior index.** The `[title]` link text
+///   (often a curated human title written by Claude Code) lives only in the
+///   index and cannot be recovered from a file, so it is carried over; rows
+///   keep their curated order and new files are appended sorted by name.
+/// - **Files that won't parse keep their prior row** rather than being erased
+///   (never destroy what we cannot read); rows whose file is gone are dropped
+///   so no dangling link survives.
+pub fn render_index_from_disk(memory_root: &Path, index_filename: &str) -> AgentResult<String> {
+    fs::create_dir_all(memory_root).map_err(|e| {
+        AgentError::internal(format!(
+            "failed to create memory dir {}: {e}",
+            memory_root.display()
+        ))
+    })?;
+    let index_path = memory_root.join(index_filename);
+    let old_index = match fs::read_to_string(&index_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(AgentError::internal(format!(
+                "failed to read index {}: {e}",
+                index_path.display()
+            )));
+        }
+    };
+    // Prior rows keyed by name: (encounter order, title, full row).
+    let mut prior: std::collections::HashMap<&str, (usize, &str, &str)> =
+        std::collections::HashMap::new();
+    for (pos, line) in old_index.lines().enumerate() {
+        if let Some((title, name)) = row_parts(line) {
+            prior.entry(name).or_insert((pos, title, line));
+        }
+    }
+
+    let mut entries: Vec<(usize, String, String)> = Vec::new(); // (order, name, row)
+    for entry in fs::read_dir(memory_root)? {
+        let path = entry?.path();
+        if path.extension() != Some("md".as_ref())
+            || path.file_name() == Some(index_filename.as_ref())
+        {
+            continue;
+        }
+        let Some(name) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let row = match parse_memory_file(&path) {
+            Ok(doc) if doc.name == name => {
+                // Title: prior curated link text if present, else the name.
+                let title = prior
+                    .get(name.as_str())
+                    .map(|(_, t, _)| *t)
+                    .unwrap_or(&name);
+                format!(
+                    "- [{title}]({name}.md) — {}",
+                    index_line_desc(&doc.description)
+                )
+            }
+            _ => {
+                // Unparseable / name mismatch: keep the prior row verbatim (it
+                // may carry a human title and a curated tail we cannot rederive).
+                match prior.get(name.as_str()) {
+                    Some((_, _, row)) => row.to_string(),
+                    None => {
+                        tracing::warn!(
+                            file = %path.display(),
+                            "skipping unindexable memory file with no existing index row"
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        let order = prior
+            .get(name.as_str())
+            .map(|(pos, _, _)| *pos)
+            .unwrap_or(usize::MAX);
+        entries.push((order, name, row));
+    }
+    entries.sort();
+    Ok(if entries.is_empty() {
+        String::new()
+    } else {
+        entries
+            .into_iter()
+            .map(|(_, _, row)| row)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
 }
