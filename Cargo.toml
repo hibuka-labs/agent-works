@@ -1,6 +1,6 @@
 [package]
 name = "agent-works"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 description = "Batteries-included Agent toolbox built on agent-base"
 license = "MIT OR Apache-2.0"
@@ -150,3 +150,4 @@ required-features = ["mcp"]
 [[example]]
 name = "multi_agent"
 required-features = ["multi_agent"]
+

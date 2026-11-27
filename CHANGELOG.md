@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-27
+
+### Added
+
+- **The write path has limits, and a refusal says what to do.** A write that
+  would blow a cap is rejected with a five-field contract — rule, limit,
+  actual, fix, candidate — so the caller can retry in one shot instead of
+  guessing. The caps cover the entry hook, the entry body, the stored
+  entries, the stored bytes and the index bytes.
+
+- **Frontmatter carries the lifecycle fields.** `decay`, `pinned`,
+  `expires_at`, `last_recalled_at` and `archived_at` are optional, so a file
+  written before them parses unchanged and keeps them across an update.
+
+### Changed
+
+- **The listing is rebuilt from disk.** `memory_list` read the `MEMORY.md`
+  snapshot verbatim, so it could show rows whose files were already gone (or
+  a hand-edited tail). The files on disk are the source of truth now;
+  `MEMORY.md` stays a compatibility snapshot the store regenerates after
+  each write.
+
+- **An overflow rolls the body back.** The index gate is checked against the
+  regenerated content, so a write that would overflow leaves the body
+  unchanged — the account and the matter agree.
+
 ## [0.16.1] - 2026-11-22
 
 ### Fixed
